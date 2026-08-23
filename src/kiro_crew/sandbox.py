@@ -84,6 +84,23 @@ _STRICT_DIRS: list[str] = [
     # ``.vault/.vault_key`` and decrypt the store.
     ".kiro/crew/.vault",
     ".kirocrew/.vault",
+    # The governance trust root and the variable store, hidden in every mode for the
+    # same reason the vault is.
+    #
+    # `security.py` already refuses a bash command that NAMES one of these, but that
+    # gate reads command TEXT: an approved `./script`, `make install` or `npm run
+    # build` is one opaque token to it, and whatever the script writes internally is
+    # never inspected. The path fence stops `echo x > .../security_policy.json` and
+    # does nothing about a script containing that same line. Hiding the paths from the
+    # subprocess tree is the layer that does not depend on the write being spelled out.
+    #
+    # Safe to hide rather than merely deny: nothing in the agent subprocess needs to
+    # read either one. Variable expansion happens in the gateway before the prompt is
+    # built, and the ceiling is deliberately not the agent's to read.
+    ".kiro/crew/variables",
+    ".kirocrew/variables",
+    ".kiro/crew/profiles",
+    ".kirocrew/profiles",
 ]
 
 _STANDARD_DIRS: list[str] = [
@@ -96,6 +113,23 @@ _STANDARD_DIRS: list[str] = [
     # Secret vault — hidden in every mode (see _STRICT_DIRS note above).
     ".kiro/crew/.vault",
     ".kirocrew/.vault",
+    # The governance trust root and the variable store, hidden in every mode for the
+    # same reason the vault is.
+    #
+    # `security.py` already refuses a bash command that NAMES one of these, but that
+    # gate reads command TEXT: an approved `./script`, `make install` or `npm run
+    # build` is one opaque token to it, and whatever the script writes internally is
+    # never inspected. The path fence stops `echo x > .../security_policy.json` and
+    # does nothing about a script containing that same line. Hiding the paths from the
+    # subprocess tree is the layer that does not depend on the write being spelled out.
+    #
+    # Safe to hide rather than merely deny: nothing in the agent subprocess needs to
+    # read either one. Variable expansion happens in the gateway before the prompt is
+    # built, and the ceiling is deliberately not the agent's to read.
+    ".kiro/crew/variables",
+    ".kirocrew/variables",
+    ".kiro/crew/profiles",
+    ".kirocrew/profiles",
 ]
 
 # CC mode: hides all credential dirs including .aws, but selectively exposes
@@ -113,6 +147,23 @@ _CC_DIRS: list[str] = [
     # Secret vault — hidden in every mode (see _STRICT_DIRS note above).
     ".kiro/crew/.vault",
     ".kirocrew/.vault",
+    # The governance trust root and the variable store, hidden in every mode for the
+    # same reason the vault is.
+    #
+    # `security.py` already refuses a bash command that NAMES one of these, but that
+    # gate reads command TEXT: an approved `./script`, `make install` or `npm run
+    # build` is one opaque token to it, and whatever the script writes internally is
+    # never inspected. The path fence stops `echo x > .../security_policy.json` and
+    # does nothing about a script containing that same line. Hiding the paths from the
+    # subprocess tree is the layer that does not depend on the write being spelled out.
+    #
+    # Safe to hide rather than merely deny: nothing in the agent subprocess needs to
+    # read either one. Variable expansion happens in the gateway before the prompt is
+    # built, and the ceiling is deliberately not the agent's to read.
+    ".kiro/crew/variables",
+    ".kirocrew/variables",
+    ".kiro/crew/profiles",
+    ".kirocrew/profiles",
 ]
 
 # CC mode: files to expose read-only inside otherwise-hidden dirs.
@@ -123,6 +174,68 @@ _CC_EXPOSE_FILES: list[str] = [
 
 # CC mode: individual sensitive files that aren't inside the hidden dirs above.
 # These require file-level (not directory-level) sandbox enforcement.
+#: Entry prefixes that name something INSIDE the crew data home, as opposed to
+#: something else under `~`. `.kiro/crew-auth-staging` is deliberately absent: it
+#: sits beside the data home, not within it, so it does not move with it.
+_CREW_HOME_RELATIVE_PREFIXES = (".kiro/crew/", ".kirocrew/")
+
+
+def _unrenamable_containers() -> "list[str]":
+    """The data-home containers themselves — the directories that must not MOVE.
+
+    Distinct from every other list here, which hides CONTENTS. This one protects the
+    directory entry: `mv ~/.kiro/crew /tmp/stash && ln -s /tmp/evil ~/.kiro/crew` leaves
+    every fenced leaf naming a path that is now someone else's, and the next gateway
+    write follows the link. `security.is_unreplaceable_container` refuses that as a
+    COMMAND, but a subprocess is one opaque token to the command gate — `./script.sh`
+    containing those two lines is never inspected — so the sandbox has to carry the
+    same guarantee independently.
+
+    Descendants stay fully accessible: the agent's own `sessions/`, `memory/` and
+    `logs/` live inside these directories and must remain readable and writable.
+    """
+    roots = [os.path.join(str(Path.home()), d) for d in (".kiro/crew", ".kirocrew")]
+    try:
+        roots.append(str(config_dir()))
+    except Exception:
+        logger.warning("sandbox: could not resolve the data home to protect", exc_info=True)
+    return list(dict.fromkeys(roots))
+
+
+def _data_home_equivalents(entries: "list[str]") -> "list[str]":
+    """Re-anchor crew-relative *entries* onto the RESOLVED data home.
+
+    Every entry in the lists below is spelled relative to `~`, which assumes the
+    data home sits at its default location. Under `KIROCREW_HOME` it does not, and
+    the hide list then covered a path that does not exist while the keystone files
+    the operator actually uses stayed readable to the agent subprocess tree.
+
+    That is the layer this PR's own reasoning leans on: the command gate reads text
+    and cannot see inside `./script`, so hiding the paths is what does not depend on
+    the write being spelled out. A hide list anchored on the wrong directory
+    provides none of it.
+
+    The `~`-relative entries are KEPT alongside these rather than replaced. They are
+    not redundant: a default install resolves to the same place, and a box mid-way
+    through a data-home move can have real bytes at both.
+    """
+    try:
+        root = str(config_dir())
+    except Exception:
+        # Never let a data-home resolution failure drop the whole hide list: the
+        # `~`-relative entries below still apply, and a sandbox with fewer hidden
+        # paths is far better than a spawn that raises.
+        logger.warning("sandbox: could not resolve the data home to hide", exc_info=True)
+        return []
+    out: list[str] = []
+    for entry in entries:
+        for prefix in _CREW_HOME_RELATIVE_PREFIXES:
+            if entry.startswith(prefix):
+                out.append(os.path.join(root, entry[len(prefix) :]))
+                break
+    return out
+
+
 _CC_FILES: list[str] = [
     ".npmrc",
     ".pypirc",
@@ -133,6 +246,44 @@ _CC_FILES: list[str] = [
     # kept covered too (a not-yet-migrated box still holds real secret bytes).
     ".kiro/crew/.env",
     ".kirocrew/.env",
+]
+
+
+#: Keystone leaves that are FILES, hidden in EVERY sandbox tier.
+#:
+#: Split out of `_CC_FILES` because that list is consulted only for `cc` and `strict`
+#: (`files = _CC_FILES if sandbox_level in ("cc", "strict") else []`), while the
+#: default mode is `auto`, and `_SANDBOX_MODE_ALIASES` maps `auto` -> `standard`. So
+#: putting these there fenced them for two tiers nobody is on by default and left the
+#: governance ceiling readable to an agent subprocess in the shipped configuration.
+#:
+#: The directory-shaped keystone entries do not have this problem: they appear in all
+#: three dir lists already. These are files, so no directory entry reaches them --
+#: which is why they need a list of their own rather than another dir entry.
+#:
+#: `.npmrc`/`.netrc`/`.env` and friends deliberately stay `cc`/`strict`-only: that is
+#: the tier split this repo already chose for credential files, and widening it is a
+#: separate decision from fixing the ceiling.
+_KEYSTONE_FILES: list[str] = [
+    # Keystone leaves that are FILES, so the directory entries above do not reach them.
+    ".kiro/crew/security_policy.json",
+    ".kirocrew/security_policy.json",
+    ".kiro/crew/admission_policy.json",
+    ".kirocrew/admission_policy.json",
+    ".kiro/crew/computer_use.json",
+    ".kirocrew/computer_use.json",
+    # Records that PERSIST an operator-authorship decision. The path fence refuses an
+    # agent TOOL call naming these, which is the tool-mediated half; a subprocess never
+    # goes through that gate, so without hiding them a script can write
+    # `"operator_authored": true` into a job and wait for the reload. Same two halves
+    # as the trust root above, for the same reason.
+    # `crons.json`, with the s -- cron's actual store (`cron._CRONS_FILE`). An earlier
+    # revision hid `cron.json`, a file the codebase has never written, so this entry
+    # covered nothing.
+    ".kiro/crew/crons.json",
+    ".kirocrew/crons.json",
+    ".kiro/crew/autonudge.json",
+    ".kirocrew/autonudge.json",
 ]
 
 
@@ -1458,7 +1609,7 @@ def _build_launcher_script(
         dirs = _sandbox_policy().cc_dirs()
     else:
         dirs = _sandbox_policy().strict_dirs()
-    files = _CC_FILES if sandbox_level in ("cc", "strict") else []
+    files = (_CC_FILES if sandbox_level in ("cc", "strict") else []) + _KEYSTONE_FILES
     expose_files = _CC_EXPOSE_FILES if sandbox_level == "cc" else []
     env_prefixes = list(_SENSITIVE_ENV_PREFIXES)
     if sandbox_level in ("cc", "strict"):
@@ -1473,6 +1624,7 @@ def _build_launcher_script(
         env_prefixes = env_prefixes + list(_PYTHON_ENV_PREFIXES)
     hide_ssh = sandbox_level == "strict"
     hidden_dirs = [os.path.join(home, d) for d in dirs]
+    hidden_dirs.extend(_data_home_equivalents(dirs))
     hidden_dirs.extend(os.path.abspath(path) for path in extra_hidden_dirs)
     hidden_dirs = [
         path
@@ -1503,13 +1655,18 @@ def _build_launcher_script(
     # subpath rule covers a plain file.
     dirs_json = json.dumps(list(dict.fromkeys(hidden_dirs)))
     files_json = json.dumps(
-        list(dict.fromkeys([os.path.join(home, f) for f in files] + hidden_dirs))
+        list(
+            dict.fromkeys(
+                [os.path.join(home, f) for f in files] + _data_home_equivalents(files) + hidden_dirs
+            )
+        )
     )
     expose_json = json.dumps([(os.path.join(home, f), f.split("/")[-1]) for f in expose_files])
     env_prefixes_json = json.dumps(env_prefixes)
     ssh_dir = json.dumps(os.path.join(home, ".ssh"))
     ssh_known_hosts = json.dumps(os.path.join(home, ".ssh", "known_hosts"))
     sandbox_level_json = json.dumps(sandbox_level)
+    unrenamable_json = json.dumps(_unrenamable_containers())
     strict_host_key_opt = (
         " -o StrictHostKeyChecking=accept-new" if _ssh_supports_accept_new() else ""
     )
@@ -1563,6 +1720,7 @@ SSH_DIR = {ssh_dir}
 SSH_KNOWN_HOSTS = {ssh_known_hosts}
 HIDE_SSH = {hide_ssh}
 SANDBOX_LEVEL = {sandbox_level_json}
+UNRENAMABLE_DIRS = {unrenamable_json}
 
 def main():
     argv = sys.argv[1:]
@@ -1654,6 +1812,25 @@ def main():
             if os.path.isfile(src_path):
                 with open(src_path, "rb") as fh:
                     expose_data[src_path] = fh.read()
+
+        # Bind each data-home container ONTO ITSELF. The contents are unchanged and
+        # stay writable -- a bind of a directory over itself is transparent -- but the
+        # directory becomes a mount point, and Linux refuses to rename a mount point
+        # (EBUSY). That is what stops an approved opaque script doing
+        # `mv ~/.kiro/crew /tmp/stash && ln -s /tmp/evil ~/.kiro/crew`, which no
+        # leaf-masking mount can prevent: every leaf rule names a path that the rename
+        # has already emptied.
+        #
+        # FIRST, before any masking below. `MS_BIND` without `MS_REC` copies only the
+        # mount at that point and NOT the submounts under it, so binding the container
+        # after the masks would produce a fresh view of the container in which
+        # `profiles/` and `variables/` are the ORIGINAL directories again -- this
+        # protection silently undoing the one beneath it. Masking on top of the
+        # container mount instead keeps both.
+        for d in UNRENAMABLE_DIRS:
+            target = d.encode()
+            if os.path.isdir(target):
+                _libc.mount(target, target, None, _MS_BIND, None)
 
         # Bind-mount empty dirs over credential paths (per-dir tmpdir to
         # prevent content leaking across mounts via shared backing dir).
@@ -2068,12 +2245,15 @@ def _build_seatbelt_profile(
         dirs = [d for d in _sandbox_policy().cc_dirs() if d != ".aws"]
     else:
         dirs = _sandbox_policy().strict_dirs()
-    files = _CC_FILES if sandbox_level in ("cc", "strict") else []
+    files = (_CC_FILES if sandbox_level in ("cc", "strict") else []) + _KEYSTONE_FILES
     expose_files = _CC_EXPOSE_FILES if sandbox_level == "cc" else []
     expose_abs = {os.path.join(home, f) for f in expose_files}
     rules: list[str] = []
-    for d in dirs:
-        target = os.path.join(home, d)
+    # Same re-anchoring the Linux launcher does: without it `variables/` and
+    # `profiles/` under a custom `KIROCREW_HOME` receive no rule on macOS at all.
+    for target in dict.fromkeys(
+        [os.path.join(home, d) for d in dirs] + _data_home_equivalents(dirs)
+    ):
         if _hidden_path_contains_visible_path(target, extra_visible_dirs):
             continue
         escaped = target.replace('"', '\\"')
@@ -2095,12 +2275,36 @@ def _build_seatbelt_profile(
         # exposed-file exception): the agent never needs to hardlink a
         # credential-dir file, and blocking it is harmless.
         rules.append(f'(deny file-link (subpath "{escaped}"))')
-    for f in files:
-        target = os.path.join(home, f)
+    # `_data_home_equivalents` for the same reason the Linux launcher needs it: every
+    # entry is spelled relative to `~`, so under `KIROCREW_HOME` these rules named a
+    # path that does not exist and the real files got no rule at all.
+    keystone_abs = {os.path.join(home, f) for f in _KEYSTONE_FILES} | set(
+        _data_home_equivalents(_KEYSTONE_FILES)
+    )
+    for target in dict.fromkeys(
+        [os.path.join(home, f) for f in files] + _data_home_equivalents(files)
+    ):
         escaped = target.replace('"', '\\"')
         rules.append(f'(deny file-read* (literal "{escaped}"))')
         # Also deny hardlinking the protected file (see above).
         rules.append(f'(deny file-link (literal "{escaped}"))')
+        if target in keystone_abs:
+            # WRITE too, for the keystone leaves only. Hiding the governance ceiling
+            # from an agent subprocess is worth little if the same subprocess can
+            # overwrite it -- and forging `computer_use.json` is how an agent grants
+            # itself the operator's own opt-in. The credential files above keep
+            # read-deny only, which is their long-standing posture: npm and git write
+            # to `.npmrc`/`.git-credentials` legitimately, and turning that into a hard
+            # failure is a separate decision from closing the ceiling.
+            rules.append(f'(deny file-write* (literal "{escaped}"))')
+    # The containers themselves: `literal`, never `subpath`, so the directory entry is
+    # unwritable while everything INSIDE stays fully accessible. Seatbelt's
+    # `file-write*` covers the unlink/create a rename needs, so `mv`-then-symlink on the
+    # data home is refused the same way the Linux self-bind refuses it.
+    for target in _unrenamable_containers():
+        escaped = target.replace('"', '\\"')
+        rules.append(f'(deny file-write* (literal "{escaped}"))')
+
     for target in dict.fromkeys(os.path.abspath(path) for path in extra_hidden_dirs):
         if _hidden_path_contains_visible_path(target, extra_visible_dirs):
             continue

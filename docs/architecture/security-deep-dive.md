@@ -194,6 +194,172 @@ than through the shared gate, so real functionality is unaffected.
 Each leaf is registered under every known data-home prefix, so a not-yet-migrated
 legacy home is fenced identically to the current `~/.kiro/crew`.
 
+#### The container the leaves sit in
+
+Every leaf above is identified by its **path**, which silently assumes the directory
+holding it stays where it is. It did not. `rm -rf ~/.kiro/crew` was already refused,
+but relocation was not, so
+
+```
+mv ~/.kiro/crew /tmp/stash && ln -s /tmp/evil ~/.kiro/crew
+```
+
+left every fence naming a file that is no longer there, and the next write to
+`security_policy.json`, `profiles/`, `admission_policy.json` or `computer_use.json`
+followed the link. A bypass of the ceiling itself, not of one feature.
+
+`is_unreplaceable_container` closes it. Two properties are load-bearing:
+
+- **Exact, not prefix.** The leaf matcher is prefix-based, so adding the data home to
+  `_SENSITIVE_HOME_DIRS` would fence `sessions/`, `memory/`, `skills/` and `logs/`
+  and cut the agent off from its own working data. Only the container itself is
+  refused; everything under it stays as reachable as it is today.
+- **Verb-independent, with no exemptions at all** — an enumerated write-verb
+  allowlist is bypassable (`mv`, `ln`, `cp`, `rsync`, a novel verb, a Python
+  `os.rename`), so the refusal is on *naming* the container.
+
+  There was briefly a `cd`/`pushd` carve-out, on the reasoning that entering a
+  directory cannot relocate it. It is gone. Identifying the operand meant inspecting
+  the preceding token, so `mv cd ~/.kiro/crew` claimed the exemption by containing the
+  word `cd`; and `cd` is a builtin that a function or alias can shadow, so even a
+  correct parse would not have been evidence. Deciding what a token *means* in a shell
+  needs a shell. The cost of removing it is bounded by the match being exact — only
+  `~/.kiro/crew` itself, never anything beneath it.
+
+**Shell expansion is normalized before either gate matches.** Bash expands an operand
+before the command runs and the matcher did not, so `~/.kiro/cr{e..e}w` arrived as a
+literal matching no protected path and reached bash as `~/.kiro/crew`. This was never
+specific to the container gate — the **leaf** gate had the identical hole, so
+`cat ~/.kiro/cr{e..e}w/security_policy.json` read the trust root. Brace expansion
+therefore lands in the shared candidate generator, where both gates inherit it, and a
+glob carrying `*`/`?`/`[…]` is refused when it *could* name a protected path, since a
+gate cannot resolve one without the filesystem.
+
+The expander models bash, and four divergences from it were each a bypass: a
+**descending** range (`{w..e}`) produced an empty span where bash produces `crew`; an
+**oversized** brace was truncated, dropping the tail so a 65-item list with `crew` last
+expanded to `crew` in bash and to everything-but-`crew` here (it now fails closed); a
+**shadowed** `cd` (`cd(){ mv "$1" /tmp; }`) inherited the navigation carve-out, so
+defining or aliasing one of those verbs now withdraws it; and a **custom
+`KIROCREW_HOME`** was invisible to the raw scan, which is the only layer that sees an
+interpreter payload — the configured root is now its own branch, and the compiled
+pattern is cached per value rather than pinned at first call.
+
+None of that makes the matcher a shell parser, and it is not meant to: the floor under
+it is the sandbox hide list above, which a shadowed builtin or a runtime-assembled
+payload cannot reach past.
+
+Brace ranges take bash's optional step (`{a..z..2}`); without it the whole range
+matched nothing and the token read as clean. And `*` does not match a leading dot
+**unless the command enables it** (`shopt -s dotglob`, `setopt globdots`), under which
+`~/*` names `~/.kiro` — detected in the command text, which is the scope a per-command
+matcher has. An option set in a startup file is outside it, which is one more reason
+the hide list above is the floor and this is not.
+
+Glob matching is **component-wise**, not `fnmatch` over the whole path: `fnmatch`'s `*`
+crosses `/`, which denied a bare `ls *`, and it ignores the dotfile rule, which matched
+`~/*` against `~/.kiro`. Bash's rules are what keep an ordinary home listing out of the
+gate while `ls ~/.kiro/*`, which names the container, stays refused. Expansion is
+bounded — past the cap the token is left unexpanded and the metacharacter arm still
+refuses it.
+
+It runs in all three passes — raw regex, normalizer, and the `cd`-resolved segment
+walk — because the gate beside it does. Wired into only one, it missed the
+`cd`-relative, variable, and interpreter-payload forms the leaf gate had caught for
+a long time; `TestItIsNoWeakerThanTheLeafGateBesideIt` asserts that parity
+form-by-form so the two cannot drift apart again.
+
+#### A subprocess is not constrained by a command gate
+
+The command gate reads command **text**. `./script.sh`, `make install` and `npm run
+build` are each one opaque token to it, and whatever they write internally is never
+inspected — so the path fence refuses
+`echo x > ~/.kiro/crew/security_policy.json` and says nothing about a script
+containing that exact line. The fence was never the layer that stopped a subprocess.
+
+The sandbox's hide lists are, on **every** mode:
+
+| what | where | which modes |
+|---|---|---|
+| `variables/`, `profiles/` | `_STRICT_DIRS`, `_STANDARD_DIRS`, `_CC_DIRS` | **every** mode |
+| `security_policy.json`, `admission_policy.json`, `computer_use.json`, `crons.json`, `autonudge.json` | `_KEYSTONE_FILES` | **every** mode |
+| `.npmrc`, `.netrc`, `.git-credentials`, `.env` | `_CC_FILES` | `cc` and `strict` only |
+
+The keystone files live in a list of their own precisely so that last row cannot pull
+them along. An earlier revision put them in `_CC_FILES`, and this document argued the
+result was an acceptable incomplete floor on the grounds that `standard` "has no
+file-level hiding mechanism at all". **That was wrong.** The mechanism is there — the
+launcher hides whatever `files` contains on any tier — and the only thing excluding the
+default tier was the selection expression choosing an empty list for it
+(`files = _CC_FILES if sandbox_level in ("cc", "strict") else []`). Since
+`_SANDBOX_MODE_ALIASES` maps the default `auto` onto `standard`, the effect was that
+the governance ceiling was readable to an agent subprocess in the shipped
+configuration, while this document described that as a considered trade.
+
+It is worth naming the failure mode, because it is the one this whole section warns
+about: the gap was **documented**, and a test pinned the documented behaviour, so both
+halves of the usual safety net agreed with each other and neither noticed the floor had
+a hole in it. Writing a limitation down is not the same as deciding it.
+
+The credential files keep the `cc`/`strict` split, which is the posture this repo
+already chose for them; widening that is a separate decision with its own reasoning.
+
+Hiding rather than merely denying is safe because nothing in the subprocess needs to
+read any of the keystone files: variable expansion happens in the gateway before the
+prompt is built, and the ceiling is deliberately not the agent's to read.
+
+The two platforms enforce this through different mechanisms and had to be fixed in
+different places — Linux bind-mounts an empty file over each path, macOS emits Seatbelt
+rules — so coverage on one says nothing about the other. On macOS the keystone files are
+denied `file-read*`, `file-link` **and `file-write*`**: hiding the ceiling from a
+subprocess is worth little if the same subprocess can overwrite it, and forging
+`computer_use.json` is how an agent would grant itself the operator's own opt-in. The
+credential files keep read-only denial, because npm and git write to `.npmrc` and
+`.git-credentials` legitimately.
+
+**One gap remains, and it is a property of the file-hiding mechanism rather than of
+this list.** Linux bind-mounts over a path only `if os.path.isfile(target)`, so a
+keystone file that does not exist yet is not covered and an approved opaque script can
+CREATE it. This applies to every file entry, not only these — `.npmrc` and `.env` have
+always behaved this way. The obvious fix, creating a placeholder so the mount has
+somewhere to land, is not obviously safe: it leaves an empty file in the operator's data
+home, and while an empty `computer_use.json` reads as disabled
+(`enable_state.py` treats a failed load as off — the safe direction), an empty
+`security_policy.json` would need the same check made for each loader before anyone
+could rely on it. Doing that per loader, or inverting the data home to a read-only mount
+with the writable subtrees bound back in, is the real fix and belongs in its own change.
+
+This is recorded as an open gap, not as a decision — the distinction the previous
+paragraph exists to make.
+
+### The container entry, not just its contents
+
+Every list above hides CONTENTS. None of them stops the container being **moved**, and
+content-hiding cannot: after `mv ~/.kiro/crew /tmp/stash && ln -s /tmp/evil
+~/.kiro/crew`, each leaf rule names a path the attacker has already emptied, and the
+next gateway write follows the link. `security.is_unreplaceable_container` refuses that
+as a *command*, but a subprocess is one opaque token to the command gate — `./script.sh`
+containing those two lines is never inspected — which is the same reason the hide lists
+exist at all.
+
+So the sandbox protects the directory ENTRY, by a different mechanism on each platform:
+
+| platform | mechanism | why it works |
+|---|---|---|
+| Linux | bind the container onto itself | a bind over itself is transparent, but the directory becomes a mount point, and the kernel refuses to rename one (`EBUSY`) |
+| macOS | `(deny file-write* (literal …))` | Seatbelt's `file-write*` covers the unlink/create a rename needs |
+
+`literal`, never `subpath`, and a self-bind rather than an empty-dir bind: the agent's
+own `sessions/`, `memory/` and `logs/` live inside this directory and must stay readable
+and writable. Fencing the subtree would cut the agent off from its own working data —
+the same false positive the container gate is exact-match to avoid.
+
+The two halves live in different modules with no shared symbol — `security.py` names
+the fenced leaves, `sandbox.py` names what is hidden — so a leaf added to one and not
+the other is protected only against the spelling nobody uses.
+`TestTheFencedPathsAreHiddenFromSubprocesses` asserts the coupling rather than either
+list.
+
 **Do not weaken this when editing the path or bash matchers.** Write and extract
 verbs must stay covered: a bash command that merely *names* a write-protected
 leaf is refused, verb-independently, because an enumerated write-verb allowlist is
