@@ -1496,13 +1496,9 @@
         "copy_path_2": "Copiar caminho: {{path}}",
         "download": "Baixar",
         "more_options": "Mais opções",
-        "open_in_file_explorer": "Abrir no Explorador de Arquivos",
-        "open_in_finder": "Abrir no Finder",
-        "path_copied_to_clipboard_no_desktop_available": "Caminho copiado para a área de transferência (nenhum desktop disponível)",
         "reload": "Recarregar",
         "select_a_file_to_view": "Selecione um arquivo para visualizar",
         "sensitive_file_avoid_sharing_your_screen_while_v": "Arquivo sensível — evite compartilhar sua tela ao visualizar credenciais",
-        "show_in_file_manager": "Mostrar no gerenciador de arquivos",
         "tip_ctrl_cmd_f_to_search": "Dica: Ctrl/Cmd+F para pesquisar",
         "truncated": "· truncado"
       },
@@ -5770,7 +5766,6 @@
       "open_in_file_explorer": "Abrir no Explorador de Arquivos",
       "open_in_finder": "Abrir no Finder",
       "open_with_default_app": "Abrir com o aplicativo padrão",
-      "path_copied_to_clipboard_no_desktop_available": "Caminho copiado para a área de transferência (nenhum desktop disponível)",
       "preview": "Visualizar",
       "previous_match": "Correspondência anterior",
       "previous_shift_enter": "Anterior (Shift+Enter)",
@@ -5815,7 +5810,9 @@
       "generating_diagram": "gerando diagrama…",
       "reset_zoom": "Redefinir zoom (0)",
       "zoom_in": "Ampliar (+)",
-      "zoom_out": "Reduzir (-)"
+      "zoom_out": "Reduzir (-)",
+      "click_to_browse_shift_click_to_copy_path": "Clique para navegar / Shift+clique para copiar o caminho",
+      "click_to_open_shift_click_to_copy_path": "Clique para abrir / Shift+clique para copiar o caminho"
     },
     "markdownToc": {
       "contents": "Conteúdo",
@@ -6283,13 +6280,10 @@
       "include_recent_logs": "Incluir logs recentes",
       "note_placeholder": "ex.: Todas as mensagens falham com “process exited (rc=None)” depois de atualizar.",
       "open_github_issue": "Abrir issue no GitHub",
-      "open_in_file_explorer": "Abrir no Explorador de Arquivos",
-      "open_in_finder": "Abrir no Finder",
       "prefill_hint": "Ao abrir a issue os detalhes são preenchidos automaticamente — depois arraste o zip para lá.",
       "redaction_notice": "Tokens Bearer, cookies de sessão e chaves AWS são removidos automaticamente antes de criar o zip.",
       "report_a_problem": "Relatar um problema",
       "saved_to": "Salvo em",
-      "show_in_file_manager": "Mostrar no gerenciador de arquivos",
       "what_happened": "O que aconteceu?"
     },
     "resizeHandle": {
@@ -7039,6 +7033,13 @@
       "unbound_tokens_can_wake_any_crew_other": "Também existem {{count}} tokens sem vínculo de crew; eles podem acordar qualquer crew, esta incluída.",
       "webhook": "Webhook",
       "webhooks_that_wake_this_crew": "Webhooks que acordam esta crew"
+    },
+    "filePathMenu": {
+      "copy_failed": "Não foi possível copiar o caminho",
+      "copy_path": "Copiar caminho",
+      "path_copied": "Caminho copiado",
+      "reveal_blocked": "Este caminho está protegido e não pode ser aberto.",
+      "reveal_failed": "Não foi possível abrir este caminho na máquina que executa o Kiro Crew."
     }
   },
   "hooks": {
@@ -8085,14 +8086,11 @@
         "matches": "Correspondências",
         "no_changes": "Árvore de trabalho sem alterações",
         "no_files_match": "Nenhum arquivo corresponde",
-        "open_in_file_explorer": "Abrir no Explorador de Arquivos",
-        "open_in_finder": "Abrir no Finder",
         "parent_folder": "Pasta pai",
         "refresh": "Atualizar",
         "search_failed": "A pesquisa falhou",
         "search_files": "Pesquisar arquivos",
         "searching": "Pesquisando…",
-        "show_in_file_manager": "Mostrar no gerenciador de arquivos",
         "showing_first_matches": "Mostrando as primeiras {{shown}} correspondências",
         "unable_to_list_folder": "Não foi possível listar a pasta"
       },
@@ -8447,7 +8445,6 @@
       "filesHome": {
         "no_project_dir": "Nenhum diretório de projeto definido para este chat",
         "refresh": "Atualizar",
-        "reveal_in_finder": "Mostrar no gerenciador de arquivos",
         "select_file_hint": "Selecione um arquivo na árvore para abri-lo em uma nova aba",
         "title": "Arquivos",
         "tree_error": "Não foi possível carregar a árvore de arquivos"
