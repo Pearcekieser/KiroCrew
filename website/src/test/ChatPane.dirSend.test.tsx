@@ -398,13 +398,13 @@ describe('ChatPane send — a failed send is reported on the pane', () => {
     expect((box as HTMLTextAreaElement).value).toBe('')
   })
 
-  it('reports an attachment-only send the backend claims it queued but dropped', async () => {
-    // `chat_handlers` queues `if message:` yet answers `{ok, queued}` either way,
-    // so a file-only send that raced the slot into the busy state is silently
-    // discarded. Nothing else carries the attachment once the composer clears.
+  it('reports an attachment-only send the backend refuses for its empty wire text', async () => {
+    // The server refuses an empty wire text above every dispatch branch, so a
+    // file-only send comes back 400 `message_required`. The pane must surface
+    // that refusal: nothing else carries the attachment once the composer clears.
     ;(api.uploadFiles as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ paths: ['/tmp/report.pdf'] })
     ;(api.sendChat as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      ok: true, json: () => Promise.resolve({ ok: true, queued: true }),
+      ok: false, status: 400, json: () => Promise.resolve({ error: 'message is required', code: 'message_required' }),
     })
     const { store, container } = renderPane('pane-dropped')
     const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
@@ -417,8 +417,8 @@ describe('ChatPane send — a failed send is reported on the pane', () => {
     fireEvent.keyDown(box, { key: 'Enter', code: 'Enter' })
 
     await waitFor(() => expect(api.sendChat).toHaveBeenCalledTimes(1))
-    // Wire text is empty for a file-only send, which is exactly what the backend
-    // guard drops.
+    // Wire text is empty for a file-only send, which is exactly what the server
+    // refuses.
     expect((api.sendChat as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('')
     await waitFor(() => expect(errorsIn(store, 'pane-dropped')).toHaveLength(1))
   })
