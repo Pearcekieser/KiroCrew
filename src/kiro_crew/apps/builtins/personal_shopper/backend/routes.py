@@ -38,6 +38,7 @@ from aiohttp import web
 from kiro_crew.apps.builtins.personal_shopper.backend.store import PreferenceStore
 from kiro_crew.apps.manager import app_data_dir, is_app_enabled
 from kiro_crew.atomic_write import atomic_write
+from kiro_crew.executors import run_in_embed_pool
 from kiro_crew.loop_lock import LoopBoundLock
 
 logger = logging.getLogger(__name__)
@@ -247,7 +248,7 @@ async def _handle_add_preference(request: web.Request) -> web.Response:
         return err
 
     store = await _get_store()
-    entry_id = await asyncio.to_thread(store.add, text, tags=tags or [])
+    entry_id = await run_in_embed_pool(store.add, text, tags=tags or [])
     return web.json_response({"id": entry_id}, status=201)
 
 
@@ -301,7 +302,7 @@ async def _handle_search_preferences(request: web.Request) -> web.Response:
         return err
 
     store = await _get_store()
-    results = await asyncio.to_thread(
+    results = await run_in_embed_pool(
         store.search, query, top_k=top_k, tag_filter=tag_filter
     )
     return web.json_response(
@@ -334,7 +335,7 @@ async def _handle_reembed_preferences(request: web.Request) -> web.Response:
     everything added in the meantime.
     """
     store = await _get_store()
-    count = await asyncio.to_thread(store.reembed_all)
+    count = await run_in_embed_pool(store.reembed_all)
     return web.json_response({"reembedded": count})
 
 

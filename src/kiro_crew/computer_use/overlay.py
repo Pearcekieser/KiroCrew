@@ -236,7 +236,9 @@ class CursorOverlay:
         # call and ``os.kill(pid, 0)`` TERMINATES on Windows. This code path cannot
         # run off macOS today, but the shim is the repo-wide contract.
         try:
-            platform_compat.kill_process_tree(proc.pid, platform_compat.SIGKILL)
+            await asyncio.to_thread(
+                platform_compat.kill_process_tree, proc.pid, platform_compat.SIGKILL
+            )
         except Exception:
             logger.debug("cursor-motion kill failed", exc_info=True)
         try:
@@ -402,7 +404,9 @@ class CursorOverlay:
             logger.debug("cursor-motion reap wait failed", exc_info=True)
             return
         try:
-            platform_compat.kill_process_tree(proc.pid, platform_compat.SIGKILL)
+            await asyncio.to_thread(
+                platform_compat.kill_process_tree, proc.pid, platform_compat.SIGKILL
+            )
         except Exception:
             logger.debug("cursor-motion reap kill failed", exc_info=True)
         try:
