@@ -105,3 +105,27 @@ def test_read_pid_handles_garbage(tmp_path):
         assert _read_pid(fd) is None
     finally:
         os.close(fd)
+
+
+def test_windows_stale_pid_reclaimed_on_startup(tmp_path, monkeypatch):
+    """On Windows, if the lock file holds a dead PID, the file is deleted and
+    recreated before acquisition so that msvcrt.locking gets a clean file."""
+    from kiro_crew import platform_compat
+
+    # Simulate Windows platform
+    monkeypatch.setattr(platform_compat, "IS_WINDOWS", True)
+    # Make pid_liveness report the stale PID as dead
+    monkeypatch.setattr(platform_compat, "pid_liveness", lambda pid: platform_compat.PID_DEAD)
+
+    # Pre-create a lock file with a fake dead PID
+    lock_file = tmp_path / LOCK_FILENAME
+    lock_file.write_text("999999\n")
+
+    lock = GatewayLock(tmp_path).acquire()
+    try:
+        # The lock should have been acquired successfully
+        assert lock_file.is_file()
+        # Our PID should now be stamped in the file
+        assert lock_file.read_text(encoding="utf-8").strip() == str(os.getpid())
+    finally:
+        lock.release()
