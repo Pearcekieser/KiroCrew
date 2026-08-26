@@ -343,26 +343,6 @@ class TestConductorInstaller:
         # And a goal that already authorizes execution must not be re-gated.
         assert "Skip the gate when the user already gave one" in text
 
-    def test_skill_requires_the_goal_folder_before_the_first_session(self):
-        """Folder creation is a round-level PRECONDITION, not a per-item step.
-
-        ``session_create`` has no ``folder`` argument, so filing a session is a
-        separate call — and when the instruction sat inside the per-item loop
-        worded "once per goal (skip if it exists)" the first live run dropped it
-        and every dispatched session landed loose at the sidebar's top level,
-        with nothing tying it to the goal it belongs to.
-        """
-        text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-        assert "Before the round: the goal's folder must exist" in text
-        # The create must be named as a defect, not merely discouraged, and the
-        # failure path must stop rather than dispatch into no folder.
-        assert "before its folder exists is a defect" in text
-        # Creating the folder is not sufficient on its own: the user can delete
-        # it mid-round, so a FAILED move must stop the item before the seed —
-        # otherwise the session is both unfiled and already doing work, which is
-        # strictly worse than the outcome the precondition exists to prevent.
-        assert "If the move\n   fails, stop this item before the seed" in text
-
     def test_skill_states_the_real_approval_cost(self):
         """The cost note must match the spec, or patrol plans for wrong prompts.
 
@@ -373,7 +353,7 @@ class TestConductorInstaller:
         """
         text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
         assert "Reads and creates do not prompt" in text
-        assert "`chat_folder_move_session`,\n  `session_send` and `session_stop`" in text
+        assert "`session_send`\n  and `session_stop` are deliberately NOT auto-approved" in text
         assert "accept_eval.py` invocation" in text
 
     def test_skill_documents_artifacts_as_a_string_map(self):
@@ -424,6 +404,26 @@ class TestConductorInstaller:
         assert SKILL_DIR.is_dir()
         assert not (_BUILTIN_SKILLS_DIR / "conductor").exists()
         assert "name: goal-conductor" in (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_skill_files_the_session_at_creation_not_by_a_move(self):
+        """Dispatch passes ``folder`` to ``session_create``; no move step exists.
+
+        ``session_create`` files the slot atomically at creation (#6118), which
+        is what closed the create-then-move window a folder delete could land
+        in. The instruction layer must not resurrect the workaround: a separate
+        ``chat_folder_create`` precondition or ``chat_folder_move_session`` step
+        reopens exactly the non-atomic window the tool argument removed. Pinned
+        as a doc ratchet because the instruction, not the code, is what would
+        drift back.
+        """
+        text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        assert "1. `session_create`" in text, "dispatch must open with the atomic create"
+        assert "`folder`" in text, "dispatch must name the folder argument at create"
+        assert "chat_folder_move_session" not in text, "the move workaround must stay deleted"
+        # Scoped to the dispatch STEP, not the whole document: a future
+        # legitimate mention of the tool elsewhere in the skill must not fail a
+        # pin whose intent is only that the precreation step stay deleted.
+        assert "1. `chat_folder_create`" not in text, "no folder-precreation dispatch step"
 
 
 def _load_evaluator():
