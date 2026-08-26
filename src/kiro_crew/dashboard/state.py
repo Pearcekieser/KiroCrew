@@ -5199,6 +5199,14 @@ class DashboardState:
         # Sidebar columns — flat list of {id, name, tag_ids, mode, order, include_untagged}
         self._tag_boards: list[dict[str, Any]] = []
         self._background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
+        # Gateway replacement is process-wide, not an ordinary repeatable
+        # background mutation.  The task latch coalesces duplicate /api/restart
+        # clicks during the response-drain window; the in-progress latch also
+        # serializes restart requests arriving through update and other server
+        # paths.  Both are cleared when a mocked/failed exec returns, while a
+        # successful exec replaces this state with the successor process.
+        self._gateway_restart_task: asyncio.Task[None] | None = None
+        self._gateway_restart_in_progress: bool = False
         # FIX 2: unattended-turn concurrency cap. Semaphore is created lazily
         # (see _background_turn_sema) because this object outlives / predates
         # the event loop in some hosts. The counters exist so a queued fleet is
@@ -5592,6 +5600,8 @@ class DashboardState:
         update_managed_by: str = "",
         update_commits_ahead: int = 0,
         update_commits_behind: int = 0,
+        update_last_checked_at: float | None = None,
+        update_check_interval_secs: int = 43200,
     ) -> dict[str, Any]:
         """Core status fields shared by /api/status, SSE, and WebSocket pushes."""
         uptime = int(time.time() - self.start_time)
@@ -5651,6 +5661,8 @@ class DashboardState:
             # tell the two apart. 0/0 on non-git layouts and before any check.
             "update_commits_ahead": update_commits_ahead,
             "update_commits_behind": update_commits_behind,
+            "update_last_checked_at": update_last_checked_at,
+            "update_check_interval_secs": update_check_interval_secs,
             "no_crons": self.no_crons,
             "branch": branch,
             "commit": commit,
