@@ -224,6 +224,147 @@ async def test_provenance_write_retries_on_silently_skipped_merge() -> None:
     assert info.error == ""
 
 
+def _mock_sessions_with_tool_event(served_model: str, event: Any) -> MagicMock:
+    """Like ``_mock_sessions`` but the stream yields one event before ending —
+    enough to drive the per-turn EVENT_PERMISSION_REQUEST branch in
+    ``_run_inner`` (the diagnostics ``update_state`` write at issue in #6288)."""
+    sessions = _mock_sessions(served_model=served_model)
+    provider, _, _ = sessions.get_or_create.return_value
+
+    async def _one_event_stream(*_args: object, **_kwargs: object):  # type: ignore[no-untyped-def]
+        yield event
+
+    provider.stream = MagicMock(side_effect=lambda *a, **kw: _one_event_stream())
+    return sessions
+
+
+@pytest.mark.asyncio
+async def test_per_turn_diagnostics_write_runs_off_loop() -> None:
+    """The per-turn diagnostics write (``turns``/``last_tool``) must run via
+    ``asyncio.to_thread``, NOT on the event loop thread — ``update_state``
+    fsyncs, and a synchronous fsync on every tool event stalls the gateway
+    heartbeat (#6288; same shape as #425 in autonudge.py). The two sibling
+    writes in this function (provenance, CC-path refinement) already offload;
+    this pins the third."""
+    import threading
+
+    from kiro_crew.acp.types import EVENT_PERMISSION_REQUEST, AcpEvent
+
+    event = AcpEvent(
+        kind=EVENT_PERMISSION_REQUEST,
+        title="grep",
+        tool_kind="read",
+        request_id="req-1",
+    )
+    sessions = _mock_sessions_with_tool_event("model-served", event)
+    manager = SubagentManager(
+        sessions=sessions,
+        ctx_builder=_mock_ctx_builder(),
+        is_yolo=lambda: True,
+    )
+    info = SubagentInfo(id="turnw01", task="per-turn write task", model="model-req")
+    manager._agents[info.id] = info
+
+    loop_thread = threading.current_thread()
+    diag_threads: list[Any] = []
+    diag_kwargs: list[dict[str, Any]] = []
+
+    def _spy_update(agent_id: str, **kwargs: Any) -> bool:
+        if "turns" in kwargs:
+            diag_threads.append(threading.current_thread())
+            diag_kwargs.append(dict(kwargs))
+        return True
+
+    with (
+        patch("kiro_crew.subagent.Stats"),
+        patch("kiro_crew.subagent.sel"),
+        patch("kiro_crew.subagent.update_state", side_effect=_spy_update),
+    ):
+        await manager._run_inner(info, f"subagent:{info.id}")
+
+    assert diag_kwargs, "the tool event never reached the per-turn diagnostics write"
+    assert all(
+        t is not loop_thread for t in diag_threads
+    ), "per-turn update_state ran ON the event loop thread — the fsync blocks the gateway (#6288)"
+
+
+@pytest.mark.asyncio
+async def test_per_turn_diagnostics_values_reach_state_json() -> None:
+    """The offload must not silently drop the write: after one tool event,
+    ``state.json`` carries the same ``turns``/``last_tool`` values the
+    on-loop call used to persist. Uses the REAL ``update_state`` (wrapped
+    only to observe), so a never-awaited ``to_thread`` coroutine — which
+    would create the thread hop but skip the write — fails this test."""
+    from kiro_crew.acp.types import EVENT_PERMISSION_REQUEST, AcpEvent
+    from kiro_crew.subagent_persistence import create_agent_folder, read_state
+    from kiro_crew.subagent_persistence import update_state as real_update_state
+
+    event = AcpEvent(
+        kind=EVENT_PERMISSION_REQUEST,
+        title="grep",
+        tool_kind="read",
+        request_id="req-1",
+    )
+    sessions = _mock_sessions_with_tool_event("model-served", event)
+    manager = SubagentManager(
+        sessions=sessions,
+        ctx_builder=_mock_ctx_builder(),
+        is_yolo=lambda: True,
+    )
+    info = SubagentInfo(id="turnw02", task="per-turn value task", model="model-req")
+    manager._agents[info.id] = info
+    create_agent_folder(info.id, task=info.task)
+
+    with (
+        patch("kiro_crew.subagent.Stats"),
+        patch("kiro_crew.subagent.sel"),
+        patch("kiro_crew.subagent.update_state", side_effect=real_update_state),
+    ):
+        await manager._run_inner(info, f"subagent:{info.id}")
+
+    state = read_state(info.id)
+    assert state is not None
+    assert state["turns"] == 1
+    assert state["last_tool"] == "grep"
+
+
+@pytest.mark.asyncio
+async def test_per_turn_diagnostics_write_stays_best_effort() -> None:
+    """The write is best-effort by design: a raising ``update_state`` on the
+    per-turn path must not fail the run — the surrounding
+    ``try/except Exception: pass`` survives the offload."""
+    from kiro_crew.acp.types import EVENT_PERMISSION_REQUEST, AcpEvent
+
+    event = AcpEvent(
+        kind=EVENT_PERMISSION_REQUEST,
+        title="grep",
+        tool_kind="read",
+        request_id="req-1",
+    )
+    sessions = _mock_sessions_with_tool_event("model-served", event)
+    manager = SubagentManager(
+        sessions=sessions,
+        ctx_builder=_mock_ctx_builder(),
+        is_yolo=lambda: True,
+    )
+    info = SubagentInfo(id="turnw03", task="per-turn raise task", model="model-req")
+    manager._agents[info.id] = info
+
+    def _raising_update(agent_id: str, **kwargs: Any) -> bool:
+        if "turns" in kwargs:
+            raise OSError("disk full")
+        return True
+
+    with (
+        patch("kiro_crew.subagent.Stats"),
+        patch("kiro_crew.subagent.sel"),
+        patch("kiro_crew.subagent.update_state", side_effect=_raising_update),
+    ):
+        await manager._run_inner(info, f"subagent:{info.id}")
+
+    assert info.error == "", f"best-effort diagnostics write failed the run: {info.error}"
+
+
 def test_update_state_reports_write_vs_skip(tmp_path: object) -> None:
     """The return contract the retry depends on: True when the merge was
     written, False when it was skipped because state.json is unreadable."""
