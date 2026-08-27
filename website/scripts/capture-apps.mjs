@@ -97,6 +97,27 @@ const installedApps = [
   I('secretary', 'Secretary', 'registry'),
   I('auto-research', 'Research Lab', 'builtin', { manifest: { ...I('auto-research', 'Research Lab', 'builtin').manifest, ui: { pages: [{ route: '/research', label: 'Research', icon: 'Search' }] } } }),
   I('workflows', 'Workflows', 'builtin', { manifest: { ...I('workflows', 'Workflows', 'builtin').manifest, ui: { pages: [{ route: '/workflows', label: 'Workflows', icon: 'Zap' }] } } }),
+  // A DISABLED builtin with no published catalog row -- the case this fixture
+  // exists to show. It was listed in neither tab before, so Library carrying its
+  // row with an Enable button is the whole visible delta.
+  I('aws-control', 'AWS Control', 'builtin', {
+    enabled: false,
+    manifest: {
+      name: 'aws-control', version: '1.0.0', displayName: 'AWS Control', author: 'kirocrew',
+      description: 'Your cloud accounts, in plain language, with an S3-backed drive.',
+      tags: ['aws', 'storage'],
+      ui: { pages: [{ route: '/aws-control', label: 'AWS Control', icon: 'Cloud' }] },
+    },
+  }),
+  // A HIDDEN disabled builtin, which stays withheld: `hidden` means the product
+  // does not offer the app at all, so no row appears for it in either tab.
+  I('channels', 'Channels', 'builtin', {
+    enabled: false,
+    manifest: {
+      name: 'channels', version: '1.0.0', displayName: 'Channels', author: 'kirocrew',
+      description: 'Messaging channel configuration.', tags: ['channels'], hidden: true,
+    },
+  }),
 ]
 
 // Apps that ship hero art (the rest exercise the gradient fallback).

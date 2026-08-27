@@ -2641,7 +2641,6 @@
       "failed_to_uninstall": "Failed to uninstall {{name}}",
       "failed_to_update": "Failed to update: {{names}}",
       "find_apps_in_the_discover_tab_or_install_from_a": "Find apps in the Discover tab, or install from a local path via the sources gear above.",
-      "hidden_you_can_re_enable_it_from_the_discover_ta": "Disabled. You can re-enable it from the Discover tab.",
       "keep_dependency": "Keep dependency {{name}}",
       "kirocrew_registry": "{{productName}} registry",
       "library": "Library",

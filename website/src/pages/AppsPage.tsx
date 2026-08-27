@@ -15,7 +15,7 @@
  * Supply-side controls (external registries, Install from Path) live behind
  * the Sources gear in the header (SourcesPopover).
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -235,20 +235,101 @@ export function pickFeatured(apps: RegistryApp[]): RegistryApp[] {
 /**
  * Whether an installed app belongs in the Library list.
  *
- * A disabled builtin is normally hidden: the wheel ships ~20 of them default-off
- * and listing every one would bury the apps a reader actually uses. An app that
- * REPLACES a host surface is the exception, because it is the only class a reader
- * can turn off and then need to find again -- its own copy tells them to disable
- * it to get the old surface back, and with the row gone from Library and no
- * catalog row in Discover that would be a one-way switch. Keyed on `ui.overlays`
- * rather than on the app id so the rule belongs to the capability, not to a name.
+ * Every installed app does, with one exception for a hidden app noted at the end
+ * of this comment. This used to hide a disabled builtin so the ~20 the wheel ships default-off would not bury the
+ * apps a reader uses, with one exception for an app that REPLACES a host surface
+ * (so turning it off stayed reversible). That rule and Discover's disagreed
+ * about who lists a shipped builtin, and each deferred to the other: Discover is
+ * built from the PUBLISHED catalog and is "deliberately NOT topped up from local
+ * manifests" on the stated grounds that "installed built-ins remain fully
+ * visible and manageable under Library" -- which this predicate was the reason
+ * they were not. A builtin that is default-off and has no published catalog row
+ * therefore appeared in neither tab: shipped in the wheel, enable-able only by
+ * editing installed.json or calling the API by hand. AWS Control landed in
+ * exactly that state.
  *
- * Exported so its test exercises this predicate rather than a copy of it.
+ * Listing them is the side to fix rather than teaching Discover to synthesize
+ * rows from disk, because Library already answers "what is on this machine" from
+ * `GET /api/apps`, while the alternative adds a second display-copy source to the
+ * store's trust pipeline. Visibility now follows from being installed, so no app
+ * can be shipped and unreachable, and no per-capability exception is needed.
+ *
+ * The cost the old rule was avoiding is real and is paid here: the wheel ships 22
+ * default-off builtins, so a fresh install's Library carries ~20 rows a reader did
+ * not ask for. Library has search but no category rail and no sort control -- those
+ * render on Discover only -- so the mitigation is the enabled-first ordering on
+ * `installedApps` below, which keeps the apps in use at the top. Grouping and a
+ * calmer badge for the default-off state are a visual-design change and are not in
+ * this fix.
+ *
+ * Kept as a named predicate (rather than dropping the filter) so this reasoning
+ * has somewhere to live and its test asserts the property directly.
+ *
+ * The one app this still excludes is a `manifest.hidden` BUILTIN that is disabled.
+ * `hidden` means the product does not offer the app at all -- Discover drops it by
+ * name for the same reason -- so listing its card would announce an app nothing
+ * else mentions. `channels` and `workflows` both ship hidden AND default-off, so an
+ * origin-agnostic rule surfaced them on every fresh install. A hidden app that IS
+ * enabled stays listed, because something turned it on and the reader needs a
+ * surface to manage and turn it off: that is exactly the visibility the previous
+ * predicate gave hidden apps, so this clause preserves it rather than adding a
+ * rule.
+ *
+ * Scoped to `origin === 'builtin'`, matching Discover's own suppression, because
+ * `hidden` is only OURS to honour when we shipped the manifest. A third-party
+ * install that self-declares `hidden` would otherwise vanish from Library -- the
+ * only surface carrying both Enable and Uninstall -- which is this PR's own
+ * unreachable-app failure handed to an untrusted manifest.
  */
 export function keepInLibrary(
   app: Pick<InstalledApp, 'origin' | 'enabled' | 'manifest'>,
 ): boolean {
-  return !(app.origin === 'builtin' && !app.enabled && !app.manifest?.ui?.overlays?.length)
+  return app.enabled || app.origin !== 'builtin' || !app.manifest?.hidden
+}
+
+/** One app's Library placement, decided once per visit and then held. */
+export type LibrarySlot = { listed: boolean; wasEnabled: boolean }
+
+/**
+ * Which apps Library shows and in what order, deciding each app ONCE per visit.
+ *
+ * Two things want to depend on `enabled`, and both are wrong if they read it live.
+ * Ordering is enabled-first, because listing disabled builtins (see
+ * `keepInLibrary`) adds ~20 rows on a fresh install and Library has only a search
+ * box -- the category rail and the sort control render on Discover. Admission runs
+ * `keepInLibrary`, which withholds a hidden builtin while it is disabled.
+ *
+ * Read live, the user's own click moves the thing they clicked: disabling an app
+ * teleports its row into the disabled group, ~20 rows down and off-screen on a real
+ * install, and disabling a hidden builtin deletes its row outright -- with no toast,
+ * since the toast this change removed existed precisely to narrate a row that
+ * vanished. A control that answers a click by making itself disappear reads as an
+ * uninstall, and for the hidden builtin it would be a one-way switch in the UI.
+ *
+ * So *view* carries each app's decision across renders: a toggle updates the badge
+ * and the buttons in place, where the click happened, and nothing jumps. The caller
+ * owns the map (a ref, so it cannot trigger a render); entries for uninstalled apps
+ * are pruned here. A fresh visit starts a fresh map and re-decides -- which is what
+ * re-conceals a hidden builtin the reader turned off, and what promotes an app they
+ * enabled to the top.
+ *
+ * Order within each group is the order *apps* arrived in, so an unrelated app
+ * updating never reorders the list.
+ */
+export function libraryView<T extends Pick<InstalledApp, 'origin' | 'enabled' | 'manifest'> & { name: string }>(
+  apps: T[],
+  view: Map<string, LibrarySlot>,
+): T[] {
+  const live = new Set(apps.map(a => a.name))
+  for (const name of [...view.keys()]) if (!live.has(name)) view.delete(name)
+  for (const a of apps) {
+    if (!view.has(a.name)) view.set(a.name, { listed: keepInLibrary(a), wasEnabled: !!a.enabled })
+  }
+  const rows = apps.filter(a => view.get(a.name)?.listed)
+  return [
+    ...rows.filter(a => view.get(a.name)?.wasEnabled),
+    ...rows.filter(a => !view.get(a.name)?.wasEnabled),
+  ]
 }
 
 export default function AppsPage() {
@@ -416,7 +497,10 @@ export default function AppsPage() {
   // catalog's cache, then the bundled seed. It is deliberately NOT topped up
   // from local manifests: nothing is installable offline anyway, and installed
   // built-ins remain fully visible and manageable under Library, which reads
-  // `GET /api/apps` locally.
+  // `GET /api/apps` locally and lists every installed app including a disabled
+  // one (see `keepInLibrary`). That last clause is what makes this deferral
+  // honest: while Library hid disabled built-ins, a default-off built-in with no
+  // published catalog row was absent from BOTH tabs.
   const browseApps: RegistryApp[] = useMemo(() => {
     const hiddenBuiltins = new Set(
       apps.filter(a => a.origin === 'builtin' && a.manifest?.hidden).map(a => a.name),
@@ -572,15 +656,19 @@ export default function AppsPage() {
     () => new Map(registry.filter(r => r.updateAvailable).map(r => [r.name, r.version])),
     [registry],
   )
+  /**
+   * Library rows. `libraryView` owns which rows appear and in what order, and its
+   * comment carries why both are decided once per visit; the ref is the map it
+   * holds that decision in, kept out of state so it cannot trigger a render.
+   */
+  const viewRef = useRef(new Map<string, LibrarySlot>())
   const installedApps = useMemo(
     () =>
-      apps
-        .filter(keepInLibrary)
-        .map(a => ({
-          ...a,
-          updateAvailable: updateMap.has(a.name),
-          _newVersion: updateMap.get(a.name),
-        })),
+      libraryView(apps, viewRef.current).map(a => ({
+        ...a,
+        updateAvailable: updateMap.has(a.name),
+        _newVersion: updateMap.get(a.name),
+      })),
     [apps, updateMap],
   )
   const filteredInstalled = useMemo(() => {
@@ -723,14 +811,12 @@ export default function AppsPage() {
         }))
         setTimeout(() => setSuccessMsg(''), 4000)
       }
-      // Show toast when hiding a builtin app
-      if (action === 'disable') {
-        const app = apps.find(a => a.name === name)
-        if (app?.origin === 'builtin') {
-          setSuccessMsg(i18nT('pages.appsPage.hidden_you_can_re_enable_it_from_the_discover_ta'))
-          setTimeout(() => setSuccessMsg(''), 4000)
-        }
-      }
+      // No toast on disabling a builtin. This used to say "Disabled. You can
+      // re-enable it from the Discover tab", which existed only because the row
+      // vanished from Library on disable -- and it pointed at a dead end for a
+      // builtin with no published catalog row, which is the very case this change
+      // fixes. The row now stays in place with an Enable button under the cursor,
+      // so the state change is visible where it happened and needs no narration.
     } catch (e) {
       if (action === 'enable' && isTrustDeniedError(e)) trust.open(trustTarget(name))
       else setError((e as Error)?.message || i18nT('pages.appsPage.action_failed', { action, name }))

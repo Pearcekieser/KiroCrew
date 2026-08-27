@@ -7734,7 +7734,6 @@
       "failed_to_uninstall": "{{name}} 제거에 실패했습니다",
       "failed_to_update": "업데이트에 실패했습니다: {{names}}",
       "find_apps_in_the_discover_tab_or_install_from_a": "[탐색] 탭에서 앱을 찾거나, 위쪽 소스 톱니바퀴로 로컬 경로에서 설치하세요.",
-      "hidden_you_can_re_enable_it_from_the_discover_ta": "비활성화되었습니다. [탐색] 탭에서 다시 활성화할 수 있습니다.",
       "keep_app_data": "앱 데이터 유지",
       "keep_dependency": "종속성 {{name}} 유지",
       "keep_this_dependency": "이 종속성 유지",

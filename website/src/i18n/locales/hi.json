@@ -7849,7 +7849,6 @@
       "failed_to_uninstall": "{{name}} अनइंस्टॉल नहीं हो सका",
       "failed_to_update": "अपडेट नहीं हो सका: {{names}}",
       "find_apps_in_the_discover_tab_or_install_from_a": "ऐप्स डिस्कवर टैब में खोजें, या ऊपर दिए सोर्स गियर से किसी स्थानीय पथ से इंस्टॉल करें।",
-      "hidden_you_can_re_enable_it_from_the_discover_ta": "बंद कर दिया गया। इसे डिस्कवर टैब से फिर चालू किया जा सकता है।",
       "keep_app_data": "ऐप डेटा रखें",
       "keep_dependency": "डिपेंडेंसी {{name}} रखें",
       "keep_this_dependency": "इस निर्भरता को रखें",

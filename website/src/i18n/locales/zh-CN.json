@@ -7734,7 +7734,6 @@
       "failed_to_uninstall": "卸载 {{name}} 失败",
       "failed_to_update": "更新失败：{{names}}",
       "find_apps_in_the_discover_tab_or_install_from_a": "在“发现”标签页查找应用，或通过上方的来源齿轮图标从本地路径安装。",
-      "hidden_you_can_re_enable_it_from_the_discover_ta": "已停用。可以在“发现”标签页重新启用。",
       "keep_app_data": "保留应用数据",
       "keep_dependency": "保留依赖 {{name}}",
       "keep_this_dependency": "保留此依赖",

@@ -394,17 +394,43 @@ describe('AppsPage — Library actions', () => {
     expect(probe).toHaveAttribute('data-auto', '')
   })
 
-  it('toasts after disabling a builtin and clears the toast on dismiss', async () => {
+  it('keeps the builtin row listed after disabling it, with no toast', async () => {
+    // The toast used to say "re-enable it from the Discover tab" because the row
+    // vanished on disable. It stays now, so the Enable button is the recovery
+    // path and nothing narrates a disappearance that no longer happens -- and the
+    // old copy pointed at a dead end for a builtin with no catalog row.
     listApps.mockResolvedValue([{ ...BUILTIN_OFF, enabled: true }])
     renderPage()
     await catalogReady()
     goLibrary()
     fireEvent.click(await screen.findByRole('button', { name: 'Disable' }))
     await waitFor(() => expect(disableApp).toHaveBeenCalledWith('pets'))
-    expect(await screen.findByText('Disabled. You can re-enable it from the Discover tab.')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Dismiss message' }))
-    await waitFor(() =>
-      expect(screen.queryByText('Disabled. You can re-enable it from the Discover tab.')).toBeNull())
+    expect(screen.queryByText(/re-enable it from the Discover tab/)).toBeNull()
+  })
+
+  it('lists a builtin that is already disabled, with an Enable button', async () => {
+    // The reachability property itself: a disabled builtin is in Library at all.
+    listApps.mockResolvedValue([{ ...BUILTIN_OFF, enabled: false }])
+    renderPage()
+    await catalogReady()
+    goLibrary()
+    expect(await screen.findByRole('button', { name: 'Enable' })).toBeInTheDocument()
+  })
+
+  it('orders enabled rows above disabled ones', async () => {
+    // Listing disabled builtins adds ~20 rows on a fresh install and Library has
+    // only a search box, so ordering is what keeps the apps in use on top. The
+    // gateway returns them disabled-first here, so a pass-through would fail.
+    listApps.mockResolvedValue([
+      { ...BUILTIN_OFF, name: 'zeta-off', displayName: 'Zeta Off', enabled: false },
+      { ...BUILTIN_OFF, name: 'alpha-on', displayName: 'Alpha On', enabled: true },
+    ])
+    renderPage()
+    await catalogReady()
+    goLibrary()
+    await screen.findByText('Alpha On')
+    const rendered = screen.getAllByText(/Alpha On|Zeta Off/).map(n => n.textContent)
+    expect(rendered.indexOf('Alpha On')).toBeLessThan(rendered.indexOf('Zeta Off'))
   })
 
   it('reports a failed disable with the action-failed message', async () => {
@@ -720,16 +746,9 @@ describe('AppsPage — Library enable and update', () => {
 })
 
 describe('AppsPage — toast expiry', () => {
-  it('the disable toast clears itself after four seconds', async () => {
-    listApps.mockResolvedValue([{ ...BUILTIN_OFF, enabled: true }])
-    renderPage()
-    await catalogReady()
-    goLibrary()
-    fireEvent.click(await screen.findByRole('button', { name: 'Disable' }))
-    await screen.findByText('Disabled. You can re-enable it from the Discover tab.')
-    await act(async () => { vi.advanceTimersByTime(4000) })
-    expect(screen.queryByText('Disabled. You can re-enable it from the Discover tab.')).toBeNull()
-  })
+  // The disable-a-builtin toast is gone (the row stays listed, so nothing needs
+  // narrating), and with it the case that used to pin the four-second self-clear
+  // here. The Update All toast below pins the same timer on a toast that remains.
 
   it('the Update All toast clears itself after four seconds', async () => {
     renderPage()

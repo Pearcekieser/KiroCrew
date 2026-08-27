@@ -7849,7 +7849,6 @@
       "failed_to_uninstall": "{{name}} আনইনস্টল করা যায়নি",
       "failed_to_update": "আপডেট করা যায়নি: {{names}}",
       "find_apps_in_the_discover_tab_or_install_from_a": "আবিষ্কার ট্যাবে অ্যাপ খুঁজে নাও, বা উপরের সোর্স গিয়ার দিয়ে কোনো লোকাল পাথ থেকে ইনস্টল করো।",
-      "hidden_you_can_re_enable_it_from_the_discover_ta": "নিষ্ক্রিয় করা হয়েছে। আবিষ্কার ট্যাব থেকে আবার সক্রিয় করতে পারো।",
       "keep_app_data": "অ্যাপের ডেটা রেখে দিন",
       "keep_dependency": "{{name}} ডিপেনডেন্সি রেখে দাও",
       "keep_this_dependency": "এই ডিপেনডেন্সিটি রেখে দিন",

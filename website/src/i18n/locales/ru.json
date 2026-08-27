@@ -8079,7 +8079,6 @@
       "failed_to_uninstall": "Не удалось удалить {{name}}",
       "failed_to_update": "Не удалось обновить: {{names}}",
       "find_apps_in_the_discover_tab_or_install_from_a": "Ищи приложения на вкладке «Обзор» или установи из локального пути через шестерёнку источников выше.",
-      "hidden_you_can_re_enable_it_from_the_discover_ta": "Отключено. Снова включить можно на вкладке «Обзор».",
       "keep_app_data": "Сохранить данные приложения",
       "keep_dependency": "Сохранить зависимость {{name}}",
       "keep_this_dependency": "Сохранить эту зависимость",

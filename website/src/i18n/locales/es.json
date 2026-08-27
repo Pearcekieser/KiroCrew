@@ -7964,7 +7964,6 @@
       "failed_to_uninstall": "No se pudo desinstalar {{name}}",
       "failed_to_update": "No se pudo actualizar: {{names}}",
       "find_apps_in_the_discover_tab_or_install_from_a": "Encuentra apps en la pestaña Descubrir o instala desde una ruta local con el engranaje de orígenes de arriba.",
-      "hidden_you_can_re_enable_it_from_the_discover_ta": "Desactivada. Puedes volver a habilitarla desde la pestaña Descubrir.",
       "keep_app_data": "Conservar los datos de la app",
       "keep_dependency": "Conservar la dependencia {{name}}",
       "keep_this_dependency": "Conservar esta dependencia",

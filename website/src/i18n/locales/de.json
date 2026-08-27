@@ -7849,7 +7849,6 @@
       "failed_to_uninstall": "{{name}} konnte nicht deinstalliert werden",
       "failed_to_update": "Aktualisierung fehlgeschlagen: {{names}}",
       "find_apps_in_the_discover_tab_or_install_from_a": "Finde Apps im Tab „Entdecken“ oder installiere sie über das Quellen-Zahnradsymbol oben aus einem lokalen Pfad.",
-      "hidden_you_can_re_enable_it_from_the_discover_ta": "Deaktiviert. Du kannst sie im Tab „Entdecken“ wieder aktivieren.",
       "keep_app_data": "App-Daten behalten",
       "keep_dependency": "Abhängigkeit {{name}} behalten",
       "keep_this_dependency": "Diese Abhängigkeit behalten",
