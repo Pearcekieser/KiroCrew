@@ -127,7 +127,7 @@ class WatchdogSettings:
     behaves identically to a default config.
 
     Every idle window must stay strictly inside the turn's own wall-clock
-    ceiling — see :func:`_clamp_to_turn_ceiling` for why and
+    ceiling — see :func:`_clamp_to_prompt_ceiling` for why and
     :data:`_TURN_CEILING_WINDOW_FRACTION` for the enforced headroom."""
 
     check_after_secs: float = 60.0
@@ -1657,6 +1657,17 @@ class AcpSessionHandle:
             avail = models.get("availableModels", [])
             if isinstance(avail, list):
                 self._available_models = self._normalize_models(avail)
+            # A backend may advertise its model list without echoing
+            # ``currentModelId`` (it is best-effort in the ACP shape). When it
+            # names exactly one model that IS the served model unambiguously, so
+            # adopt it as the resolved id — otherwise ``served_model`` reports
+            # ``""`` for the whole session on an unpinned run (no ``set_model``,
+            # no ``currentModelId``), which is why the panel's model chip stays
+            # blank until completion fills it from a different source. With two
+            # or more advertised and no ``currentModelId`` the served choice is
+            # genuinely unknown, so leave it empty rather than guess.
+            if not self._resolved_model_id and len(self._available_models) == 1:
+                self._resolved_model_id = self._available_models[0]["modelId"]
         elif isinstance(models, list):
             self._available_models = self._normalize_models(models)
 
@@ -1902,10 +1913,15 @@ class AcpSessionHandle:
                     # ── Verdict-driven watchdogs ──
                     # Wellness (the liveness oracle) is the detector; timeouts
                     # govern only the UNKNOWN class. Idle clocks: the stale clock
-                    # folds in the runtime's stderr/keepalive clock (_last_activity
-                    # — kiro streams thinking_tokens on STDERR during reasoning);
-                    # the tool clock keys off session-queue frames only (keepalive
-                    # and progress frames for the session reset last_data_ts, so a
+                    # folds in the runtime's activity clock (_last_activity —
+                    # advanced by stdout lines, outbound requests and
+                    # notifications, and the /api/session-keepalive touch, but
+                    # NOT by a response or error we send back, and NOT by
+                    # stderr: AcpRuntime's stderr drain only rings the
+                    # _stderr_lines buffer, so a kiro-cli reasoning burst on
+                    # stderr does not move this clock); the tool clock keys off
+                    # session-queue frames only (keepalive and progress frames
+                    # for the session reset last_data_ts, so a
                     # legitimately-streaming tool keeps the watchdog satisfied).
                     if self._cancelled:
                         continue

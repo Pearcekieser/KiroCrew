@@ -662,6 +662,72 @@ class TestAcpClientSessionKey:
         await _stop_stderr_drain(client)
 
     @pytest.mark.asyncio
+    async def test_spawn_gives_each_process_its_own_browser_session(self, tmp_path):
+        """Two agent processes must not address the same playwright-cli browser.
+
+        Sharing the CLI's ``default`` session lets one process navigate or close
+        the other's page; the name is per PROCESS, so two spawns differ even for
+        the same session key (a pooled process is spawned before it is claimed).
+        """
+        names = []
+        for _ in range(2):
+            client = AcpClient(work_dir=tmp_path, session_key="same-key")
+            with (
+                patch("kiro_crew.acp.client._resolve_kiro_bin", return_value="/usr/bin/kiro-cli"),
+                patch(
+                    "kiro_crew.acp.client.wrap_argv",
+                    return_value=(["/usr/bin/kiro-cli", "acp"], None),
+                ),
+                patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+                patch("kiro_crew.session._track_pid"),
+                patch("kiro_crew.session._track_session_pid"),
+            ):
+                mock_proc = MagicMock()
+                mock_proc.pid = 12345
+                mock_proc.returncode = None
+                mock_exec.return_value = mock_proc
+
+                await client._spawn()
+
+                call_kwargs = mock_exec.call_args
+                env = call_kwargs.kwargs.get("env") or call_kwargs[1].get("env")
+                assert env is not None
+                assert env["PLAYWRIGHT_CLI_SESSION"].startswith("kc-")
+                names.append(env["PLAYWRIGHT_CLI_SESSION"])
+
+            await _stop_stderr_drain(client)
+
+        assert names[0] != names[1]
+
+    @pytest.mark.asyncio
+    async def test_spawn_keeps_an_operator_set_browser_session(self, tmp_path, monkeypatch):
+        """An operator who named a session means that one browser."""
+        monkeypatch.setenv("PLAYWRIGHT_CLI_SESSION", "chrome")
+        client = AcpClient(work_dir=tmp_path, session_key="k")
+        with (
+            patch("kiro_crew.acp.client._resolve_kiro_bin", return_value="/usr/bin/kiro-cli"),
+            patch(
+                "kiro_crew.acp.client.wrap_argv", return_value=(["/usr/bin/kiro-cli", "acp"], None)
+            ),
+            patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec,
+            patch("kiro_crew.session._track_pid"),
+            patch("kiro_crew.session._track_session_pid"),
+        ):
+            mock_proc = MagicMock()
+            mock_proc.pid = 12345
+            mock_proc.returncode = None
+            mock_exec.return_value = mock_proc
+
+            await client._spawn()
+
+            call_kwargs = mock_exec.call_args
+            env = call_kwargs.kwargs.get("env") or call_kwargs[1].get("env")
+            assert env is not None
+            assert env["PLAYWRIGHT_CLI_SESSION"] == "chrome"
+
+        await _stop_stderr_drain(client)
+
+    @pytest.mark.asyncio
     async def test_spawn_no_channel_id_env_absent(self, tmp_path):
         client = AcpClient(work_dir=tmp_path, session_key="k", channel_id=None)
         with (
@@ -931,7 +997,7 @@ class TestAcpClientBackendSelection:
                     _sent.update(params)
                 return 1
 
-            async def fake_wait(_req_id, timeout=0):
+            async def fake_wait(_req_id, timeout=0, *, method="", expected_mcp=None):
                 return {"protocolVersion": expected, "agentCapabilities": {}}
 
             client._send_request = fake_send_request  # type: ignore[assignment]
@@ -4262,7 +4328,7 @@ class TestInitializeSession:
             2: {"sessionId": "sess-abc"},
         }
 
-        async def fake_wait(req_id, timeout=50.0):
+        async def fake_wait(req_id, timeout=50.0, *, method="", expected_mcp=None):
             return responses.get(req_id, {})
 
         client._wait_for_response = AsyncMock(side_effect=fake_wait)
@@ -4291,7 +4357,7 @@ class TestInitializeSession:
             2: {"modes": ["chat"]},  # load success
         }
 
-        async def fake_wait(req_id, timeout=50.0):
+        async def fake_wait(req_id, timeout=50.0, *, method="", expected_mcp=None):
             return responses.get(req_id, {})
 
         client._wait_for_response = AsyncMock(side_effect=fake_wait)
@@ -4319,7 +4385,7 @@ class TestInitializeSession:
 
         call_idx = [0]
 
-        async def fake_wait(req_id, timeout=50.0):
+        async def fake_wait(req_id, timeout=50.0, *, method="", expected_mcp=None):
             call_idx[0] += 1
             if call_idx[0] == 1:
                 return {"protocolVersion": "2025-08-22", "agentCapabilities": {"loadSession": True}}
@@ -4351,7 +4417,7 @@ class TestInitializeSession:
 
         call_idx = [0]
 
-        async def fake_wait(req_id, timeout=50.0):
+        async def fake_wait(req_id, timeout=50.0, *, method="", expected_mcp=None):
             call_idx[0] += 1
             if call_idx[0] == 1:
                 return {"protocolVersion": "2025-08-22", "agentCapabilities": {"loadSession": True}}
@@ -4373,7 +4439,7 @@ class TestInitializeSession:
 
         send_calls = []
 
-        async def fake_wait(req_id, timeout=50.0):
+        async def fake_wait(req_id, timeout=50.0, *, method="", expected_mcp=None):
             if req_id == 1:
                 return {"protocolVersion": "2025-08-22", "agentCapabilities": {}}
             if req_id == 2:
@@ -4404,7 +4470,7 @@ class TestInitializeSession:
 
         send_calls = []
 
-        async def fake_wait(req_id, timeout=50.0):
+        async def fake_wait(req_id, timeout=50.0, *, method="", expected_mcp=None):
             if req_id == 1:
                 return {"protocolVersion": "2025-08-22", "agentCapabilities": {}}
             if req_id == 2:
@@ -7157,6 +7223,34 @@ class TestWaitForResponseDeferral:
         assert m0.method == "session/request_permission"
         assert m1.id == 88
 
+    def test_session_timeout_progress_names_missing_failed_and_oauth_servers(self, tmp_path):
+        from kiro_crew.acp.types import JsonRpcMessage
+
+        client = AcpClient(work_dir=tmp_path)
+        client._mcp_notifications = [
+            JsonRpcMessage(
+                method="_kiro.dev/mcp/server_initialized", params={"serverName": "ready"}
+            ),
+            JsonRpcMessage(
+                method="_kiro.dev/mcp/server_init_failure",
+                params={
+                    "serverName": "broken",
+                    "error": "aws_secret_access_key=supersecret connection failed",
+                },
+            ),
+            JsonRpcMessage(method="_kiro.dev/mcp/oauth_request", params={"serverName": "oauth"}),
+        ]
+
+        progress = client._mcp_timeout_progress(
+            [{"name": "ready"}, {"name": "broken"}, {"name": "silent"}]
+        )
+
+        assert "2/3 MCP server(s) reported" in progress
+        assert "no report from silent" in progress
+        assert "failed: broken" in progress
+        assert "supersecret" not in progress
+        assert "awaiting authorization: oauth" in progress
+
 
 class TestWaitForResponseActivityDeadline:
     """Low-A: a steady stream of notifications keeps _wait_for_response alive
@@ -8939,7 +9033,7 @@ class TestSubstitutionFollow:
         # _wait_for_response does. Second wait: real session on the substitute.
         calls = {"n": 0}
 
-        async def _wait(req_id, timeout=0.0):
+        async def _wait(req_id, timeout=0.0, *, method="", expected_mcp=None):
             calls["n"] += 1
             if calls["n"] == 1:
                 client._last_substitution_model = "global.anthropic.claude-sonnet-4-6[1m]"
@@ -8971,7 +9065,7 @@ class TestSubstitutionFollow:
             sent.append(method)
             return len(sent)
 
-        async def _wait(req_id, timeout=0.0):
+        async def _wait(req_id, timeout=0.0, *, method="", expected_mcp=None):
             return {"sessionId": "sess-ok"}
 
         client._send_request = _send  # type: ignore[assignment]
@@ -8999,7 +9093,7 @@ class TestSubstitutionFollow:
             sent.append(method)
             return len(sent)
 
-        async def _wait(req_id, timeout=0.0):
+        async def _wait(req_id, timeout=0.0, *, method="", expected_mcp=None):
             client._last_substitution_model = None  # unparseable
             return {}
 
@@ -9027,7 +9121,7 @@ class TestSubstitutionFollow:
             sent.append(method)
             return len(sent)
 
-        async def _wait(req_id, timeout=0.0):
+        async def _wait(req_id, timeout=0.0, *, method="", expected_mcp=None):
             client._last_substitution_model = "global.anthropic.claude-sonnet-4-6[1m]"
             return {}
 
@@ -9062,7 +9156,7 @@ class TestSubstitutionWrappersAndRedaction:
         async def _send(method, params):
             return 1
 
-        async def _wait(req_id, timeout=0.0):
+        async def _wait(req_id, timeout=0.0, *, method="", expected_mcp=None):
             return {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}}
 
         client._send_request = _send  # type: ignore[assignment]
@@ -9093,7 +9187,7 @@ class TestSubstitutionWrappersAndRedaction:
         async def _send(method, params):
             return 1
 
-        async def _wait(req_id, timeout=0.0):
+        async def _wait(req_id, timeout=0.0, *, method="", expected_mcp=None):
             return {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}}
 
         client._send_request = _send  # type: ignore[assignment]
@@ -9124,7 +9218,7 @@ class TestSubstitutionWrappersAndRedaction:
         async def _send(method, params):
             return 1
 
-        async def _wait(req_id, timeout=0.0):
+        async def _wait(req_id, timeout=0.0, *, method="", expected_mcp=None):
             return {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}}
 
         client._send_request = _send  # type: ignore[assignment]
@@ -9171,7 +9265,7 @@ class TestSubstitutionWrappersAndRedaction:
 
         wait_calls = {"n": 0}
 
-        async def _wait(req_id, timeout=0.0):
+        async def _wait(req_id, timeout=0.0, *, method="", expected_mcp=None):
             wait_calls["n"] += 1
             if wait_calls["n"] == 1:
                 client._last_substitution_model = url_shaped
@@ -9225,7 +9319,7 @@ class TestSubstitutionWrappersAndRedaction:
         async def _send(method, params):
             return 1
 
-        async def _wait(req_id, timeout=0.0):
+        async def _wait(req_id, timeout=0.0, *, method="", expected_mcp=None):
             return {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}}
 
         client._send_request = _send  # type: ignore[assignment]
@@ -9284,7 +9378,7 @@ class TestSubstitutionWrappersAndRedaction:
         async def _send(method, params):
             return 1
 
-        async def _wait(req_id, timeout=0.0):
+        async def _wait(req_id, timeout=0.0, *, method="", expected_mcp=None):
             return {"protocolVersion": 1, "agentCapabilities": {"loadSession": False}}
 
         client._send_request = _send  # type: ignore[assignment]

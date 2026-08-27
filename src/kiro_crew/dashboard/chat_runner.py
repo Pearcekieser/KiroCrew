@@ -2770,6 +2770,47 @@ def _schedule_widget_registration(
         image_task.add_done_callback(state._background_tasks.discard)
 
 
+def _strip_yaml_frontmatter(content: str) -> str:
+    """Strip a leading YAML frontmatter block from prompt/SOP *content*.
+
+    Frontmatter carries display metadata (title, description) for the prompt
+    library UI; only the body is meant to reach the model, so injecting the
+    block would leak that metadata into the agent turn. Recognized only when
+    the first line is exactly ``---`` (an optional UTF-8 BOM is tolerated) and
+    removed through the next line that starts with ``---`` or is exactly
+    ``...``, plus any blank lines that follow the terminator. Deliberately
+    line-based — no YAML parser — so untrusted prompt files are never parsed,
+    and fail-open: with no terminator the whole file is treated as body and
+    returned unchanged rather than silently dropping content on malformed
+    frontmatter.
+
+    A fence LOCATOR, not a field parser — deliberately outside
+    ``kiro_crew.frontmatter`` (same stance as ``SkillsLoader.strip_frontmatter``).
+    The grammar that DECIDES what the prompt library shows as frontmatter is
+    ``frontmatter._COLUMN0_BLOCK_RE`` (the ``column0_fence`` extraction, reached
+    via ``_extract_sop_description`` → ``SkillsLoader._parse_frontmatter``),
+    whose closer only has to start with ``---`` — so this closer test mirrors
+    that, or a ``--- `` / ``---junk`` closer would display as metadata yet be
+    injected verbatim, reintroducing the leak. Editing either grammar means
+    revisiting the other. This locator strips a superset on purpose (BOM/CRLF
+    openers, a ``...`` closer): where the two disagree, erring toward stripping
+    withholds display metadata from the model, never body the UI treats as
+    content.
+    """
+    text = content.removeprefix("\ufeff")
+    lines = text.split("\n")
+    if not lines or lines[0].rstrip("\r") != "---":
+        return content
+    for idx in range(1, len(lines)):
+        probe = lines[idx].rstrip("\r").rstrip()
+        if probe.startswith("---") or probe == "...":
+            body_start = idx + 1
+            while body_start < len(lines) and not lines[body_start].strip():
+                body_start += 1
+            return "\n".join(lines[body_start:])
+    return content
+
+
 def _expand_prompt_mention(
     message: str,
     state: DashboardState,
@@ -2814,6 +2855,10 @@ def _expand_prompt_mention(
         )
         return message, "too_large"
     content = raw.decode("utf-8", errors="replace")
+    # Strip display-metadata frontmatter BEFORE redaction and the char count,
+    # so both the redaction pass and the user-visible "Loaded prompt … chars"
+    # line operate on exactly what the agent receives.
+    content = _strip_yaml_frontmatter(content)
 
     content, _ = redact_credentials(content)
     content, _ = redact_exfiltration_urls(content)
@@ -5789,6 +5834,24 @@ async def _run_chat(
             state.sessions.begin_turn(session_key)
         except SessionClosingError:
             logger.info("Aborting dispatch for %s — gateway is shutting down", session_key)
+            return
+        # Stop-before-dispatch gate: a Stop pressed during the async prep above
+        # (session cold start, context build) finds no session to cancel —
+        # SessionManager.stop_turn answers "idle" and the stop card resolves —
+        # so nothing downstream would ever honor it and the turn would open and
+        # stream to completion behind a card that says stopped (#5464). The
+        # point-in-time _stop_state is useless here (the idle resolution has
+        # already snapped it back), so compare _stop_generation, which counts
+        # stop INITIATIONS and never rewinds, against the turn-entry snapshot —
+        # the same durable signal the stop-hook suppression uses. Synchronous,
+        # beside the begin_turn gate, so no await separates the read from the
+        # stream's turn registration.
+        if getattr(slot, "_stop_generation", 0) != _stop_gen_turn_start:
+            logger.info(
+                "Aborting dispatch for %s — Stop was pressed while the turn "
+                "was still being prepared (no session existed to cancel yet)",
+                session_key,
+            )
             return
         async for event in event_stream:
             # Heartbeat every 5s during long operations

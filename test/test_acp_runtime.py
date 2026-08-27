@@ -5531,6 +5531,53 @@ async def test_runtime_spawn_scrubs_sensitive_env_on_default_auto(monkeypatch):
     assert env.get("AWS_ACCESS_KEY_ID") == "FAKE-akid"
 
 
+@pytest.mark.asyncio
+async def test_runtime_spawn_names_its_own_browser_session(monkeypatch):
+    """A subagent gets its own playwright-cli browser, not the parent's.
+
+    AcpRuntime builds its child environment independently of AcpClient, so this
+    is the drift guard: without it a subagent's ``goto`` lands in whatever page
+    the parent was reading, and its ``close`` takes the parent's browser down.
+    """
+    import kiro_crew.acp.runtime as runtime_mod
+
+    monkeypatch.delenv("PLAYWRIGHT_CLI_SESSION", raising=False)
+    captured: dict[str, object] = {}
+
+    class _StopSpawn(Exception):
+        pass
+
+    async def _fake_exec(*_args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        raise _StopSpawn()
+
+    async def resolve_kiro_bin():
+        return "/fake/kiro"
+
+    monkeypatch.setattr(runtime_mod, "_resolve_kiro_bin_for_spawn", resolve_kiro_bin)
+    monkeypatch.setattr(
+        runtime_mod,
+        "wrap_argv",
+        lambda argv, mode, strip_python_env=False, is_kiro_cli=None: (argv, None),
+    )
+    monkeypatch.setattr(runtime_mod, "cgroup_scope_argv", lambda argv: argv)
+    monkeypatch.setattr(runtime_mod, "augmented_path", lambda p: p)
+    monkeypatch.setattr(runtime_mod, "resolve_krb5_ccname", lambda env: None)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
+    names = []
+    for _ in range(2):
+        rt = AcpRuntime(sandbox_mode="auto")
+        with pytest.raises(_StopSpawn):
+            await rt.spawn()
+        env = captured["env"]
+        assert isinstance(env, dict)
+        names.append(env["PLAYWRIGHT_CLI_SESSION"])
+
+    assert all(name.startswith("kc-") for name in names)
+    assert names[0] != names[1]
+
+
 # ── Unroutable-frame drop accounting (log-flood containment) ──
 #
 # The reader drops any frame it cannot route. Logging that per frame turned a
@@ -7372,3 +7419,57 @@ async def test_cancel_during_drain_reject_does_not_wedge_handle():
     assert handle.is_turn_active is False  # not wedged
     # The stranded request went back on the queue for the next drain.
     assert not q["sA"].empty()
+
+
+# ── store_session_config: resolved-model capture (issue #5869) ──
+
+
+def test_store_session_config_adopts_sole_advertised_model_when_no_current_id():
+    """An unpinned session whose ``session/new`` advertises exactly one model
+    but omits ``currentModelId`` must still resolve that model, so ``served_model``
+    is non-empty for the whole run (the panel model chip depends on it)."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle.store_session_config(
+        {"models": {"availableModels": [{"modelId": "kiro-model-x", "name": "X"}]}}
+    )
+    assert handle._resolved_model_id == "kiro-model-x"
+    assert handle.served_model == "kiro-model-x"
+
+
+def test_store_session_config_current_model_id_wins_over_sole_advertised():
+    """When the backend DOES echo ``currentModelId`` it is authoritative — the
+    sole-advertised fallback must not override it."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle.store_session_config(
+        {
+            "models": {
+                "currentModelId": "kiro-current",
+                "availableModels": [{"modelId": "kiro-other", "name": "Other"}],
+            }
+        }
+    )
+    assert handle._resolved_model_id == "kiro-current"
+
+
+def test_store_session_config_leaves_model_empty_when_ambiguous():
+    """Two or more advertised models and no ``currentModelId`` is genuinely
+    ambiguous — do not guess; ``served_model`` stays empty."""
+    rt, _, _ = _make_runtime()
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle.store_session_config(
+        {
+            "models": {
+                "availableModels": [
+                    {"modelId": "kiro-a", "name": "A"},
+                    {"modelId": "kiro-b", "name": "B"},
+                ]
+            }
+        }
+    )
+    assert handle._resolved_model_id == ""
+    assert handle.served_model == ""

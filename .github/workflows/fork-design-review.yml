@@ -263,6 +263,11 @@ jobs:
           # Inference via Amazon Bedrock (region from the AWS creds step above).
           use_bedrock: "true"
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Allow-list the fork actor so claude-code-action >=1.0.194 does not
+          # abort before the model call (issue #6116). Setting this input
+          # auto-enables the action's subprocess secret-scrub + bubblewrap
+          # isolation, which covers this lane's Bash(git diff/gh pr) grants.
+          allowed_non_write_users: "*"
           # Fable 5's BARE, REGIONAL (`us.`) Bedrock inference-profile id, with an
           # Opus 4.8 overload fallback — matches design-review.yml exactly.
           claude_args: |

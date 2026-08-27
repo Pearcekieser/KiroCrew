@@ -232,7 +232,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
  * Rendered at two call sites with the same behaviour and different emphasis, so
  * the confirm step cannot drift between them.
  */
-function RestartGatewayButton({
+export function RestartGatewayButton({
   primary,
   pending,
   restarting,
@@ -1359,7 +1359,7 @@ export function AboutPanel() {
             pages/settings/ReleasesPanel.tsx. */}
         <div className="mt-3 pt-3 border-t border-border">
           <Link
-            to="?tab=releases"
+            to="/settings/releases"
             className="text-[13px] text-accent hover:underline inline-flex items-center gap-1.5"
           >
             <History size={13} className="lucide-inline" aria-hidden="true" />

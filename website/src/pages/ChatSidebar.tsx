@@ -55,7 +55,7 @@ import SessionMoveUndoBar, { MOVE_UNDO_MS, type MovedSession } from '../componen
 import SessionActionsMenu from '../components/SessionActionsMenu'
 import { ChannelBrandIcon, hasChannelBrandIcon } from '../components/ChannelBrandIcon'
 import TagManagerList from '../components/TagManagerList'
-import { DndDraggable, DndDroppable } from '../components/dnd'
+import { DndDraggable, DndDroppable, pointerWithinDeepest, closestEdge } from '../components/dnd'
 import { collectFolderSubtreeIds } from '../utils/folderTree'
 import { runBelongsToSlot } from '../apps/workflows/runModel'
 import { sanitizeLlmOutput } from '../utils/sanitize'
@@ -160,8 +160,8 @@ function slotStatusText(detail: { kind?: string; text?: string; toolName?: strin
  * want different collision behavior:
  *  - Dragging a folder: restrict collisions to folder sortable containers so
  *    verticalListSortingStrategy animates cleanly and `over.id` is a folder id.
- *  - Dragging a session: prefer the innermost droppable under the pointer
- *    (folder/root drop target), falling back to closestCenter.
+ *  - Dragging a session: prefer the innermost (DOM-deepest) droppable under
+ *    the pointer (folder/root drop target), falling back to closest-edge.
  */
 // Exported for a call-site unit test (ChatSidebar.folderNestBandCallSite.test.tsx):
 // asserts the collision uses the MEASURED header height, not
@@ -176,11 +176,22 @@ export const sidebarCollision: CollisionDetection = (args) => {
       // Target the innermost folder-drop zone under the pointer (or the root
       // lane to move to top level), excluding the dragged folder's own
       // subtree so it can never be dropped into itself or a descendant.
+      // Innermost = leaf-first by DOM containment: the root lane is every
+      // folder's ancestor with a viewport-sized box, so pointerWithin's
+      // box-size ranking would resolve a pointer on a tall expanded folder to
+      // the LANE and silently un-nest the dragged subfolder instead of
+      // re-parenting it.
       const dropContainers = args.droppableContainers.filter(c => {
         const d = c.data?.current as { type?: string; folderId?: string | null } | undefined
         return d?.type === 'folder-drop' && !(d.folderId && subtree.has(d.folderId))
       })
-      return pointerWithin({ ...args, droppableContainers: dropContainers })
+      const within = pointerWithinDeepest({ ...args, droppableContainers: dropContainers })
+      // A pointer drag outside every drop zone deliberately has NO target
+      // (releasing there keeps the current parent). A drag WITHOUT pointer
+      // coordinates (keyboard / synthetic activation) has no such "outside",
+      // so it degrades to closestCenter rather than resolving to nothing.
+      if (within.length || args.pointerCoordinates) return within
+      return closestCenter({ ...args, droppableContainers: dropContainers })
     }
     // Root folder drag: two gestures share the drag, disambiguated by where
     // the pointer sits on the target — the "thirds" pattern from VS Code /
@@ -233,23 +244,49 @@ export const sidebarCollision: CollisionDetection = (args) => {
     )
     return closestCenter({ ...args, droppableContainers: folderContainers })
   }
-  const within = pointerWithin(args)
-  if (within.length) return within
-  // Session drag that is inside no droppable: fall back to the nearest one, but
-  // NEVER to the chat-pane zone. That zone is a pane-sized rect living outside
-  // the sidebar, so by center-distance it would routinely beat the folder row
-  // the user was actually aiming at and steal near-miss drops. A pointer
-  // genuinely inside it still wins above, via `within`.
-  const fallback = args.droppableContainers.filter(
+  // Session drag. Containment first, leaf-first by DOM containment: the root
+  // lane is the folders' ancestor but its border box is only viewport-sized
+  // while an expanded folder block overflows it, so pointerWithin's box-size
+  // ranking would resolve a pointer on a tall folder's own rows to the LANE —
+  // no highlight on the folder, and the drop unfiles the session.
+  //
+  // Sidebar targets are consulted BEFORE the portaled chat-pane zone: the
+  // pane's rect can geometrically overlap the sidebar in overlay layouts, and
+  // with no DOM relation between the two trees containment cannot arbitrate —
+  // a pointer inside any sidebar droppable belongs to the sidebar, and the
+  // pane wins only when nothing in the sidebar contains the pointer.
+  const sidebarContainers = args.droppableContainers.filter(
     c => (c.data?.current as { type?: string } | undefined)?.type !== CHAT_PANE_DROP_TYPE
   )
-  return closestCenter({ ...args, droppableContainers: fallback })
+  const within = pointerWithinDeepest({ ...args, droppableContainers: sidebarContainers })
+  if (within.length) return within
+  const paneWithin = pointerWithinDeepest(args)
+  if (paneWithin.length) return paneWithin
+  // No pointer coordinates (keyboard / synthetic) and no sidebar droppable at
+  // all: the pane is the only conceivable target, so degrade to closestCenter
+  // over everything rather than resolving to nothing. Pointer drags never take
+  // this path — the pane must not win by mere proximity.
+  if (!args.pointerCoordinates && sidebarContainers.length === 0) return closestCenter(args)
+  // Session drag that is inside no droppable: fall back to the nearest one, but
+  // NEVER to the chat-pane zone. That zone is a pane-sized rect living outside
+  // the sidebar, so by proximity it would routinely beat the folder row the
+  // user was actually aiming at and steal near-miss drops. Nearness is
+  // measured to the rect's EDGE (closestEdge), not its center: a pointer a
+  // fraction of a px outside a tall expanded folder is half that folder's
+  // height from its center, so closestCenter would hand the drop to a small
+  // sibling instead.
+  return closestEdge({ ...args, droppableContainers: sidebarContainers })
 }
 
 /** Droppable `type` for the chat-pane target that stages a session reference in
  *  the composer. Lives outside the sidebar's DOM (portaled into ChatPage's pane)
  *  but inside its DndContext, so React context reaches it while `useDroppable`
  *  measures its real on-screen rect. */
+// Load-bearing invariant: the pane's portal host is never a DOM ancestor of
+// the sidebar lane — that is what keeps containment re-ranking from ever
+// arbitrating between the two trees (they always land in the "unrelated"
+// group). Re-pointing chatDropTarget at a wrapper shared with the sidebar
+// would break it.
 const CHAT_PANE_DROP_TYPE = 'chat-pane-ref'
 
 /**
@@ -524,6 +561,13 @@ interface Slot {
   interrupted?: boolean
   mode?: string
   agent?: string
+  // The agent that will actually answer, when it is NOT `agent`. The backend
+  // stores `agent` verbatim — it is the user's intent, and rewriting it on disk
+  // was destructive — and reports the divergence here instead. "" / absent means
+  // NOTHING TO REPORT, which covers both "the request is honored" and "resolution
+  // is not settled yet" (a cold snapshot during boot). So it must be read as a
+  // positive claim only: a falsy value never means "mismatch".
+  effective_agent?: string
   model?: string  // '' / absent = provider-default ("auto")
   // Message count from the slot payload. Already carried by every ChatSlot
   // (redux seeds it in addSlotOptimistic and SessionGridView renders it); it was
@@ -3110,6 +3154,9 @@ function ChatSidebar({
       if (a.nested) {
         // Nested subfolder drag = re-parent: into the folder-drop target, or
         // to the top level when dropped on the root lane (folderId null).
+        // moveFolderTo itself no-ops on the folder's current parent, so a
+        // drop resolving to it (easy to hit now that a tall parent's whole
+        // block is a reachable target) costs no write.
         if (o?.type === 'folder-drop') moveFolderTo(active.id as string, o.folderId ?? null)
         return
       }
@@ -3124,7 +3171,7 @@ function ChatSidebar({
       return
     }
     if (a?.type === 'session' && a.key) {
-      // Drop targets, innermost-first via pointerWithin:
+      // Drop targets, innermost-first via pointerWithinDeepest:
       //  chat-pane-ref → stage a LINK to this session in the open chat's composer
       //  folder-drop  → assign to that folder (folderId may be null for root lane)
       //  folder       → sortable folder container (whole block) → assign to its id
@@ -3468,6 +3515,20 @@ function ChatSidebar({
     // Board columns keep the separate native-HTML5 drag (their own scope).
     const dndRow = scope === 'list' || scope === 'flat'
     const agentName = s.agent || defaultAgent || ''
+    // A DIVERGENCE, not a status: the row is advertising `agentName` while a
+    // different agent answers the session — usually an app agent that was
+    // removed, or one whose registration has not landed yet. Shown because the
+    // stored binding is deliberately left verbatim, so without this the sidebar
+    // names an agent that is not running, and the user only finds out turns
+    // later when none of its tools are there.
+    //
+    // Empty is the common case and means "nothing to report", so the marker is
+    // gated on a non-empty value that actually differs from what is displayed —
+    // never on inequality alone, which would fire during the boot window on a
+    // healthy install. The `?? ''` is load-bearing: rows arrive from persisted
+    // and optimistically-added state that predates this field.
+    const effectiveAgent = s.effective_agent ?? ''
+    const agentDiverged = effectiveAgent !== '' && effectiveAgent !== agentName
     const agentMeta = installedAgents.find(a => a.name === agentName)
     const isPackageAgent = agentMeta?.source === 'package'
     const isBuiltin = agentMeta?.source === 'builtin'
@@ -3857,8 +3918,43 @@ function ChatSidebar({
           <div className="flex-1 min-w-0 overflow-hidden">
             <div className={`session-agent-label ${ROW_META_CLS} font-semibold truncate flex items-center gap-1 ${agentColor}`}>
               <AnimatePresence mode="wait">
-                <motion.span key={agentName || 'empty'} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className={`truncate shrink-0 ${resolvedSlotTags.length > 0 ? 'max-w-[50%]' : ''}`}>{agentName || '\u00A0'}</motion.span>
+                <motion.span key={agentName || 'empty'} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className={`truncate shrink-0 ${resolvedSlotTags.length > 0 || agentDiverged ? 'max-w-[50%]' : ''}`}>{agentName || '\u00A0'}</motion.span>
               </AnimatePresence>
+              {agentDiverged && (
+                // Plain secondary TEXT, deliberately not a badge, a colour or an
+                // icon. It is informational — the session works, it is simply
+                // answered by someone else — so it must not read as an error, and
+                // it must not be the row's loudest element.
+                //
+                // Accessibility follows from being real text: it is in the
+                // accessible name of the meta line, read in document order by a
+                // screen reader, and legible with colour vision ignored (it
+                // inherits the line's muted tone rather than encoding meaning in
+                // a hue). Nothing here is hover-only — the `title` merely repeats
+                // the visible string so a truncated row can still be read in
+                // full, which is why it is not the only carrier of the meaning.
+                //
+                // `font-normal` because the line is `font-semibold` for the agent
+                // name; `shrink-0` because only the tag group owns the truncate
+                // budget on this flex row.
+                <span
+                  data-testid="session-effective-agent"
+                  // Shrinkable and ellipsizing, NOT `shrink-0`. The trailing meta
+                  // group is `ml-auto … shrink-0` (see :4013 below), so an
+                  // unbounded marker here squeezes the timestamp and channel
+                  // glyphs off a minimum-width sidebar. This is the row's least
+                  // important fact, so it is the one that yields: `min-w-0` lets
+                  // flexbox shrink it, `max-w-[45%]` stops it from claiming the
+                  // line before shrinking starts, and `truncate` ellipsizes what
+                  // is left — the same shape as the tag group below, and the
+                  // reason the `title` is worth keeping.
+                  className="min-w-0 max-w-[45%] truncate font-normal text-muted"
+                  title={i18nT('pages.chatSidebar.answered_by', { agent: effectiveAgent })}
+                >
+                  <span aria-hidden>{'\u00A0·\u00A0'}</span>
+                  {i18nT('pages.chatSidebar.answered_by', { agent: effectiveAgent })}
+                </span>
+              )}
               {resolvedSlotTags.length > 0 && (
                 // Every tag, each as `· <name>` tinted with the tag's own colour
                 // and NO border — plain text sitting as context beside the agent
@@ -5089,7 +5185,7 @@ function ChatSidebar({
           // there is nothing for a drop inside the lane to land on. (Order is
           // the reason: a flat lane spans every folder, so a manual position
           // would have no place to be stored.) `sidebarCollision` also keeps the
-          // pane out of its closestCenter fallback, so a release inside the
+          // pane out of its closest-edge fallback, so a release inside the
           // sidebar resolves to no target rather than snapping to the pane.
           <DndContext sensors={dndSensors} collisionDetection={sidebarCollision}
             measuring={dndMeasuring}

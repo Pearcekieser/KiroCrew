@@ -23,6 +23,7 @@
         "reasoning_effort": "",
         "provider": "acp",
         "mcp_registry_mode": false,
+        "mcp_quarantine_after_failures": 3,
         "acp_backend": "",
         "default_agent": "",
         "sweep_agents_backups": false,
@@ -242,6 +243,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false
+    },
+    {
+      "path": "agent.mcp_quarantine_after_failures",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Failing-Probe Threshold",
+      "help": "Consecutive failed probes before an MCP server is reported as persistently failing on its dashboard row. A probe verdict is otherwise forgotten between rounds, so a server that failed once on a cold cache looked identical to one that has failed forty times. Counts only 'error' and 'timeout': a server asking for OAuth sign-in is working correctly and is never counted, and one success clears the count. This is a health reading only -- the server stays mounted, and the dashboard offers a one-click count reset. 0 turns it off.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 3
     },
     {
       "path": "agent.acp_backend",
@@ -3394,7 +3409,7 @@
       "sensitive": false,
       "tags": [],
       "label": "Tool stall suspect (s)",
-      "help": "Idle seconds before an UNKNOWN-verdict in-flight tool is cancelled and the turn routed to tool-stall recovery (continue-nudge, no re-run of the original message). WORKING tools (e.g. a matched live build child) are never cancelled regardless of duration. Default 1h: generous enough for long builds and MCP tools on macOS, where the liveness oracle degrades (no /proc) and cannot distinguish a live build from a stall, while still landing inside the turn's own ceiling (agent.chat_turn_timeout_secs) so recovery is reachable. A window at or past that ceiling is clamped at load with a warning.",
+      "help": "Idle seconds before an UNKNOWN-verdict in-flight tool is cancelled and the turn routed to tool-stall recovery (continue-nudge, no re-run of the original message). WORKING tools (e.g. a matched live build child) are never cancelled regardless of duration. Default 1h: generous enough for long builds and MCP tools on macOS, where the liveness oracle degrades (no /proc) and cannot distinguish a live build from a stall, while still landing inside the turn's own ceiling (agent.chat_turn_timeout_secs) so recovery is reachable. Enforcement is at handle construction, not config load: a window past the headroom fraction of the transport's per-prompt timeout is clamped with a warning, while one that merely exceeds agent.chat_turn_timeout_secs is warned about but left as set, because the same handle also serves callers that pass a larger prompt timeout (review and cron turns).",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 3600.0
@@ -3408,7 +3423,7 @@
       "sensitive": false,
       "tags": [],
       "label": "Hard cap (s)",
-      "help": "Absolute ceiling for UNKNOWN-verdict forbearance (e.g. the extended probably-thinking window). Applies ONLY to UNKNOWN verdicts — never to a WORKING session. Default 1h, bounded by the turn ceiling like the suspect window.",
+      "help": "Absolute ceiling for UNKNOWN-verdict forbearance (e.g. the extended probably-thinking window). Applies ONLY to UNKNOWN verdicts — never to a WORKING session, which is deferred before this cap is consulted and is therefore bounded only by the turn's own ceiling. Default 1h, clamped against the transport's per-prompt timeout like the suspect window.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 3600.0
@@ -5967,7 +5982,7 @@
       "sensitive": false,
       "tags": [],
       "label": "Response Verbosity",
-      "help": "Controls how terse the agent's prose is. 'default' is normal; 'concise' injects brevity guidelines (lead with the answer, cut filler, keep code/errors verbatim); 'ultra' writes for an ADHD reader — the answer lands in a 3-sentence opening, and any detail after it must be scannable bullets rather than prose; 'answer_only' drops explanation altogether — the answer or artifact alone, with at most one sentence of context, and detail only when the user asks for it, when the decision is consequential enough (security, exposure, data loss, spend, anything hard to undo) that they cannot choose correctly without the reasoning, or as the undo path that rides along with a destructive command. Every level preserves full detail for security warnings, irreversible-action confirmations, and ordered multi-step instructions.",
+      "help": "Controls how terse the agent's prose is. 'default' is normal; 'concise' injects brevity guidelines (lead with the answer, cut filler, keep code/errors verbatim); 'ultra' writes for an ADHD reader — the answer lands in a 3-sentence opening, and any detail after it must be scannable bullets rather than prose; 'answer_only' drops explanation altogether — the answer or artifact alone, with at most one sentence of context, and detail only when the user asks for it, when the decision is consequential enough (security, exposure, data loss, spend, anything hard to undo) that they cannot choose correctly without the reasoning, or as the undo path that rides along with a destructive command. At every level security warnings and irreversible-action confirmations always appear but stay brief, and ordered multi-step instructions stay complete.",
       "hasChildren": false,
       "enumValues": [
         "default",

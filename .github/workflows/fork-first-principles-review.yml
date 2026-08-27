@@ -387,6 +387,12 @@ jobs:
           # Read/Grep/Glob.
           use_bedrock: "true"
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # workflow_run runs as the fork contributor, who lacks repo write;
+          # claude-code-action >=1.0.194 rejects that actor before the model
+          # call unless allow-listed here. Read-only lane (Read,Grep,Glob);
+          # setting this input auto-enables subprocess secret-scrub +
+          # bubblewrap isolation. See issue #6116.
+          allowed_non_write_users: "*"
           claude_args: |
             --model us.anthropic.claude-fable-5
             --fallback-model us.anthropic.claude-opus-4-8

@@ -306,6 +306,11 @@ jobs:
           # (they appear in the diff as binary markers) and are judged from code.
           use_bedrock: "true"
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Allow-list the fork actor so claude-code-action >=1.0.194 does not
+          # abort before the model call (issue #6116). Setting this input
+          # auto-enables the action's subprocess secret-scrub + bubblewrap
+          # isolation, which covers this lane's Bash(git diff/gh pr) grants.
+          allowed_non_write_users: "*"
           claude_args: |
             --model us.anthropic.claude-fable-5
             --fallback-model us.anthropic.claude-opus-4-8
