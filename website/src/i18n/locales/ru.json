@@ -6693,6 +6693,8 @@
       "no_commits_were_returned": "Коммиты не получены.",
       "no_description_was_provided": "Описание не указано.",
       "open_pull_request": "Открыть пул-реквест",
+      "open_slack_settings": "Открыть настройки Slack",
+      "owner_not_configured_guidance": "Для этого действия нужен настроенный владелец, которого Kiro Crew определяет по Slack member ID. Укажите \"Owner Slack member ID\" в разделе Настройки → Каналы → Slack, перезапустите шлюз, затем войдите снова.",
       "provider_results_may_be_partial_merge_request": "Результаты провайдера могут быть неполными для {{sections}}. Открой мерж-реквест, чтобы увидеть полный набор.",
       "provider_results_may_be_partial_pull_request": "Результаты провайдера могут быть неполными для {{sections}}. Открой пул-реквест, чтобы увидеть полный набор.",
       "pull_request_sections": "Разделы пул-реквеста",

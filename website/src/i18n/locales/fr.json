@@ -6586,6 +6586,8 @@
       "no_commits_were_returned": "Aucun commit n'a été renvoyé.",
       "no_description_was_provided": "Aucune description n'a été fournie.",
       "open_pull_request": "Ouvrir la pull request",
+      "open_slack_settings": "Ouvrir les paramètres Slack",
+      "owner_not_configured_guidance": "Cette action nécessite un propriétaire configuré, que Kiro Crew identifie par l'ID de membre Slack. Définissez « Owner Slack member ID » dans Paramètres → Canaux → Slack, redémarrez la passerelle, puis reconnectez-vous.",
       "provider_results_may_be_partial_merge_request": "Les résultats du fournisseur peuvent être partiels pour {{sections}}. Ouvrez la merge request pour l’ensemble complet.",
       "provider_results_may_be_partial_pull_request": "Les résultats du fournisseur peuvent être partiels pour {{sections}}. Ouvrez la pull request pour l’ensemble complet.",
       "pull_request_sections": "Sections de la pull request",

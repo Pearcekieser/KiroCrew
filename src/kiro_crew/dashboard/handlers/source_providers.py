@@ -4201,6 +4201,12 @@ _LOCAL_DASHBOARD_OWNER_SUBJECTS = frozenset({"local-app", "local-startup"})
 # way to tell "sign in again" apart from any other authorization failure.
 STALE_OWNER_SESSION_CODE = "stale_session_reauth"
 
+# The no-owner mutation denial, labeled only for signed machine-local dashboard
+# sessions (see ``_authorize_owner_request``). Reads pass for those subjects, so
+# the panel renders live mutation buttons whose clicks would otherwise dead-end
+# in a generic 403; the code lets the client say what to configure instead.
+OWNER_NOT_CONFIGURED_CODE = "owner_not_configured"
+
 
 def stale_owner_session_response(request: web.Request) -> web.Response | None:
     """The distinct denial label for a signed pre-owner bootstrap session.
@@ -4284,13 +4290,33 @@ def _authorize_owner_request(
     owner_id = str(getattr(state, "owner_id", "") or "")
     caller = str(request.get("user") or "")
     if not owner_id:
-        if (
-            allow_local_no_owner
-            and request.get("app") == ""
-            and caller in _LOCAL_DASHBOARD_OWNER_SUBJECTS
-        ):
+        is_local_dashboard = (
+            request.get("app") == "" and caller in _LOCAL_DASHBOARD_OWNER_SUBJECTS
+        )
+        if allow_local_no_owner and is_local_dashboard:
             return None
         _audit_source_api(request, operation, "denied", "owner_not_configured")
+        if is_local_dashboard:
+            # The one caller class that could legitimately reach this refusal
+            # from the UI: a signed machine-local dashboard session whose reads
+            # already succeeded, clicking a mutation button. A generic
+            # ``forbidden`` reads as a dead end, so name the remedy with a
+            # machine-readable code the client can translate into guidance.
+            # The discriminator stays reserved for signed local subjects — an
+            # unsigned, absent, or app-token caller must not learn which
+            # denial class it hit (same rule as ``stale_owner_session_response``).
+            return web.json_response(
+                {
+                    "error": (
+                        "this action needs a configured owner, which Kiro Crew"
+                        " identifies by Slack member ID; set 'Owner Slack member"
+                        " ID' in Settings → Channels → Slack, restart the"
+                        " gateway, then sign in again"
+                    ),
+                    "code": OWNER_NOT_CONFIGURED_CODE,
+                },
+                status=403,
+            )
         return web.json_response({"error": "forbidden"}, status=403)
     if "app" not in request or request["app"] != "":
         _audit_source_api(request, operation, "denied", "app_token_not_allowed")

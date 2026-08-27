@@ -6479,6 +6479,8 @@
       "no_commits_were_returned": "কোনো কমিট ফেরত আসেনি।",
       "no_description_was_provided": "কোনো বিবরণ দেওয়া হয়নি।",
       "open_pull_request": "পুল রিকোয়েস্ট খুলুন",
+      "open_slack_settings": "Slack সেটিংস খুলুন",
+      "owner_not_configured_guidance": "এই কাজের জন্য একজন কনফিগার করা মালিক প্রয়োজন, যাকে Kiro Crew Slack member ID দিয়ে শনাক্ত করে। Settings → Channels → Slack-এ \"Owner Slack member ID\" সেট করুন, গেটওয়ে রিস্টার্ট করুন, তারপর আবার সাইন ইন করুন।",
       "provider_results_may_be_partial_merge_request": "{{sections}}-এর জন্য প্রোভাইডারের ফলাফল আংশিক হতে পারে। সম্পূর্ণ তালিকার জন্য মার্জ রিকোয়েস্টটি খোলো।",
       "provider_results_may_be_partial_pull_request": "{{sections}}-এর জন্য প্রোভাইডারের ফলাফল আংশিক হতে পারে। সম্পূর্ণ তালিকার জন্য পুল রিকোয়েস্টটি খোলো।",
       "pull_request_sections": "পুল রিকোয়েস্ট বিভাগসমূহ",

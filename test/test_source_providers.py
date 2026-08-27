@@ -4889,7 +4889,9 @@ async def test_resolve_handler_denies_local_token_when_no_owner(
     monkeypatch, _mock_source_sel
 ) -> None:
     """The local no-owner fallback is scoped to reads: the resolve *mutation*
-    stays owner-only, so a local-app token with no owner still fails closed."""
+    stays owner-only, so a local-app token with no owner still fails closed —
+    but the refusal names the remedy with a machine-readable code, because this
+    caller class saw live buttons whose reads already succeeded."""
     resolve = AsyncMock()
     monkeypatch.setattr(source, "resolve_pull_request_thread", resolve)
 
@@ -4899,7 +4901,9 @@ async def test_resolve_handler_denies_local_token_when_no_owner(
             json={"url": "https://github.com/acme/repo/pull/1", "threadId": "PRRT_1"},
         )
         assert response.status == 403
-        assert (await response.json()) == {"error": "forbidden"}
+        body = await response.json()
+        assert body["code"] == source.OWNER_NOT_CONFIGURED_CODE
+        assert "Owner Slack member ID" in body["error"]
 
     resolve.assert_not_awaited()
 
@@ -5160,12 +5164,47 @@ async def test_action_handlers_deny_local_token_when_no_owner(
     monkeypatch, _mock_source_sel, path: str, action_name: str
 ) -> None:
     """The local no-owner fallback is scoped to reads: these mutations stay
-    owner-only, so a local-app token with no owner still fails closed."""
+    owner-only, so a local-app token with no owner still fails closed — with
+    the coded, actionable body reserved for signed local dashboard sessions."""
     action = AsyncMock()
     monkeypatch.setattr(source, action_name, action)
 
     async with TestClient(TestServer(_app(owner_id="", user="local-app", app_name=""))) as client:
         response = await client.post(path, json={"url": "https://github.com/acme/repo/pull/1"})
+        assert response.status == 403
+        body = await response.json()
+        assert body["code"] == source.OWNER_NOT_CONFIGURED_CODE
+        assert "Owner Slack member ID" in body["error"]
+
+    action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "app_kwargs",
+    [
+        # A non-local subject must not learn which denial class it hit.
+        {"owner_id": "", "user": "U_OTHER", "app_name": ""},
+        # Nor an app token, even one carrying a local-shaped subject.
+        {"owner_id": "", "user": "local-app", "app_name": "app-X"},
+        # Nor an unauthenticated caller with no user claim at all.
+        {"owner_id": "", "user": "", "app_name": ""},
+    ],
+)
+async def test_no_owner_mutation_code_reserved_for_signed_local_subjects(
+    monkeypatch, _mock_source_sel, app_kwargs: dict
+) -> None:
+    """The ``owner_not_configured`` discriminator is scoped exactly like
+    ``stale_owner_session_response``: every caller that is not a signed
+    machine-local dashboard session keeps the generic body."""
+    action = AsyncMock()
+    monkeypatch.setattr(source, "enable_pull_request_auto_merge", action)
+
+    async with TestClient(TestServer(_app(**app_kwargs))) as client:
+        response = await client.post(
+            "/api/source/pull-request/auto-merge",
+            json={"url": "https://github.com/acme/repo/pull/1"},
+        )
         assert response.status == 403
         assert (await response.json()) == {"error": "forbidden"}
 

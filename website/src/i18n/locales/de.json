@@ -6479,6 +6479,8 @@
       "no_commits_were_returned": "Es wurden keine Commits zurückgegeben.",
       "no_description_was_provided": "Es wurde keine Beschreibung angegeben.",
       "open_pull_request": "Pull Request öffnen",
+      "open_slack_settings": "Slack-Einstellungen öffnen",
+      "owner_not_configured_guidance": "Diese Aktion erfordert einen konfigurierten Besitzer, den Kiro Crew über die Slack-Mitglieds-ID identifiziert. Legen Sie \"Owner Slack member ID\" unter Einstellungen → Kanäle → Slack fest, starten Sie das Gateway neu und melden Sie sich dann erneut an.",
       "provider_results_may_be_partial_merge_request": "Die Anbieterergebnisse können für {{sections}} unvollständig sein. Öffne den Merge Request für den vollständigen Satz.",
       "provider_results_may_be_partial_pull_request": "Die Anbieterergebnisse können für {{sections}} unvollständig sein. Öffne den Pull Request für den vollständigen Satz.",
       "pull_request_sections": "Pull-Request-Abschnitte",
