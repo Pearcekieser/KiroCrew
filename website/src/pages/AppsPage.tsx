@@ -20,11 +20,11 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
   Package, Bot, Zap, Clock, ShoppingBag, Lock, Trash2, X, ArrowUp, Boxes,
-  AlertTriangle, PowerOff,
+  AlertTriangle, PowerOff, RefreshCw,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { appNavTarget } from '../appNav'
-import { Btn, EmptyState, PageHeader, SearchInput } from '../components/ui'
+import { Btn, EmptyState, IconButton, PageHeader, SearchInput } from '../components/ui'
 import SimpleSelect from '../components/SimpleSelect'
 import { recordEvent } from '../rum'
 import SegmentedControl from '../components/SegmentedControl'
@@ -279,7 +279,7 @@ export default function AppsPage() {
   const uninstallSkills = uninstallTarget?.manifest?.skills || []
   const uninstallCrons = uninstallTarget?.manifest?.crons || []
 
-  const { data: apps = [], isLoading: appsLoading, error: appsError } = useQuery<InstalledApp[]>({
+  const { data: apps = [], isLoading: appsLoading, error: appsError, refetch: refetchApps } = useQuery<InstalledApp[]>({
     queryKey: ['apps'],
     queryFn: () => api.listApps(),
     // The ['apps'] cache is shared with observers that fetch it raw
@@ -292,7 +292,7 @@ export default function AppsPage() {
     select: rows => rows.map(normalizeInstalledApp),
   })
 
-  const { data: registryData, isLoading: registryLoading, error: registryError } = useQuery<{
+  const { data: registryData, isLoading: registryLoading, error: registryError, refetch: refetchRegistry } = useQuery<{
     apps: RegistryApp[]
     categoryOrder: string[]
     editorialSections: EditorialBlock[]
@@ -780,6 +780,26 @@ export default function AppsPage() {
     }
   }
 
+  // Manual store refresh. This exists because the two cache layers degrade
+  // silently -- a failed catalog fetch leaves the store on the seed listing
+  // for up to an hour with nothing the user can do about it from the UI.
+  // Order matters: the POSTs drop the server's document caches (official
+  // documents AND the user's external registries -- both sources the store
+  // renders), then the refetches rebuild both lists past their staleTime.
+  // allSettled, because one source being unreachable must not stop the
+  // refetch from repairing the other.
+  const [refreshing, setRefreshing] = useState(false)
+  const handleRefresh = async () => {
+    if (refreshing) return
+    setRefreshing(true)
+    try {
+      await Promise.allSettled([api.refreshAppStore(), api.refreshRegistries()])
+      await Promise.all([refetchRegistry(), refetchApps()])
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   const loading = appsLoading || registryLoading
 
   return (
@@ -806,6 +826,14 @@ export default function AppsPage() {
             className="w-[220px]"
             aria-label={i18nT('pages.appsPage.search_apps')}
           />
+          <IconButton
+            aria-label={i18nT('pages.appsPage.refresh_store')}
+            title={i18nT('pages.appsPage.refresh_store')}
+            onClick={handleRefresh}
+            disabled={refreshing}
+          >
+            <RefreshCw size={15} className={refreshing ? 'animate-spin' : undefined} />
+          </IconButton>
           <SourcesPopover
             open={sourcesOpen}
             onOpenChange={setSourcesOpen}
