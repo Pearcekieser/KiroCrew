@@ -5029,6 +5029,13 @@ _CREW_SECRET_LEAVES: list[str] = [
     # whole DIRECTORY so atomic-write temps and every sidecar file are
     # covered.
     "agentcore-inbound",
+    # Authored non-managed MCP stashed while login withhold filters the
+    # runtime ``--agent`` spec. Owner-only, same class as inbound JWTs:
+    # an agent that could write it would restore arbitrary MCP commands
+    # when posture leaves login; a reader learns the operator's withheld
+    # servers. Classified as the whole DIRECTORY so atomic-write temps
+    # cannot sit as an unfenced sibling of a file leaf.
+    "agentcore-authored-mcp",
     # Which checkout the gateway executes (Dev Fleet "Make live"). The pointer is
     # resolved during startup and exec'd into, so a writable one is arbitrary
     # code execution in the gateway's own identity — the agent must not be able
@@ -8813,6 +8820,38 @@ def _approved_oauth_authorization_endpoint(host: str, path: str) -> bool:
         _emit_oauth_extension_used_event(*key)
         return True
     return False
+
+
+def allow_agentcore_consent_url(url: str) -> bool:
+    """True when *url* is an HTTPS, no-port, exact-match allowlisted consent endpoint.
+
+    Reuses the operator-OAuth keystone (``oauth_endpoints.json``) plus the
+    code-owned builtin set. An unknown host, explicit port, userinfo,
+    fragment, or non-HTTPS scheme is refused. Query strings are ignored for
+    the identity match (host + path only); they are not a second allowlist
+    axis. There is no second AgentCore keystone file.
+    """
+    if not isinstance(url, str):
+        return False
+    stripped = url.strip()
+    if not stripped:
+        return False
+    try:
+        parsed = urlparse(stripped)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        return False
+    try:
+        if parsed.port is not None:
+            return False
+    except ValueError:
+        return False
+    if "@" in parsed.netloc:
+        return False
+    if parsed.params or ";" in parsed.path or parsed.fragment:
+        return False
+    return _approved_oauth_authorization_endpoint(parsed.hostname.lower(), parsed.path)
 
 
 # S3 presigned URLs contain X-Amz-Signature (a 64-char hex string) that

@@ -1120,6 +1120,9 @@ class SessionManager:
         self._pool_cwd: str = default_project_dir()
         # Queue stores (provider, spawn_time) tuples for TTL tracking
         self._warm_pool: asyncio.Queue[tuple[LLMProvider, float]] = asyncio.Queue()
+        # Spawn time of the last successful `_drain_and_claim`. Put-back
+        # after a failed claim must keep this so TTL cannot reset.
+        self._last_claim_spawn: float | None = None
         self._pool_fill_lock = asyncio.Lock()
         self._pool_health_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._pool_sweep_pids: set[int] = set()  # PIDs temporarily out of queue during health sweep
@@ -1166,6 +1169,11 @@ class SessionManager:
         # session_sharing=True. Killed when the parent session ends.
         self._subagent_runtimes: dict[str, "AcpRuntime"] = {}
         self._subagent_runtime_locks: dict[str, asyncio.Lock] = {}
+        # Serializes sidecar install + provider.start() per session key so a
+        # leftover bearer cannot reach session/new under the wrong principal.
+        # Distinct from the per-session turn semaphore: that lease is held
+        # only after registration, and start() is what reads the sidecar.
+        self._create_locks: dict[str, asyncio.Lock] = {}
 
         # ── Session Watchdog ──
         # RSS recycle threshold (MiB). 0 disables (default). A non-busy session
@@ -2383,10 +2391,12 @@ class SessionManager:
                 await self._discard_pool_provider(provider, "Warm pool discard")
                 claimed = self._claim_from_pool(agent)
                 continue
+            self._last_claim_spawn = spawn_time
             return provider
         # No healthy provider found — replenish if we discarded any
         if discarded:
             self._schedule_replenish()
+        self._last_claim_spawn = None
         return None
 
     def _schedule_replenish(self) -> None:
@@ -3091,18 +3101,29 @@ class SessionManager:
                     sess.first_turn = FirstTurnState.NOTHING_ARMED
                 was_new = first_turn.is_new
                 was_resumed = first_turn.resumed
-                return sess.provider, was_new, was_resumed
-            # Stale between claim and acquire — the semaphore has already been
-            # released by the re-validate. If the entry is still ours but the
-            # provider died, evict it and shut the dead provider down (mirrors
-            # the live-path stale handling above); otherwise another coroutine
-            # already recycled it. Then set `factory` for the cold-start path,
-            # which the `if _claimed is None` block skipped when we claimed a
-            # then-live session.
-            await self._evict_stale_session(key, sess)
-            if not self._provider_factory:
-                raise RuntimeError("No provider factory configured")
-            factory = self._provider_factory
+                if await self._apply_staged_gateway_under_lease(key, sess):
+                    # Recycle popped this occupant and released its lease
+                    # so a waiter blocked in `_reacquire_and_validate`
+                    # observes the eviction instead of hanging on a
+                    # semaphore that no longer sits in the session map.
+                    if not self._provider_factory:
+                        raise RuntimeError("No provider factory configured")
+                    factory = self._provider_factory
+                else:
+                    return sess.provider, was_new, was_resumed
+            else:
+                # Stale between claim and acquire — the semaphore has already
+                # been released by the re-validate. If the entry is still
+                # ours but the provider died, evict it and shut the dead
+                # provider down (mirrors the live-path stale handling
+                # above); otherwise another coroutine already recycled it.
+                # Then set `factory` for the cold-start path, which the
+                # `if _claimed is None` block skipped when we claimed a
+                # then-live session.
+                await self._evict_stale_session(key, sess)
+                if not self._provider_factory:
+                    raise RuntimeError("No provider factory configured")
+                factory = self._provider_factory
 
         # Resolve the session model here — on the cold-start path only.
         # Existing-session reuse returns above via the fast path without needing
@@ -3151,6 +3172,23 @@ class SessionManager:
         if speculative and resume_sid and not speculative_resume:
             raise SpeculativeResumeRefused(key)
 
+        # Staged Gateway stays in the ContextVar through start/register.
+        # Applying here (before the same-key winner holds the semaphore)
+        # is what let two Discord users overwrite one sidecar and start
+        # with the other's bearer. Apply after acquire, below.
+        # Both warm-pool claimants and cold creators write the sidecar
+        # via ``_install_staged_gateway_sidecar`` (peek, no take) under
+        # one per-key creation lock so session/new cannot read a leftover
+        # or concurrent bearer. That method is not ``_apply_staged_gateway``.
+        # The lock is released by one outer finally across install /
+        # start / register; a factory exception or cancellation while
+        # waiting for ``_start_sem`` cannot leave it held. A pool process
+        # already completed session/new at fill; when AgentCore is on it
+        # is discarded after install so a fresh start() injects Gateway.
+        # An unregistered claim is put back in that same finally.
+        # Apply after that finally — the lock is not reentrant and apply
+        # may recurse.
+
         # Try warm pool first (no resume — pooled processes have no prior session)
         logger.info(
             "Pool decision: key=%s resume_sid=%s model=%s agent=%s pool_size=%d pool_qsize=%d cwd=%s pool_cwd=%s",
@@ -3196,359 +3234,437 @@ class SessionManager:
             pool_decision = "bypass_env"
         else:
             pool_decision = ""
-        pooled = None if pool_decision else await self._drain_and_claim(agent)
-        if not pool_decision:
-            pool_decision = "hit" if pooled is not None else "miss_empty"
-        self._record_pool_decision(pool_decision, key)
-        if pooled is not None:
-            provider = pooled
-            try:
-                # Re-key pooled provider with actual session parameters
-                from kiro_crew.providers.acp import (
-                    AcpProvider,  # circular import: providers -> session
-                )
-
-                if isinstance(provider, AcpProvider):
-                    # The claiming session's canonical crew identity travels
-                    # with the claim: a kiro-shared client rebinds the handle's
-                    # per-agent watchdog windows; the AcpClient path accepts it
-                    # for parity. Pool claims are default-agent-only, so the
-                    # caller-supplied kwarg (the dashboard slot's resolved
-                    # alias) is the only possible source. The snapshot is
-                    # resolved OFF the loop and handed in as data — the load
-                    # is file reads + jsonschema validation on a config
-                    # change, and passing it explicitly (instead of a cache
-                    # pre-warm) means no future rekey caller can silently put
-                    # that I/O back on the event loop.
-                    # circular import: session -> acp.session_handle at module
-                    # scope would loop through acp.client -> session.
-                    from kiro_crew.acp.session_handle import _load_watchdog_settings
-                    from kiro_crew.config.loader import resolve_crew_identity
-
-                    _claim_kwarg = extra_factory_kwargs.get("crew_agent")
-
-                    def _resolve_claim_watchdog() -> tuple[str, object]:
-                        # Same identity rule as the provider factory (a claim
-                        # must match the cold start it replaces), on a FRESH
-                        # config so a crew added since factory build resolves.
-                        _cfg = KiroCrewConfig.load()
-                        _crew = resolve_crew_identity(
-                            _cfg,
-                            agent,
-                            None if _claim_kwarg is None else str(_claim_kwarg),
-                        )
-                        return _crew, _load_watchdog_settings(_crew)
-
-                    _claim_crew, _claim_wd = await asyncio.to_thread(_resolve_claim_watchdog)
-                    provider.client.rekey(
-                        key,
-                        channel_id,
-                        crew_agent=_claim_crew,
-                        watchdog=_claim_wd,
-                    )
-                    # Switch model post-claim if caller requested non-default.
-                    if model:
-                        _pool_model = (
-                            self._resolve_agent_model(self._pool_agent)
-                            if self._pool_agent
-                            else None
-                        )
-                        # The requested `model` is a canonical/wire value while
-                        # `_pool_model` is the pool agent's raw model slot — two
-                        # namespaces. Normalize BOTH to the backend's provider ids
-                        # before the equality check so an already-equivalent pooled
-                        # process is not needlessly re-switched, and the value sent
-                        # to set_model is a provider id the backend accepts. kiro
-                        # (the "acp" provider) needs its bare dotted id (e.g.
-                        # "claude-opus-4.8") via to_acp_id, which translates ONLY
-                        # canonical keys and passes kiro's native ids/aliases
-                        # (claude-haiku-4.5, …) through unchanged — DISTINCT real
-                        # kiro models that must not be folded to Sonnet the way the
-                        # claude backend's to_provider_id downgrades them. The
-                        # claude backend needs the global.anthropic.* id.
-                        if _is_claude_backend(provider):
-                            _switch_model = model_registry.to_provider_id(model, "claude_code")
-                            _cmp_pool = (
-                                model_registry.to_provider_id(_pool_model, "claude_code")
-                                if _pool_model
-                                else _pool_model
-                            )
-                        else:
-                            _switch_model = model_registry.to_acp_id(model)
-                            _cmp_pool = (
-                                model_registry.to_acp_id(_pool_model)
-                                if _pool_model
-                                else _pool_model
-                            )
-                        if _pool_model and _switch_model != _cmp_pool:
-                            # This is an INHERITED value (the slot's persisted
-                            # model), not a pick made for this turn, so it gets
-                            # the same withhold treatment as a cold start. Left
-                            # to raise, AcpModelUnavailable would land in the
-                            # except below and kill the claimed provider — the
-                            # identical stale setting would then fail or not
-                            # purely on whether a pooled process happened to
-                            # exist, which is the worst kind of intermittent.
-                            try:
-                                _advertised = advertised_model_ids(provider.available_models())
-                            except Exception:  # pragma: no cover - defensive
-                                _advertised = []
-                            if _advertised and model_is_unusable(_switch_model, _advertised):
-                                logger.warning(
-                                    "Pool post-claim: model %s is not available to this "
-                                    "account; leaving the claimed process on %s",
-                                    _switch_model,
-                                    _pool_model,
-                                )
-                            else:
-                                await provider.client.set_model(_switch_model)
-                                logger.info("Pool post-claim: switched model to %s", _switch_model)
-                logger.info(
-                    "Claimed warm-pool process for %s (agent=%s)", key, agent or self._pool_agent
-                )
-                self._schedule_replenish()
-            except (asyncio.CancelledError, Exception):
-                self._dispatch_hard_kill(provider)
-                raise
-        else:
-            # Cold start: start provider OUTSIDE the lock so other sessions
-            # can proceed in parallel.  Semaphore limits concurrent cold-starts
-            # to avoid CPU saturation from multiple kiro-cli processes.
-            # On resume, use the CWD stored in session_map so CC CLI finds
-            # its conversation in the correct project directory.
-            effective_cwd = cwd
-            if not effective_cwd and resume_sid:
-                stored_cwd = self._session_map.get_cwd(key)
-                if stored_cwd and Path(stored_cwd).is_dir():
-                    effective_cwd = stored_cwd
-                    logger.info("Resume CWD override for %s: %s", key, stored_cwd)
-            provider = factory(
-                key,
-                agent=agent,
-                channel_id=channel_id,
-                model_override=model,
-                cwd=effective_cwd,
-                extra_env=extra_env,
-                **extra_factory_kwargs,
-            )
-            # Provider switch detection: if session was created by a different
-            # provider (e.g. kiro->CC or CC->kiro), the resume_sid is from the
-            # wrong runtime and unusable. Discard it and clear the stored SID.
-            # KiroCrew's conversation_log will inject history via
-            # build_session_replay on the first prompt (provider_switch_replay flag).
-            _provider_switched = False
-            if resume_sid:
-                is_cc_now = (
-                    ClaudeCodeProvider is not None and isinstance(provider, ClaudeCodeProvider)
-                ) or _is_claude_backend(provider)
-                current_provider = PROVIDER_LABEL_CLAUDE if is_cc_now else _provider_label(provider)
-                if detect_provider_switch(self._session_map, key, current_provider):
-                    resume_sid = None
-                    _provider_switched = True
-                    # Clear the incompatible SID from session_map so future
-                    # lookups don't try to resume with a stale ID.
-                    self._session_map.clear_sid(key)
-
-            # Set resume ID before start() triggers _initialize_session
-            if resume_sid:
-                from kiro_crew.providers.acp import (
-                    AcpProvider,  # circular import: providers -> session
-                )
-
-                if isinstance(provider, AcpProvider):
-                    provider.client.set_resume_session_id(resume_sid)
-                    logger.info("Attempting session/load for %s (sid=%s)", key, resume_sid)
-                elif ClaudeCodeProvider is not None and isinstance(provider, ClaudeCodeProvider):
-                    provider.set_resume_session_id(resume_sid)
-                    logger.info("CC resume for %s (sid=%s)", key, resume_sid)
-            async with self._start_sem:
-                try:
-                    await provider.start()
-                except (asyncio.CancelledError, Exception):
-                    # Provider process may have spawned before the cancel/error —
-                    # shut it down so it doesn't leak. Dispatched to the
-                    # subprocess executor: awaiting an async shutdown here is
-                    # unreliable during cancellation (the awaited future
-                    # re-raises CancelledError immediately), and an inline
-                    # _sync_kill_provider blocks the event loop (os.waitpid /
-                    # taskkill). Resume prefetch makes this path routine — a
-                    # focus flip mid-session/load cancels the loading task —
-                    # so it must not stall the loop.
-                    self._dispatch_hard_kill(provider)
-                    raise
-
-        # start() has written the provider's PID to kiro_session_pids.txt, but
-        # the session is not registered in self._sessions yet. Guard the PID so
-        # the periodic orphan sweep doesn't kill it during this window. Removed
-        # in the finally below once registration (or teardown) completes.
-        _sp = getattr(getattr(provider, "client", None), "_pid", None)
-        if not isinstance(_sp, int):
-            _cc = getattr(provider, "_proc", None)
-            _sp = _cc.pid if (_cc is not None and _cc.returncode is None) else None
-        _starting_pid = _sp if isinstance(_sp, int) else None
-        if _starting_pid is not None:
-            self._starting_pids.add(_starting_pid)
-
-        # Everything after start() must be wrapped so that a CancelledError
-        # between start() and session registration doesn't orphan the process.
+        # Claim only after the per-key reservation. Claiming first is what
+        # orphans a process when this coroutine is cancelled while waiting
+        # for the lock, or when sidecar install fails before register.
+        _create_lock = self._creation_lock_for(key)
+        _create_held = False
+        _starting_pid: int | None = None
         _won_race_sess: "_Session | None" = None
         _dup_provider: "LLMProvider | None" = None
+        _unregistered_pool: LLMProvider | None = None
+        _unregistered_spawn: float | None = None
+        _claim_crew = ""
+        _claim_wd: object | None = None
         try:
-            # Check if session was resumed
-            resumed = False
-            from kiro_crew.providers.acp import AcpProvider  # circular import: providers -> session
-
-            if isinstance(provider, AcpProvider):
-                resumed = provider.client.resumed
-
-            # A SPECULATIVE RESUME whose load did NOT restore the transcript
-            # (F2 fell back to a fresh session, the mapping vanished between
-            # lookup and load, or a provider switch discarded the sid) is
-            # rejected BEFORE registration. A registered fallback session is
-            # claimable: a real turn that queued during the load would claim
-            # it, the conditional cleanup would no-op, and the turn's
-            # exchanges would land in a session whose native id is unmapped —
-            # the next reopen resumes the OLD sid and silently drops them
-            # from model context. Raising here (the except below kills the
-            # provider) means no claimable session ever exists; the first
-            # real message creates AND maps the fallback itself, running the
-            # normal F2 recovery + history replay in its own coroutine.
-            if speculative and speculative_resume and not resumed:
-                raise SpeculativeResumeRefused(key)
-
+            # Pooled and cold creators share this reservation so a warm-pool
+            # claimant cannot rewrite the inbound file while start() reads it.
+            await _create_lock.acquire()
+            _create_held = True
+            _late_claim: _Session | None = None
             async with self._lock:
-                # Re-check _closing: the entry gate ran BEFORE the multi-second
-                # provider.start(), so close_all() can begin (and finish its
-                # drain + kill snapshot) while the handshake is in flight. A
-                # session registered here after that snapshot is invisible to
-                # the shutdown loop — the kiro-cli process would outlive the
-                # gateway holding the persisted session lock, breaking the
-                # next startup's session/load. Raising sends us to the
-                # except-BaseException below, which kills the provider.
-                if self._closing:
-                    raise SessionClosingError(
-                        "SessionManager began closing during provider startup; "
-                        "refusing to register a session behind the shutdown "
-                        "snapshot"
-                    )
-                # Re-check: another coroutine may have created this key while we
-                # were starting the provider (race on same key). In-place
-                # compaction (kiro-cli and claude) leaves the existing entry
-                # healthy, so reuse it even when _compacting is set; only an
-                # entry that IS the exact object the failure recycle is
-                # tearing down should fall through to register us — a healthy
-                # replacement under the same key must be reused, never
-                # overwritten. The recycle path also pops by object identity,
-                # so even if we do register over a being-recycled entry, only
-                # the old session object is killed.
                 _existing = self._sessions.get(key)
                 _is_recycling = _existing is not None and self._recycling.get(key) is _existing
                 if _existing is not None and not _is_recycling:
-                    # Another task won the race — use theirs and shut down our
-                    # duplicate provider below, after the lock is released
-                    # (shutdown() involves subprocess teardown; no need to hold
-                    # the global lock across it). Claim the winner here but DON'T
-                    # acquire its semaphore under self._lock: _existing's
-                    # semaphore may be held by a long-running turn, and blocking
-                    # on it here would pin the global lock and freeze every other
-                    # session (the same deadlock class fixed on the fast path).
-                    sess = _existing
-                    sess.last_used = time.monotonic()
-                    if approval_policy:
-                        sess.approval_policy = approval_policy
-                    if agent:
-                        sess.agent = agent
-                    _won_race_sess = sess
-                    _dup_provider = provider
-                else:
-                    # First-turn observation, selected atomically at
-                    # registration under self._lock — this is what replaces
-                    # the racy rearm-after-release design. A real creator
-                    # consumes the observation itself (is_new=True goes back
-                    # to it in `result`), so it registers NOTHING_ARMED. A
-                    # speculative creator leaves the observation ARMED for the
-                    # first real turn, which claims it via the fast path or
-                    # the won-race path: RESUMED when its session/load
-                    # actually restored the transcript (it owes that
-                    # resumed=True observation to the first real claimant),
-                    # FRESH otherwise.
+                    _late_claim = _existing
+            if _late_claim is not None:
+                # Do not hold the create lock across the session semaphore
+                # (a recycler that wants this lock after releasing the
+                # turn lease would deadlock).
+                _create_lock.release()
+                _create_held = False
+                if not pool_decision:
+                    pool_decision = "miss_empty"
+                self._record_pool_decision(pool_decision, key)
+                sess = _late_claim
+                if await self._reacquire_and_validate(key, sess):
+                    first_turn = sess.first_turn
                     if not speculative:
-                        _first_turn = FirstTurnState.NOTHING_ARMED
-                    elif resumed:
-                        _first_turn = FirstTurnState.RESUMED
+                        sess.first_turn = FirstTurnState.NOTHING_ARMED
+                    was_new = first_turn.is_new
+                    was_resumed = first_turn.resumed
+                    if await self._apply_staged_gateway_under_lease(key, sess):
+                        if not self._provider_factory:
+                            raise RuntimeError("No provider factory configured")
+                        factory = self._provider_factory
+                        await _create_lock.acquire()
+                        _create_held = True
+                        await self._install_staged_gateway_sidecar(key)
                     else:
-                        _first_turn = FirstTurnState.FRESH
-                    sess = _Session(
-                        provider=provider,
-                        first_turn=_first_turn,
-                        approval_policy=approval_policy,
-                        agent=agent or "",
+                        return sess.provider, was_new, was_resumed
+                else:
+                    await self._evict_stale_session(key, sess)
+                    if not self._provider_factory:
+                        raise RuntimeError("No provider factory configured")
+                    factory = self._provider_factory
+                    await _create_lock.acquire()
+                    _create_held = True
+                    await self._install_staged_gateway_sidecar(key)
+            else:
+                if not pool_decision:
+                    _unregistered_pool = await self._drain_and_claim(agent)
+                    if _unregistered_pool is not None:
+                        _unregistered_spawn = self._last_claim_spawn
+                    pool_decision = "hit" if _unregistered_pool is not None else "miss_empty"
+                self._record_pool_decision(pool_decision, key)
+                await self._install_staged_gateway_sidecar(key)
+                if _unregistered_pool is not None:
+                    # Same identity as rekey / cold start — a surface profile
+                    # that denies AgentCore must not keep a process whose
+                    # selected crew profile permits it.
+                    _claim_crew, _claim_wd = await asyncio.to_thread(
+                        self._resolve_claim_identity,
+                        agent,
+                        extra_factory_kwargs,
                     )
-                    _replay_needed = getattr(provider, "_history_replay_needed", False) is True
-                    if _provider_switched or _replay_needed:
-                        # provider_switch_replay OR F2 load-recovery fell back to
-                        # a fresh native session (stale lock never cleared):
-                        # replay KiroCrew's conversation_log into the new session
-                        # on the first prompt so the slot isn't context-free.
-                        sess.provider_switch_replay = True
-                    if _replay_needed and _provider_label(provider) != PROVIDER_LABEL_DEFAULT:
-                        # SessionMap.get() only self-prunes entries whose kiro
-                        # transcript is gone; a backend that owns its own storage
-                        # is never file-checked, so a failed load is the only
-                        # signal its sid went stale. Drop it here or every later
-                        # turn re-attempts the same doomed load.
-                        self._session_map.clear_sid(key)
-                    self._sessions[key] = sess
+                if _unregistered_pool is not None and self._gateway_requires_fresh_session(
+                    key, agent=_claim_crew
+                ):
+                    # Fill already ran session/new with an empty key and no
+                    # inbound sidecar. Apply after register would see the
+                    # fingerprint we just wrote and skip recycle, so login
+                    # JWT and workload SigV4 would never reach the child.
+                    self._dispatch_hard_kill(_unregistered_pool)
+                    _unregistered_pool = None
+                    self._schedule_replenish()
                     logger.info(
-                        "New session: %s agent=%s resumed=%s provider_switch=%s (total=%d)",
+                        "Warm-pool process for %s already completed session/new; "
+                        "discarding so Gateway inject runs on a fresh start",
                         key,
-                        agent or "kirocrew",
-                        resumed,
-                        _provider_switched,
-                        len(self._sessions),
+                    )
+            if _unregistered_pool is not None:
+                provider = _unregistered_pool
+                _unregistered_pool = None
+                try:
+                    # Re-key pooled provider with actual session parameters
+                    from kiro_crew.providers.acp import (
+                        AcpProvider,  # circular import: providers -> session
                     )
 
-                    # Save session mapping for long-lived sessions. A failed
-                    # speculative resume never reaches this point — it is
-                    # rejected before registration (SpeculativeResumeRefused
-                    # above), so a speculative_resume registration here always
-                    # carries resumed=True and mapping its sid is correct.
-                    _cwd_str = provider.cwd
-                    if not is_stateless and isinstance(provider, AcpProvider):
-                        sid = provider.client._session_id
-                        _prov_label = _provider_label(provider)
-                        if sid:
-                            self._session_map.set(key, sid, provider=_prov_label, cwd=_cwd_str)
-                    elif (
-                        not is_stateless
-                        and ClaudeCodeProvider is not None
-                        and isinstance(provider, ClaudeCodeProvider)
+                    if isinstance(provider, AcpProvider):
+                        # Identity was resolved once, before the discard
+                        # check, so rekey cannot disagree with the profile
+                        # that decided whether this process is reusable.
+                        provider.client.rekey(
+                            key,
+                            channel_id,
+                            crew_agent=_claim_crew,
+                            watchdog=_claim_wd,
+                        )
+                        # Switch model post-claim if caller requested non-default.
+                        if model:
+                            _pool_model = (
+                                self._resolve_agent_model(self._pool_agent)
+                                if self._pool_agent
+                                else None
+                            )
+                            # The requested `model` is a canonical/wire value while
+                            # `_pool_model` is the pool agent's raw model slot — two
+                            # namespaces. Normalize BOTH to the backend's provider ids
+                            # before the equality check so an already-equivalent pooled
+                            # process is not needlessly re-switched, and the value sent
+                            # to set_model is a provider id the backend accepts. kiro
+                            # (the "acp" provider) needs its bare dotted id (e.g.
+                            # "claude-opus-4.8") via to_acp_id, which translates ONLY
+                            # canonical keys and passes kiro's native ids/aliases
+                            # (claude-haiku-4.5, …) through unchanged — DISTINCT real
+                            # kiro models that must not be folded to Sonnet the way the
+                            # claude backend's to_provider_id downgrades them. The
+                            # claude backend needs the global.anthropic.* id.
+                            if _is_claude_backend(provider):
+                                _switch_model = model_registry.to_provider_id(model, "claude_code")
+                                _cmp_pool = (
+                                    model_registry.to_provider_id(_pool_model, "claude_code")
+                                    if _pool_model
+                                    else _pool_model
+                                )
+                            else:
+                                _switch_model = model_registry.to_acp_id(model)
+                                _cmp_pool = (
+                                    model_registry.to_acp_id(_pool_model)
+                                    if _pool_model
+                                    else _pool_model
+                                )
+                            if _pool_model and _switch_model != _cmp_pool:
+                                # This is an INHERITED value (the slot's persisted
+                                # model), not a pick made for this turn, so it gets
+                                # the same withhold treatment as a cold start. Left
+                                # to raise, AcpModelUnavailable would land in the
+                                # except below and kill the claimed provider — the
+                                # identical stale setting would then fail or not
+                                # purely on whether a pooled process happened to
+                                # exist, which is the worst kind of intermittent.
+                                try:
+                                    _advertised = advertised_model_ids(provider.available_models())
+                                except Exception:  # pragma: no cover - defensive
+                                    _advertised = []
+                                if _advertised and model_is_unusable(_switch_model, _advertised):
+                                    logger.warning(
+                                        "Pool post-claim: model %s is not available to this "
+                                        "account; leaving the claimed process on %s",
+                                        _switch_model,
+                                        _pool_model,
+                                    )
+                                else:
+                                    await provider.client.set_model(_switch_model)
+                                    logger.info(
+                                        "Pool post-claim: switched model to %s", _switch_model
+                                    )
+                    logger.info(
+                        "Claimed warm-pool process for %s (agent=%s)",
+                        key,
+                        agent or self._pool_agent,
+                    )
+                    self._schedule_replenish()
+                except (asyncio.CancelledError, Exception):
+                    self._dispatch_hard_kill(provider)
+                    raise
+            else:
+                # Cold start: start provider OUTSIDE the lock so other sessions
+                # can proceed in parallel.  Semaphore limits concurrent cold-starts
+                # to avoid CPU saturation from multiple kiro-cli processes.
+                # On resume, use the CWD stored in session_map so CC CLI finds
+                # its conversation in the correct project directory.
+                effective_cwd = cwd
+                if not effective_cwd and resume_sid:
+                    stored_cwd = self._session_map.get_cwd(key)
+                    if stored_cwd and Path(stored_cwd).is_dir():
+                        effective_cwd = stored_cwd
+                        logger.info("Resume CWD override for %s: %s", key, stored_cwd)
+                provider = factory(
+                    key,
+                    agent=agent,
+                    channel_id=channel_id,
+                    model_override=model,
+                    cwd=effective_cwd,
+                    extra_env=extra_env,
+                    **extra_factory_kwargs,
+                )
+                # Provider switch detection: if session was created by a different
+                # provider (e.g. kiro->CC or CC->kiro), the resume_sid is from the
+                # wrong runtime and unusable. Discard it and clear the stored SID.
+                # Kiro Crew's conversation_log will inject history via
+                # build_session_replay on the first prompt (provider_switch_replay flag).
+                _provider_switched = False
+                if resume_sid:
+                    is_cc_now = (
+                        ClaudeCodeProvider is not None and isinstance(provider, ClaudeCodeProvider)
+                    ) or _is_claude_backend(provider)
+                    current_provider = (
+                        PROVIDER_LABEL_CLAUDE if is_cc_now else _provider_label(provider)
+                    )
+                    if detect_provider_switch(self._session_map, key, current_provider):
+                        resume_sid = None
+                        _provider_switched = True
+                        # Clear the incompatible SID from session_map so future
+                        # lookups don't try to resume with a stale ID.
+                        self._session_map.clear_sid(key)
+
+                # Set resume ID before start() triggers _initialize_session
+                if resume_sid:
+                    from kiro_crew.providers.acp import (
+                        AcpProvider,  # circular import: providers -> session
+                    )
+
+                    if isinstance(provider, AcpProvider):
+                        provider.client.set_resume_session_id(resume_sid)
+                        logger.info("Attempting session/load for %s (sid=%s)", key, resume_sid)
+                    elif ClaudeCodeProvider is not None and isinstance(
+                        provider, ClaudeCodeProvider
                     ):
-                        sid = provider.session_id
-                        if sid:
-                            self._session_map.set(key, sid, provider="claude_code", cwd=_cwd_str)
+                        provider.set_resume_session_id(resume_sid)
+                        logger.info("CC resume for %s (sid=%s)", key, resume_sid)
+                async with self._start_sem:
+                    try:
+                        await provider.start()
+                    except (asyncio.CancelledError, Exception):
+                        # Provider process may have spawned before the cancel/error —
+                        # shut it down so it doesn't leak. Dispatched to the
+                        # subprocess executor: awaiting an async shutdown here is
+                        # unreliable during cancellation (the awaited future
+                        # re-raises CancelledError immediately), and an inline
+                        # _sync_kill_provider blocks the event loop (os.waitpid /
+                        # taskkill). Resume prefetch makes this path routine — a
+                        # focus flip mid-session/load cancels the loading task —
+                        # so it must not stall the loop. The create lock stays
+                        # held until the outer finally — do not release here.
+                        self._dispatch_hard_kill(provider)
+                        raise
 
-                    if self._cleanup_task is None or self._cleanup_task.done():
-                        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+            # start() has written the provider's PID to kiro_session_pids.txt, but
+            # the session is not registered in self._sessions yet. Guard the PID so
+            # the periodic orphan sweep doesn't kill it during this window. Removed
+            # in the finally below once registration (or teardown) completes.
+            _sp = getattr(getattr(provider, "client", None), "_pid", None)
+            if not isinstance(_sp, int):
+                _cc = getattr(provider, "_proc", None)
+                _sp = _cc.pid if (_cc is not None and _cc.returncode is None) else None
+            _starting_pid = _sp if isinstance(_sp, int) else None
+            if _starting_pid is not None:
+                self._starting_pids.add(_starting_pid)
 
-                    await sess.semaphore.acquire()
-                    Stats().inc_session_created()
+            # Everything after start() must be wrapped so that a CancelledError
+            # between start() and session registration doesn't orphan the process.
+            try:
+                # Check if session was resumed
+                resumed = False
+                from kiro_crew.providers.acp import (  # circular import: providers -> session
+                    AcpProvider,
+                )
 
-                    result = (provider, True, resumed)
-        except BaseException:
-            # CancelledError or any other exception after provider.start()
-            # succeeded — provider is running but never registered. Kill it
-            # via the executor dispatch: this handler is routine under resume
-            # prefetch (every failed speculative load raises
-            # SpeculativeResumeRefused through here), and an inline
-            # _sync_kill_provider blocks the event loop.
-            self._dispatch_hard_kill(provider)
-            raise
+                if isinstance(provider, AcpProvider):
+                    resumed = provider.client.resumed
+
+                # A SPECULATIVE RESUME whose load did NOT restore the transcript
+                # (F2 fell back to a fresh session, the mapping vanished between
+                # lookup and load, or a provider switch discarded the sid) is
+                # rejected BEFORE registration. A registered fallback session is
+                # claimable: a real turn that queued during the load would claim
+                # it, the conditional cleanup would no-op, and the turn's
+                # exchanges would land in a session whose native id is unmapped —
+                # the next reopen resumes the OLD sid and silently drops them
+                # from model context. Raising here (the except below kills the
+                # provider) means no claimable session ever exists; the first
+                # real message creates AND maps the fallback itself, running the
+                # normal F2 recovery + history replay in its own coroutine.
+                if speculative and speculative_resume and not resumed:
+                    raise SpeculativeResumeRefused(key)
+
+                async with self._lock:
+                    # Re-check _closing: the entry gate ran BEFORE the multi-second
+                    # provider.start(), so close_all() can begin (and finish its
+                    # drain + kill snapshot) while the handshake is in flight. A
+                    # session registered here after that snapshot is invisible to
+                    # the shutdown loop — the kiro-cli process would outlive the
+                    # gateway holding the persisted session lock, breaking the
+                    # next startup's session/load. Raising sends us to the
+                    # except-BaseException below, which kills the provider.
+                    if self._closing:
+                        raise SessionClosingError(
+                            "SessionManager began closing during provider startup; "
+                            "refusing to register a session behind the shutdown "
+                            "snapshot"
+                        )
+                    # Re-check: another coroutine may have created this key while we
+                    # were starting the provider (race on same key). In-place
+                    # compaction (kiro-cli and claude) leaves the existing entry
+                    # healthy, so reuse it even when _compacting is set; only an
+                    # entry that IS the exact object the failure recycle is
+                    # tearing down should fall through to register us — a healthy
+                    # replacement under the same key must be reused, never
+                    # overwritten. The recycle path also pops by object identity,
+                    # so even if we do register over a being-recycled entry, only
+                    # the old session object is killed.
+                    _existing = self._sessions.get(key)
+                    _is_recycling = _existing is not None and self._recycling.get(key) is _existing
+                    if _existing is not None and not _is_recycling:
+                        # Another task won the race — use theirs and shut down our
+                        # duplicate provider below, after the lock is released
+                        # (shutdown() involves subprocess teardown; no need to hold
+                        # the global lock across it). Claim the winner here but DON'T
+                        # acquire its semaphore under self._lock: _existing's
+                        # semaphore may be held by a long-running turn, and blocking
+                        # on it here would pin the global lock and freeze every other
+                        # session (the same deadlock class fixed on the fast path).
+                        sess = _existing
+                        sess.last_used = time.monotonic()
+                        if approval_policy:
+                            sess.approval_policy = approval_policy
+                        if agent:
+                            sess.agent = agent
+                        _won_race_sess = sess
+                        _dup_provider = provider
+                    else:
+                        # First-turn observation, selected atomically at
+                        # registration under self._lock — this is what replaces
+                        # the racy rearm-after-release design. A real creator
+                        # consumes the observation itself (is_new=True goes back
+                        # to it in `result`), so it registers NOTHING_ARMED. A
+                        # speculative creator leaves the observation ARMED for the
+                        # first real turn, which claims it via the fast path or
+                        # the won-race path: RESUMED when its session/load
+                        # actually restored the transcript (it owes that
+                        # resumed=True observation to the first real claimant),
+                        # FRESH otherwise.
+                        if not speculative:
+                            _first_turn = FirstTurnState.NOTHING_ARMED
+                        elif resumed:
+                            _first_turn = FirstTurnState.RESUMED
+                        else:
+                            _first_turn = FirstTurnState.FRESH
+                        sess = _Session(
+                            provider=provider,
+                            first_turn=_first_turn,
+                            approval_policy=approval_policy,
+                            agent=agent or "",
+                        )
+                        _replay_needed = getattr(provider, "_history_replay_needed", False) is True
+                        if _provider_switched or _replay_needed:
+                            # provider_switch_replay OR F2 load-recovery fell back to
+                            # a fresh native session (stale lock never cleared):
+                            # replay Kiro Crew's conversation_log into the new session
+                            # on the first prompt so the slot isn't context-free.
+                            sess.provider_switch_replay = True
+                        if _replay_needed and _provider_label(provider) != PROVIDER_LABEL_DEFAULT:
+                            # SessionMap.get() only self-prunes entries whose kiro
+                            # transcript is gone; a backend that owns its own storage
+                            # is never file-checked, so a failed load is the only
+                            # signal its sid went stale. Drop it here or every later
+                            # turn re-attempts the same doomed load.
+                            self._session_map.clear_sid(key)
+                        self._sessions[key] = sess
+                        logger.info(
+                            "New session: %s agent=%s resumed=%s provider_switch=%s (total=%d)",
+                            key,
+                            agent or "kirocrew",
+                            resumed,
+                            _provider_switched,
+                            len(self._sessions),
+                        )
+
+                        # Save session mapping for long-lived sessions. A failed
+                        # speculative resume never reaches this point — it is
+                        # rejected before registration (SpeculativeResumeRefused
+                        # above), so a speculative_resume registration here always
+                        # carries resumed=True and mapping its sid is correct.
+                        _cwd_str = provider.cwd
+                        if not is_stateless and isinstance(provider, AcpProvider):
+                            sid = provider.client._session_id
+                            _prov_label = _provider_label(provider)
+                            if sid:
+                                self._session_map.set(key, sid, provider=_prov_label, cwd=_cwd_str)
+                        elif (
+                            not is_stateless
+                            and ClaudeCodeProvider is not None
+                            and isinstance(provider, ClaudeCodeProvider)
+                        ):
+                            sid = provider.session_id
+                            if sid:
+                                self._session_map.set(
+                                    key, sid, provider="claude_code", cwd=_cwd_str
+                                )
+
+                        if self._cleanup_task is None or self._cleanup_task.done():
+                            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+                        await sess.semaphore.acquire()
+                        Stats().inc_session_created()
+
+                        result = (provider, True, resumed)
+            except BaseException:
+                # CancelledError or any other exception after provider.start()
+                # succeeded — provider is running but never registered. Kill it
+                # via the executor dispatch: this handler is routine under resume
+                # prefetch (every failed speculative load raises
+                # SpeculativeResumeRefused through here), and an inline
+                # _sync_kill_provider blocks the event loop.
+                self._dispatch_hard_kill(provider)
+                raise
         finally:
-            # Registration is complete (or the provider was killed) — the PID is
-            # now either in self._sessions or dead, so drop the start-up guard.
+            if _unregistered_pool is not None:
+                # Still ours and never registered — put it back so a
+                # cancel or install failure cannot orphan the process.
+                # Keep the original spawn: resetting to now would let
+                # repeated sidecar/install failures keep a process
+                # beyond the configured TTL.
+                spawn = _unregistered_spawn if _unregistered_spawn is not None else time.monotonic()
+                self._warm_pool.put_nowait((_unregistered_pool, spawn))
+                _unregistered_pool = None
             if _starting_pid is not None:
                 self._starting_pids.discard(_starting_pid)
+            if _create_held:
+                _create_lock.release()
+                _create_held = False
 
         # Lost the same-key race: shut down our duplicate provider (outside the
         # lock — subprocess teardown), then acquire the winner's semaphore HERE,
@@ -3578,6 +3694,28 @@ class SessionManager:
                     _won_race_sess.first_turn = FirstTurnState.NOTHING_ARMED
                 was_new = first_turn.is_new
                 was_resumed = first_turn.resumed
+                if await self._apply_staged_gateway_under_lease(key, _won_race_sess):
+                    if not self._provider_factory:
+                        raise RuntimeError("No provider factory configured")
+                    if _won_race_retries >= _WON_RACE_MAX_RETRIES:
+                        raise RuntimeError(
+                            f"get_or_create({key!r}) exceeded {_WON_RACE_MAX_RETRIES} "
+                            "won-race retries — session kept going stale between acquire "
+                            "and re-validate"
+                        )
+                    return await self.get_or_create(
+                        key,
+                        agent=agent,
+                        channel_id=channel_id,
+                        approval_policy=approval_policy,
+                        model=model,
+                        cwd=cwd,
+                        extra_env=extra_env,
+                        speculative=speculative,
+                        speculative_resume=speculative_resume,
+                        _won_race_retries=_won_race_retries + 1,
+                        **extra_factory_kwargs,
+                    )
                 return _won_race_sess.provider, was_new, was_resumed
             # Stale winner: the semaphore has already been released by the
             # re-validate; retry from the top (cold-starts cleanly). Bounded so
@@ -3602,6 +3740,31 @@ class SessionManager:
                 **extra_factory_kwargs,
             )
 
+        # Creator path: the lease was acquired at registration. Apply
+        # now so a concurrent loser cannot have overwritten the sidecar
+        # before this winner owned the session.
+        if await self._apply_staged_gateway_under_lease(key, sess):
+            if not self._provider_factory:
+                raise RuntimeError("No provider factory configured")
+            if _won_race_retries >= _WON_RACE_MAX_RETRIES:
+                raise RuntimeError(
+                    f"get_or_create({key!r}) exceeded {_WON_RACE_MAX_RETRIES} "
+                    "won-race retries — session kept going stale between acquire "
+                    "and re-validate"
+                )
+            return await self.get_or_create(
+                key,
+                agent=agent,
+                channel_id=channel_id,
+                approval_policy=approval_policy,
+                model=model,
+                cwd=cwd,
+                extra_env=extra_env,
+                speculative=speculative,
+                speculative_resume=speculative_resume,
+                _won_race_retries=_won_race_retries + 1,
+                **extra_factory_kwargs,
+            )
         return result
 
     async def reset(
@@ -5544,15 +5707,109 @@ class SessionManager:
         if session:
             session.principal = principal
 
-    def retract_principal_credentials(self, key: str) -> None:
+    def _creation_lock_for(self, key: str) -> asyncio.Lock:
+        """Per-key lock that serializes sidecar install + ``provider.start``.
+
+        Covers warm-pool claimants and cold creators. ``setdefault`` is
+        event-loop safe: no await between get and set.
+        """
+        return self._create_locks.setdefault(key, asyncio.Lock())
+
+    async def _install_staged_gateway_sidecar(self, key: str) -> None:
+        """Write the staged sidecar without consuming it or recycling.
+
+        Distinct from ``_apply_staged_gateway`` so the pre-pool source pin
+        stays valid. Called under the creation reservation before
+        ``provider.start``. A warm-pool hit whose fill already ran
+        ``session/new`` is discarded when AgentCore is on so this start
+        is the handshake that reads the sidecar.
+        """
+        from kiro_crew.platform.agentcore_gateway import install_staged_gateway_sidecar
+
+        await install_staged_gateway_sidecar(key)
+
+    def _resolve_claim_identity(
+        self, agent: str | None, extra_factory_kwargs: dict[str, Any]
+    ) -> tuple[str, object]:
+        """Canonical crew + watchdog for a warm-pool claim.
+
+        Same identity rule as the provider factory so discard, rekey, and
+        cold start cannot disagree. Runs off the loop (file reads +
+        jsonschema). An explicit ``crew_agent`` kwarg wins, including "".
+        """
+        # circular import: session -> acp.session_handle at module scope
+        # would loop through acp.client -> session.
+        from kiro_crew.acp.session_handle import _load_watchdog_settings
+        from kiro_crew.config.loader import resolve_crew_identity
+
+        claim_kwarg = extra_factory_kwargs.get("crew_agent")
+        cfg = KiroCrewConfig.load()
+        crew = resolve_crew_identity(
+            cfg,
+            agent,
+            None if claim_kwarg is None else str(claim_kwarg),
+        )
+        return crew, _load_watchdog_settings(crew)
+
+    def _gateway_requires_fresh_session(self, key: str, *, agent: str = "") -> bool:
+        """True when a warm-pool ``session/new`` cannot carry this turn's Gateway.
+
+        ``agent`` is the resolved crew identity (``crew_agent`` kwarg, then
+        crew-namespace ``agent``, else empty) — the same string rekey uses.
+        """
+        from kiro_crew.platform.agentcore_gateway import gateway_requires_fresh_session
+
+        return gateway_requires_fresh_session(key, agent=agent)
+
+    async def _apply_staged_gateway(self, key: str) -> bool:
+        """Apply a staged login Gateway bind under this session's lease.
+
+        Returns True when the live ACP child was recycled and the caller
+        must cold-start. A credential-drop failure propagates so the turn
+        cannot continue with a leftover bearer.
+        """
+        from kiro_crew.platform.agentcore_gateway import apply_staged_session_gateway
+
+        return await apply_staged_session_gateway(self, key)
+
+    async def _apply_staged_gateway_under_lease(self, key: str, sess: _Session) -> bool:
+        """Apply staged Gateway while *sess* holds the turn lease.
+
+        Recycle (True) or any exception releases that lease so a later
+        ``get_or_create`` cannot block forever on a semaphore nobody owns.
+        False leaves the lease held — the caller is returning the session.
+        """
+        try:
+            recycled = await self._apply_staged_gateway(key)
+        except BaseException:
+            sess.semaphore.release()
+            raise
+        if recycled:
+            sess.semaphore.release()
+        return recycled
+
+    async def retract_principal_credentials(self, key: str) -> None:
         """Drop live inbound credentials for *key* after a principal unbind.
 
-        This layer only stores metadata on ``_Session.principal``. Gateway
-        sidecar / ACP-child recycle lands in a later stack PR; until then
-        this is a documented no-op so every unbind goes through
+        ``set_principal(None)`` is metadata-only. This hook recycles the
+        ACP child and clears the inbound sidecar so a synthetic reuse
+        cannot keep the previous human JWT / bearer. Callers go through
         :func:`kiro_crew.platform.agent_identity.clear_session_principal`
-        and cannot skip the retract hook once it exists.
+        so retract cannot be skipped when the metadata is cleared.
         """
+        key = self._fold_key(key)
+        from kiro_crew.platform.agentcore_gateway import (
+            GatewayCredentialError,
+            _recycle_live_session,
+            clear_inbound_sidecar,
+        )
+
+        recycled = await _recycle_live_session(self, key, why="unbind")
+        if not recycled:
+            raise GatewayCredentialError(
+                f"cannot retract leftover Gateway credentials for busy session {key}"
+            )
+        clear_inbound_sidecar(key)
 
     def set_approval_policy(self, key: str, policy: str) -> None:
         """Set the approval policy for an existing session."""

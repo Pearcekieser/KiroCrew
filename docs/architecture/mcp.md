@@ -27,8 +27,14 @@ own gate model is [computer-use](../system-specs/modules/computer-use.md).
 | `~/.kiro/agents/kirocrew.json` | Kiro Crew gateway (`agent.rebuild_agent_config`) | The rendered Kiro agent: model + tools + merged `mcpServers` | kiro-cli, when spawned as the `kirocrew` agent |
 | `~/.kiro/settings/mcp.json` | User | Kiro global MCP servers | kiro-cli for all agents; merged into Kiro Crew's agent file at render time |
 | `~/.kiro/crew/mcp.json` | User, via the dashboard MCP panel | specific to Kiro Crew additions and per-server tool disables | Kiro Crew gateway only |
+| `~/.kiro/crew/agentcore-authored-mcp/stash.json` | Kiro Crew gateway (login withhold) | Durable copy of non-managed `mcpServers` plus `@server` / `@server/tool` refs withheld from the runtime `--agent` spec | Restore when AgentCore posture leaves `login`; later login rebuilds merge by server name |
 
-`rebuild_agent_config()` writes exactly **one** file, `~/.kiro/agents/kirocrew.json`.
+`rebuild_agent_config()` writes exactly **one** runtime agent file, `~/.kiro/agents/kirocrew.json`.
+Under AgentCore `login` posture that file is the **filtered** spec kiro-cli
+reads (`--agent`): only managed `kirocrew-*` servers. Operator customizations
+that already lived in `kirocrew.json` are stashed to the owner-only sidecar
+above and restored when posture leaves login. Source `mcp.json` files are
+never write-through.
 There is no second rendered agent file and no agent-file renderer for any other
 provider: Kiro Crew is KiroACP-only.
 

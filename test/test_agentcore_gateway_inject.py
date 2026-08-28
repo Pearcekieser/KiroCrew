@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any
 
 import pytest
@@ -118,6 +119,22 @@ def test_rebuild_keeps_operator_command_named_gateway() -> None:
         reset_context()
 
 
+def test_login_withhold_drops_command_only_edition_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "kiro_crew.agent._extra_mcp_servers",
+        lambda: {"edition-cli": {"command": "npx", "args": ["-y", "foo"]}},
+    )
+    try:
+        _install(posture="login", spec={"url": "https://gw.example.test/mcp"})
+        mcp: dict[str, Any] = {}
+        _merge_edition_mcp(mcp)
+        assert "edition-cli" not in mcp
+    finally:
+        reset_context()
+
+
 def test_session_injects_loopback_only(monkeypatch: pytest.MonkeyPatch) -> None:
     from kiro_crew.platform.agentcore_sigv4 import (
         PROXY_AGENT_HEADER,
@@ -215,6 +232,39 @@ def test_runtime_session_new_injects_loopback(monkeypatch: pytest.MonkeyPatch) -
             item.get("headers") or [] for item in servers if item.get("name") == GATEWAY_SERVER_NAME
         )
         assert any(pair.get("name") == PROXY_AUTH_HEADER for pair in headers)
+    finally:
+        reset_context()
+
+
+def test_workload_discards_persisted_login_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leftover login bearer must not reach session/new after a posture flip."""
+    from kiro_crew.platform.agentcore_gateway import inbound_sidecar_path
+
+    monkeypatch.setattr(
+        "kiro_crew.platform.agentcore_sigv4.workload_proxy_auth_token",
+        lambda: "proxy-test-token",
+    )
+    try:
+        _install(posture="workload", spec={"url": "http://127.0.0.1:18765/mcp"})
+        path = inbound_sidecar_path("agent:main:main")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "url": "https://gw.example.test/mcp",
+                    "headers": {"Authorization": "Bearer leftover-login-jwt"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        servers = session_gateway_servers("agent:main:main")
+        assert len(servers) == 1
+        assert servers[0]["url"] == "http://127.0.0.1:18765/mcp"
+        dumped = str(servers)
+        assert "leftover-login-jwt" not in dumped
+        assert "https://gw.example.test/mcp" not in dumped
     finally:
         reset_context()
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Mapping
 
 from kiro_crew.executors import governance_executor, maintenance_executor
 from kiro_crew.messaging.link import DM_SCOPE_UNIFIED, channel_namespace_of
@@ -69,6 +69,44 @@ def exclusive_bind_raw_id(
     return raw_id
 
 
+async def prepare_turn_gateway(
+    sessions: Any,
+    session_key: str,
+    bind: Mapping[str, str] | None = None,
+    *,
+    agent: str = "",
+) -> None:
+    """Stage Gateway inbound for apply-after-acquire.
+
+    Channel dispatchers and ``drive_turn`` must call this after the
+    session key is final and before ``get_or_create``. Bind kwargs come
+    from ``principal_bind_kwargs`` — empty means an unbound / synthetic
+    turn, which retracts a leftover human sidecar after the lease is
+    held. ``agent`` is the selected crew identity so attach honors the
+    task profile, not only the surface. ``GatewayCredentialError``
+    propagates so a failed recycle cannot leave the old bearer active.
+    """
+    try:
+        from kiro_crew.platform.agentcore_gateway import (
+            GatewayCredentialError,
+            prepare_session_gateway,
+        )
+
+        surface = bind.get("surface") if bind else None
+        raw_id = bind.get("raw_id") if bind else None
+        await prepare_session_gateway(
+            session_key,
+            surface=surface,
+            raw_id=raw_id,
+            sessions=sessions,
+            agent=agent,
+        )
+    except GatewayCredentialError:
+        raise
+    except Exception:
+        logger.debug("prepare_turn_gateway failed for %s", session_key, exc_info=True)
+
+
 async def publish_turn_identity(
     sessions: Any,
     session_key: str,
@@ -114,10 +152,9 @@ async def publish_turn_identity(
                 exc_info=True,
             )
     else:
-        # Metadata-only. Retract of live inbound credentials belongs
-        # before session/new (later stack layer), not after acquire —
-        # ``clear_session_principal`` would recycle the provider this
-        # turn just created once that retract hook exists.
+        # Metadata-only. Retract runs in prepare_turn_gateway *before*
+        # session/new; a post-acquire retract would recycle the provider
+        # this turn just created.
         setter = getattr(sessions, "set_principal", None)
         if callable(setter):
             setter(session_key, None)
