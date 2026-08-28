@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any
@@ -612,3 +614,25 @@ def test_proxy_rechecks_permission_after_body_read() -> None:
     sign = src.index("sign_aws_request")
     assert body < check < sign
     assert "upstream_url=proxy.upstream_url" in src
+
+
+def test_reset_workload_proxy_returns_before_stop_joins() -> None:
+    from kiro_crew.platform import agentcore_sigv4 as sigv4
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class _Slow:
+        def stop(self) -> None:
+            started.set()
+            release.wait(timeout=5)
+
+    sigv4.reset_workload_proxy()
+    with sigv4._LOCK:
+        sigv4._PROXY = _Slow()  # type: ignore[assignment]
+    started_at = time.monotonic()
+    sigv4.reset_workload_proxy()
+    assert time.monotonic() - started_at < 0.5
+    assert started.wait(timeout=1)
+    release.set()
+    sigv4._join_prior_stop()

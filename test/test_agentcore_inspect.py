@@ -631,8 +631,18 @@ async def test_handler_refuses_when_capability_disabled(
 
 
 @pytest.mark.asyncio
+async def test_handler_sync_requires_operator_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    _handler_isolate(monkeypatch)
+    monkeypatch.delenv(handler.GATEWAY_SYNC_ENV, raising=False)
+    resp = await handler.api_agentcore_gateway_sync(_Req({"target_id": "t1"}))
+    assert resp.status == 403
+    assert json.loads(resp.text)["code"] == "sync_not_permitted"
+
+
+@pytest.mark.asyncio
 async def test_handler_sync_requires_target_id(monkeypatch: pytest.MonkeyPatch) -> None:
     _handler_isolate(monkeypatch)
+    monkeypatch.setenv(handler.GATEWAY_SYNC_ENV, "1")
     resp = await handler.api_agentcore_gateway_sync(_Req({}))
     assert resp.status == 400
     assert json.loads(resp.text)["code"] == "invalid_target"

@@ -12220,6 +12220,8 @@
         "agent_identity_consent_body": "Ein Werkzeug hinter dem AgentCore-Gateway erfordert eine Anmeldung. Öffnen Sie die zulässige Seite im Browser.",
         "agent_identity_consent_open": "Anmeldeseite öffnen",
         "agent_identity_consent_refused": "Die Anmeldeadresse steht nicht auf der Zulassungsliste dieser Crew und wird daher nicht angezeigt.",
+        "agent_identity_consent_unavailable": "Eine Gateway-Anmeldeanfrage konnte nicht geprüft werden.",
+        "agent_identity_loading": "AgentCore-Identität wird geladen…",
         "agent_identity_consent_title": "Gateway-Anmeldung",
         "agent_identity_hint": "AgentCore-Identität dieser Crew. Workload erreicht das Gateway ohne Anmeldung. Login stellt nur vom Gateway genehmigtes MCP bereit und erfordert eine menschliche Anmeldung. Aus lässt diese Crew unverändert.",
         "agent_identity_name": "Workload-Name",
@@ -12245,8 +12247,6 @@
         "agent_identity_verify": "Verbindung prüfen",
         "agent_identity_verifying": "Wird geprüft…",
         "agent_identity_sync": "Katalog synchronisieren",
-        "agent_identity_syncing": "Wird synchronisiert…",
-        "agent_identity_sync_ok": "Synchronisierung gestartet. Aktualisiere in einem Moment, um den neuen Katalog zu sehen.",
         "agent_identity_check_url": "Gateway-URL ist gesetzt",
         "agent_identity_check_extra": "AgentCore-Unterstützung ist installiert",
         "agent_identity_check_reachable": "AWS sieht dieses Gateway",
@@ -12264,8 +12264,10 @@
         "agent_identity_target_status": "Status",
         "agent_identity_target_mode": "Auflistung",
         "agent_identity_target_synced": "Letzte Sync",
+        "agent_identity_target_actions": "Aktionen",
         "agent_identity_tools": "Tools, die der Agent aufrufen kann",
         "agent_identity_tools_empty": "Noch keine Tools. Der Katalog ist möglicherweise veraltet, die Auth passt nicht, oder diese Identität kann das Gateway nicht aufrufen.",
+        "agent_identity_tools_empty_checks_ok": "Prüfungen erfolgreich, aber dieses Gateway listet keine Tools. Füge ein Ziel hinzu oder synchronisiere es und prüfe erneut.",
         "agent_identity_tools_skipped_login": "Die Login-Identität listet Tools, nachdem sich jemand im Chat anmeldet. Diese Seite kann die Sitzung nicht übernehmen.",
         "agent_identity_pending_auth": "Dieses Ziel wartet auf deine Anmeldung.",
         "agent_identity_mismatch_authorizer": "Die eingehende Auth dieses Gateways passt nicht zur Identität dieser Crew. Workload braucht IAM; Login braucht den JWT-Authorizer.",
@@ -12297,7 +12299,6 @@
         "agent_identity_type_provider": "Anbieter",
         "agent_identity_type_runtime": "AgentCore Runtime",
         "agent_identity_type_passthrough": "Durchreichen",
-        
         "gov_scope_channels": "Kanäle",
         "gov_scope_commands": "Befehle",
         "gov_scope_cron": "Cron",
@@ -12433,7 +12434,11 @@
           "allow_all_confirm_ack": "Mir ist klar, dass jede App von Drittanbietern, die ich installiere, eigenen Code mit den Zugriffsrechten von Kiro Crew ausführen kann.",
           "ineffective_label": "Gespeichert, aber ohne Wirkung",
           "ineffective_description": "Diese Namen wurden als vertrauenswürdig gespeichert, aber Kiro Crew akzeptiert sie nicht, deshalb bleiben die Apps blockiert. Entferne sie, um die Liste aufzuräumen."
-        }
+        },
+        "agent_identity_name_required": "Legen Sie einen Workload-Namen fest, bevor Sie die Identität einschalten.",
+        "agent_identity_code_not_kirocrew": "Dieses Gateway konnte nicht aufgerufen werden. Hängen Sie bedrock-agentcore:InvokeGateway für dieses Gateway an die Rolle, die diese Crew verwendet. Eine Kiro-Crew-Cloud-Startrolle gewährt nur kirocrew-*-Gateways.",
+        "agent_identity_code_invoke_denied": "Die AWS-Anmeldedaten dieser Crew wurden beim Aufruf des Gateways abgelehnt. Hängen Sie bedrock-agentcore:InvokeGateway für dieses Gateway an die Rolle, die diese Crew verwendet.",
+        "agent_identity_code_proxy_unavailable": "Der lokale Gateway-Proxy konnte nicht gestartet werden. Installieren Sie die AgentCore-Unterstützung auf diesem Gateway und prüfen Sie erneut."
       },
       "shortcutsPanel": {
         "bind_chat_tab_switching_to_ctrl_digit_instead_of": "Wechsel zwischen Chat-Tabs an Strg+Zahl statt Option+Zahl binden",

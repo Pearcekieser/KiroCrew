@@ -123,7 +123,30 @@ See-and-configure lives on this crew's dashboard
 A hub launching another box is a different crew. Dashboard launch stays
 `none`; the operator passes `--agentcore-posture` on the CLI when the
 stack should create the AWS resource at deploy time, or writes the
-home-policy row.
+home-policy row. PUT answers 503 `agent_rebuild_failed` (and leaves
+live sessions in place) when the home file applied but
+`rebuild_agent_config` did not. Identity PUT also refuses cache-only
+distribution (`KIROCREW_POLICY_CACHE_ONLY`, same `write_blocked:
+distribution` as a fleet URL) and takes `security_policy.json.lock`
+around the home-file read-modify-write. A failed stage closes the
+staging handle before unlinking it, so Windows can remove the exclusive
+``.tmp`` leaf. The empty staging file is locked down before the first
+content byte, then ``os.fsync``'d before the descriptor closes, so a
+power loss cannot rename unflushed bytes. Publish uses ``replace_with_retry`` so a Windows
+sharing violation retries instead of stranding that leaf; lockdown or
+replace failure still unlinks the created staging file. A leftover
+regular ``.tmp`` (exclusive flock already held) is reclaimed; a
+staging link is still refused. Persist and apply take the dashboard config lock so
+overlapping Saves cannot stop a newer workload proxy. Successful apply stops the previous SigV4 listener, rebuilds
+(a workload apply starts a new listener), then recycles sessions.
+A workload apply does not stop the listener rebuild just started.
+Off / login still revoke the proxy after rebuild. Proxy stop, the
+owner gate, and every identity-handler SEL write are offloaded onto
+a worker thread so the settings request does not join
+`HTTPServer.shutdown` or first-use SEL mkdir on the event loop. `POST /api/agentcore/gateway/sync` is operator-gated
+(`KIROCREW_AGENTCORE_GATEWAY_SYNC=1`): the standard instance role
+omits `SynchronizeGatewayTargets`, and the dashboard catalog does
+not expose the action.
 
 The instance bootstrap runs `install.sh --voice` on both its initial attempt and
 retry, and adds `--agentcore` when `AgentCorePosture` is not `none`. Voice

@@ -81,6 +81,9 @@ _ALLOWED_METHODS = frozenset({"GET", "POST", "DELETE", "HEAD"})
 
 _LOCK = threading.Lock()
 _PROXY: "GatewaySigV4Proxy | None" = None
+# In-flight ``stop`` (shutdown + join). Detached so a settings PUT
+# never joins the listener on the event-loop thread.
+_STOP_THREAD: threading.Thread | None = None
 
 
 def preferred_bind_port() -> int:
@@ -461,6 +464,7 @@ def ensure_workload_proxy(upstream_url: str) -> str | None:
     except ValueError:
         logger.warning("AgentCore SigV4 proxy refused an unusable Gateway URL")
         return None
+    _join_prior_stop()
     with _LOCK:
         if _PROXY is not None and _PROXY.alive and _PROXY.upstream_url == upstream_url:
             return _PROXY.listen_url
@@ -477,13 +481,35 @@ def ensure_workload_proxy(upstream_url: str) -> str | None:
         return listen
 
 
+def _join_prior_stop() -> None:
+    """Wait for a detached stop so a new bind does not race the old port."""
+    global _STOP_THREAD
+    thread = _STOP_THREAD
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=2.0)
+    _STOP_THREAD = None
+
+
 def reset_workload_proxy() -> None:
-    """Stop the process-wide proxy. Tests only."""
-    global _PROXY
+    """Detach the process-wide proxy. Shutdown and join run off this thread.
+
+    ``HTTPServer.shutdown`` plus the listener join block. Callers on the
+    gateway loop (Settings PUT) must not wait for that. ``ensure_workload_proxy``
+    joins a prior stop before binding again.
+    """
+    global _PROXY, _STOP_THREAD
     with _LOCK:
-        if _PROXY is not None:
-            _PROXY.stop()
-            _PROXY = None
+        proxy = _PROXY
+        _PROXY = None
+    if proxy is None:
+        return
+    thread = threading.Thread(
+        target=proxy.stop,
+        name="agentcore-sigv4-proxy-stop",
+        daemon=True,
+    )
+    thread.start()
+    _STOP_THREAD = thread
 
 
 def workload_proxy_auth_token() -> str | None:

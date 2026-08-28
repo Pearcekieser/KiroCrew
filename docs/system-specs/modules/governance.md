@@ -2166,11 +2166,23 @@ restored when posture leaves login; a later login rebuild merges the
 live extract into that sidecar and keeps `@server/tool` refs whose
 server name is still present; source `mcp.json` is never
 write-through), and never attaches for unattended
-(`cron:` / `subagent:`) sessions. Consent URLs are allowlisted through
+(`cron:` / `subagent:` / `hook:`) sessions. Consent URLs are allowlisted through
 `security.allow_agentcore_consent_url` (the operator-OAuth keystone plus
 the builtin set). Catalog inspect and the consent GET both go through
 `surface_consent_url`, which SEL-audits grant and deny (host+path only,
-never token bytes). Naming the
+never token bytes). Dashboard identity PUT refuses a cache-only
+distribution child (`KIROCREW_POLICY_CACHE_ONLY`) the same way as a
+fleet URL, and locks `security_policy.json.lock` around the home-file
+write. The rewrite creates `security_policy.json.tmp` exclusively
+and without following a link (also on the sensitive-path floor),
+locks the empty staging file down, writes every byte, `fsync`s before
+close, and refuses a zero-length write so a short `os.write` cannot
+install a truncated keystone. Publish retries
+the Windows sharing-violation window (`replace_with_retry`) and
+unlinks the created staging file if lockdown or replace fails, so a
+stranded exclusive `.tmp` cannot brick later Saves. A leftover regular
+`.tmp` under the exclusive flock is reclaimed; a planted staging link
+cannot become the policy. Naming the
 row here is what lets a policy pin the capability before those chokepoints
 land.
 
