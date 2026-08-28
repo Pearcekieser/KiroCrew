@@ -1,6 +1,7 @@
 import { copyToClipboard } from '../utils/clipboard'
 import { resizeImageForModel, type ResizeInfo } from '../utils/resizeImage'
 import type {
+  AppContributor,
   ChatSlot,
   IssueSource,
   McpApplyChange,
@@ -2692,6 +2693,8 @@ export const api = {
   // Issue sources. `refresh` bypasses the server's cached payload; the panel
   // never polls, so a refresh is always an explicit user action.
   fetchIssueSource: (url: string, refresh = false) => post('/api/source/issue', { url, refresh }).then(j) as Promise<IssueSource>,
+  /** Top contributors to an app's source repo (GitHub only). Owner-gated. */
+  appContributors: (url: string, refresh = false) => post('/api/source/contributors', { url, refresh }).then(j) as Promise<{ contributors: AppContributor[] }>,
   chatSlots: () => fetch('/api/chat/slots').then(j),
   /** All goal loops across sessions. Returns `{enabled:false, loops:[]}` when
    *  the auto-nudge feature flag is off, so callers need no flag check. */
