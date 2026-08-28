@@ -243,7 +243,11 @@ export function useWebSocket() {
   // index-map recomputes each dispatch triggers) happen ~per frame instead of
   // ~per token. lastSeq is carried across flushes so cross-batch gap detection
   // mirrors the reducer's per-chunk "N chunk(s) missed" marker.
-  const chunkBufRef = useRef<Map<string, { content: string; lastSeq: number | undefined }>>(new Map())
+  // `thinking` buffers reasoning-stream text (chat_thinking) in the SAME entry
+  // so both content types share one flush cycle and one lifecycle (reconnect
+  // clear, chat_done delete, unmount cancel); the flush dispatches thinking
+  // before content, matching a turn's thought-then-answer arrival order.
+  const chunkBufRef = useRef<Map<string, { content: string; lastSeq: number | undefined; thinking: string }>>(new Map())
   const chunkFlushScheduledRef = useRef(false)
   const chunkRafRef = useRef<number | null>(null)
   const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -547,6 +551,12 @@ export function useWebSocket() {
     const activeSlot = store.getState().chat.activeSlot
     let dispatchedActive = false
     for (const [slot, entry] of buf) {
+      // Thinking first: within a turn the reasoning stream precedes the answer
+      // stream, so a frame holding both must land them in that order.
+      if (entry.thinking) {
+        dispatch(sseThinkingChunk({ slot, content: entry.thinking }))
+        entry.thinking = ''
+      }
       if (!entry.content) continue
       dispatch(sseChatMessage({ slot, role: 'chunk', content: entry.content, seq: entry.lastSeq, batched: true }))
       entry.content = ''
@@ -585,6 +595,22 @@ export function useWebSocket() {
     if (typeof requestAnimationFrame === 'function') chunkRafRef.current = requestAnimationFrame(() => flushChunks())
     else chunkTimerRef.current = setTimeout(() => flushChunks(), 16)
   }, [flushChunks])
+
+  /** Salvage buffered reasoning before the chunk buffer is dropped. Buffered
+   *  CONTENT may be discarded — refreshSlot recovers it from the server — but
+   *  reasoning is client-only (the backend never persists it), so anything
+   *  still buffered when the buffer is cleared (reconnect) or the hook unmounts
+   *  would be permanently lost. A hidden tab makes that window unbounded:
+   *  requestAnimationFrame is suspended there, so the scheduled flush never
+   *  runs while thinking keeps accumulating. */
+  const flushBufferedThinking = useCallback(() => {
+    for (const [slot, entry] of chunkBufRef.current) {
+      if (entry.thinking) {
+        dispatch(sseThinkingChunk({ slot, content: entry.thinking }))
+        entry.thinking = ''
+      }
+    }
+  }, [dispatch])
 
   /** Flush buffered slot-recency bumps: one touchSlotActivity per slot, not per
    *  event. Cancels any pending frame first, mirroring flushChunks. */
@@ -720,6 +746,9 @@ export function useWebSocket() {
         chunkRafRef.current = null
         chunkTimerRef.current = null
         chunkFlushScheduledRef.current = false
+        // Reasoning first: it is client-only, so unlike content the refresh
+        // below cannot recover it — land it in the store before the drop.
+        flushBufferedThinking()
         chunkBufRef.current.clear()  // drop pre-disconnect partial chunks; refreshSlot recovers state
         // Same for subagent chunks: pre-disconnect text must not cross a reconnect.
         if (subagentChunkRafRef.current != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(subagentChunkRafRef.current)
@@ -1245,7 +1274,7 @@ export function useWebSocket() {
             if (cs) {
               const buf = chunkBufRef.current
               let entry = buf.get(cs)
-              if (!entry) { entry = { content: '', lastSeq: undefined }; buf.set(cs, entry) }
+              if (!entry) { entry = { content: '', lastSeq: undefined, thinking: '' }; buf.set(cs, entry) }
               // Cross-chunk gap detection via the shared missedChunkMarker,
               // single-sourced with the reducer so the two copies can't drift.
               if (entry.lastSeq !== undefined && data.seq !== undefined) {
@@ -1527,7 +1556,18 @@ export function useWebSocket() {
             break
           case 'chat_thinking': {
             // kiro-cli/ACP reasoning (agent_thought_chunk) -> collapsible block.
-            dispatch(sseThinkingChunk({ slot: data.slot, content: (data as { content?: string }).content || '' }))
+            // Buffered into the shared chunk buffer and flushed once per frame
+            // (see flushChunks): reasoning streams run for hundreds of tokens,
+            // and a per-token dispatch recomputes the O(N) displayItems on each.
+            const thinkSlot = data.slot as string | undefined
+            const thinkText = (data as { content?: string }).content || ''
+            if (thinkSlot && thinkText) {
+              const buf = chunkBufRef.current
+              let entry = buf.get(thinkSlot)
+              if (!entry) { entry = { content: '', lastSeq: undefined, thinking: '' }; buf.set(thinkSlot, entry) }
+              entry.thinking += thinkText
+              scheduleChunkFlush()
+            }
             // Dispatch the status detail only on a genuine kind TRANSITION into
             // 'thinking'. Guarding merely on `!== 'streaming'` would not
             // self-limit — 'thinking' is itself `!== 'streaming'`, so it would
@@ -1773,7 +1813,7 @@ export function useWebSocket() {
     }
 
     ws.onerror = () => { /* onclose will fire */ }
-  }, [dispatch, flushChunks, scheduleChunkFlush, bufferSlotActivity, bufferSubagentChunk, flushSubagentChunks, playNextVoiceChunk, queryClient, stopVoice, syncPendingApprovals, syncPendingQuestions, seedGoalLoops, recordRetiredId])
+  }, [dispatch, flushChunks, flushBufferedThinking, scheduleChunkFlush, bufferSlotActivity, bufferSubagentChunk, flushSubagentChunks, playNextVoiceChunk, queryClient, stopVoice, syncPendingApprovals, syncPendingQuestions, seedGoalLoops, recordRetiredId])
 
   /**
    * Force an immediate reconnect: cancels any pending backoff timer, closes
@@ -1852,6 +1892,9 @@ export function useWebSocket() {
       // otherwise leave a stale sidebar tint. The flush also cancels the scheduled frame.
       flushSlotActivity()
       flushSubagentChunks()
+      // Same for buffered reasoning: it is client-only and unrecoverable, unlike
+      // buffered content (which the next mount's refresh restores from the server).
+      flushBufferedThinking()
       wsRef.current?.close()
       wsRef.current = null
       window.removeEventListener('voice-stop', onVoiceStop)
@@ -1860,7 +1903,7 @@ export function useWebSocket() {
       unsubFocus()
       sendSlotFocusedImpl = () => {}
     }
-  }, [connect, stopVoice, flushSlotActivity, flushSubagentChunks])
+  }, [connect, stopVoice, flushSlotActivity, flushSubagentChunks, flushBufferedThinking])
 
   /** Subscribe to log events — call with callback on mount, null on unmount. */
   const subscribeLogs = useCallback((cb: LogCallback) => {
