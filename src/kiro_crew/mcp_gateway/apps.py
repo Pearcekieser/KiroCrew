@@ -410,8 +410,16 @@ def extract_declared_ui_uris(result: dict) -> dict[str, str]:
 
 
 def append_marker(result: dict, spool_id: str) -> dict:
-    """Return a copy of a ``tools/call`` result with the spool marker appended
+    """Return a copy of a ``tools/call`` result with the spool marker PREPENDED
     to its FIRST text content item (or a new text item when none exists).
+
+    The marker sits at offset 0 of the first text block so it survives the
+    downstream ACP per-part 4000-char truncation in
+    ``acp/_dispatch.py::_build_tool_result_event`` before the dashboard marker
+    detector (``mcp_apps_render.find_marker``) runs; an end-appended marker on a
+    long first block (real cases run to tens of thousands of chars) is sliced
+    off and the app never mounts. Both consumers (``find_marker`` search,
+    ``strip_marker`` sub) are position-agnostic, so leading the block is safe.
 
     Copy discipline mirrors ``backend._strip_caller_meta``: the input ``result``
     and every nested container on the mutated path are copied, never mutated in
@@ -435,7 +443,7 @@ def append_marker(result: dict, spool_id: str) -> dict:
         content.append({"type": "text", "text": marker})
     else:
         item = dict(content[text_idx])
-        item["text"] = f"{item['text']} {marker}"
+        item["text"] = f"{marker} {item['text']}"
         content[text_idx] = item
     out["content"] = content
     return out

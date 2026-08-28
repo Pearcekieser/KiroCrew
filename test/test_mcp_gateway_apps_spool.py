@@ -108,13 +108,14 @@ class TestExtractUiResourceUri:
 # --------------------------------------------------------------------------
 
 class TestAppendMarker:
-    def test_appends_to_first_text_item(self):
+    def test_prepends_to_first_text_item(self):
         result = {"content": [
             {"type": "text", "text": "hello"},
             {"type": "text", "text": "second"},
         ]}
         out = append_marker(result, "abc123")
-        assert out["content"][0]["text"] == "hello [kirocrew-mcp-app:abc123]"
+        # Marker at offset 0 so it survives the downstream ACP 4000-char cut.
+        assert out["content"][0]["text"] == "[kirocrew-mcp-app:abc123] hello"
         # Only the FIRST text item is marked.
         assert out["content"][1]["text"] == "second"
 
@@ -124,7 +125,7 @@ class TestAppendMarker:
             {"type": "text", "text": "caption"},
         ]}
         out = append_marker(result, "id9")
-        assert out["content"][1]["text"] == "caption [kirocrew-mcp-app:id9]"
+        assert out["content"][1]["text"] == "[kirocrew-mcp-app:id9] caption"
 
     def test_no_text_item_appends_new_item(self):
         result = {"content": [{"type": "image", "data": "..."}]}
@@ -992,8 +993,9 @@ async def test_interception_end_to_end(apps_flag_on, spool_tmp):
     # Original stub id restored, marker injected on the first text item.
     assert delivered["id"] == 42
     text = delivered["result"]["content"][0]["text"]
-    assert text.startswith("drawn ")
-    assert text.startswith("drawn [kirocrew-mcp-app:")
+    # Marker is prepended (offset 0) and the original tool text is preserved.
+    assert text.startswith("[kirocrew-mcp-app:")
+    assert "drawn " in text
     # Structured content preserved.
     assert delivered["result"]["structuredContent"] == {"nodes": 3}
 
