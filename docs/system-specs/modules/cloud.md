@@ -118,7 +118,7 @@ listener admits at most ``PROXY_MAX_INFLIGHT`` concurrent handlers so
 an incomplete upload cannot pin a thread forever. The extra does not create the
 Gateway or its targets — the operator supplies an existing MCP URL.
 
-See-and-configure on the dashboard is a later stack PR
+See-and-configure lives on this crew's dashboard
 (`GET`/`PUT /api/agentcore/identity`, Settings → Security → Agent identity).
 A hub launching another box is a different crew. Dashboard launch stays
 `none`; the operator passes `--agentcore-posture` on the CLI when the
