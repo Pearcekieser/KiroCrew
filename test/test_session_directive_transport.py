@@ -21,6 +21,7 @@ import json
 from kiro_crew import session_directive as sd
 from kiro_crew.acp._dispatch import _build_tool_result_event, _mcp_content_text
 from kiro_crew.mcp_apps_render import find_marker
+from kiro_crew.mcp_gateway.apps import append_marker
 from kiro_crew.validation import build_tool_response, strip_hidden_unicode
 
 DIRECTIVE_ARGS = {"questions": [{"question": "pick one"}]}
@@ -185,14 +186,17 @@ class TestMcpAppMarkerSurvivesResultCuts:
         return "a" * 32
 
     def test_marker_survives_long_single_block(self):
-        # A single text block far past the 4000-char per-part cut: an
-        # end-appended marker would be sliced off, but a prepended one at
-        # offset 0 rides through both cuts.
-        text = self._marker() + " " + "x" * 20000
+        # Drive the marker through the real producer ``append_marker`` on a
+        # LONG (>4000-char) first block, then feed the marked envelope through
+        # the parser. The producer decides the marker's byte offset, so this
+        # regresses the fix: with the prepend it sits at offset 0 and rides the
+        # per-part 4000-char cut, but the old end-append put it past 20000 chars
+        # where the ``[:4000]`` slice drops it and ``find_marker`` returns None.
+        marked = append_marker({"content": [{"type": "text", "text": "x" * 20000}]}, self._id())
         update = {
             "toolCallId": "tc-long",
             "status": "completed",
-            "rawOutput": {"items": [{"Json": _mcp_envelope(text)}]},
+            "rawOutput": {"items": [{"Json": marked}]},
         }
         event = _build_tool_result_event(update)
         assert event is not None

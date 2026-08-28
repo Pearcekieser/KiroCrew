@@ -127,10 +127,13 @@ class TestAppendMarker:
         out = append_marker(result, "id9")
         assert out["content"][1]["text"] == "[kirocrew-mcp-app:id9] caption"
 
-    def test_no_text_item_appends_new_item(self):
+    def test_no_text_item_prepends_new_item(self):
         result = {"content": [{"type": "image", "data": "..."}]}
         out = append_marker(result, "zz")
-        assert out["content"][-1] == {"type": "text", "text": "[kirocrew-mcp-app:zz]"}
+        # No text item to lead, so a fresh marker item is inserted at offset 0
+        # to match the prepend framing; the existing non-text item follows.
+        assert out["content"][0] == {"type": "text", "text": "[kirocrew-mcp-app:zz]"}
+        assert out["content"][1] == {"type": "image", "data": "..."}
 
     def test_empty_content_appends_new_item(self):
         out = append_marker({"content": []}, "q")

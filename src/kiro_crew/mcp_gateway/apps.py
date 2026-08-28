@@ -440,7 +440,11 @@ def append_marker(result: dict, spool_id: str) -> dict:
         None,
     )
     if text_idx is None:
-        content.append({"type": "text", "text": marker})
+        # No text item exists, so create one at offset 0 to match the prepend
+        # framing: a lone new item is already the earliest content, but leading
+        # it keeps the "marker at the front" invariant true regardless of what
+        # else lands in ``content`` later.
+        content.insert(0, {"type": "text", "text": marker})
     else:
         item = dict(content[text_idx])
         item["text"] = f"{marker} {item['text']}"
