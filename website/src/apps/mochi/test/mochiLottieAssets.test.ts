@@ -1,12 +1,16 @@
 /**
- * Lottie clips must be free of EXPRESSIONS to render at all.
+ * Lottie clips must be free of EXPRESSIONS to render fully.
  *
- * lottie-web compiles an expression with `eval()`, and the dashboard CSP ships
- * `script-src 'self' 'unsafe-inline'` with no `'unsafe-eval'` — so an expression
- * throws mid-build and the slot paints nothing. Three of the four built-in Kiro
- * Ghost clips carried a redundant `loopOut()` and were therefore invisible, while
- * the one without an expression rendered fine; the pack read as "broken" rather
- * than "one Lottie feature is unavailable".
+ * Mochi loads the LIGHT lottie player (see renderer/LottieRenderer.tsx), which
+ * ships no expression support at all — an expression is ignored, so motion that
+ * depended on one silently does not play. Historically, when this app still
+ * loaded the full player, it was worse: the expression compiler's `eval()`
+ * threw under the dashboard CSP (`script-src 'self' 'unsafe-inline'`, no
+ * `'unsafe-eval'`) mid-build and the slot painted nothing. Three of the four
+ * built-in Kiro Ghost clips carried a redundant `loopOut()` and were therefore
+ * invisible, while the one without an expression rendered fine; the pack read
+ * as "broken" rather than "one Lottie feature is unavailable". Either way —
+ * throw then, ignore now — an expression in a shipped clip is a defect.
  *
  * Two pins here: the SHIPPED assets stay expression-free (so this cannot regress
  * when the art is re-exported from After Effects, which adds `loopOut()` freely),
