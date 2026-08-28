@@ -13,7 +13,7 @@ const API = '/api/apps/meetings'
 export type MeetingStatus = 'idle' | 'active' | 'paused' | 'reviewing' | 'ended'
 export type WidgetType = 'markdown' | 'html' | 'chat'
 export type TaskPriority = 'high' | 'medium' | 'low'
-export type TranscriptSource = 'speech' | 'typed'
+export type TranscriptSource = 'speech' | 'typed' | 'system'
 
 /**
  * Full literal catalog keys per enum value, not a suffix interpolated at the call
@@ -122,10 +122,15 @@ export interface LiveStatus {
   agents: Record<string, AgentQueueStatus>
   agents_paused: boolean
   expired: boolean
-  /** Whether a dispatch sent now would be admitted (transcript ingress open).
+  /** Whether a dispatch sent now would be fanned out to the agents directly.
    *  Present on the meeting poll (`GET /meetings/{id}`), whose consumer gates
    *  the microphone on it; absent from the bare `/status` endpoint. */
   accepting_dispatches?: boolean
+  /** Whether a dispatch sent now would be HELD until the agents finish
+   *  initializing, rather than refused with a 409. Speech lands either way, so
+   *  the microphone gate is this OR `accepting_dispatches` — see
+   *  `canOpenTranscription`. */
+  buffering_dispatches?: boolean
 }
 
 export interface Task {

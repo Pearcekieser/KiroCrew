@@ -142,17 +142,21 @@ async def handle_get_meeting(request: web.Request) -> web.Response:
     live_payload = None
     if live is not None:
         live_payload = live.status()
-        # Whether a dispatch sent NOW would be admitted, from the same holder flag
-        # ``get_for_dispatch`` reads. The status is persisted ``active`` before
-        # ``init_agents`` runs, so status alone overstates readiness for the whole
-        # initialization window (~tens of seconds) while every dispatch 409s. The
-        # frontend polls this endpoint to decide when to open the microphone, and
-        # this field is the only per-poll answer to "would speech land?" — the
-        # start response alone cannot be, because it can be lost in transit while
-        # the server side succeeded. Plain attribute read on the single-threaded
-        # loop, same as the ``ACTIVE.get`` above; the value is a snapshot and may
-        # change by the next poll, which is exactly what a poll is for.
+        # Whether a dispatch sent NOW would be fanned out DIRECTLY, from the same
+        # holder flag ``get_for_dispatch`` reads. The status is persisted ``active``
+        # before ``init_agents`` runs, so status alone overstates readiness for the
+        # whole initialization window (~tens of seconds). Plain attribute read on
+        # the single-threaded loop, same as the ``ACTIVE.get`` above; the value is a
+        # snapshot and may change by the next poll, which is exactly what a poll is
+        # for.
         live_payload["accepting_dispatches"] = ACTIVE.accepting_dispatches
+        # And whether it would be HELD rather than refused (issue #4610). The
+        # frontend polls this endpoint to decide when to open the microphone, and
+        # "would speech land?" is now these two ORed: during initialization the
+        # answer is yes-by-holding. Reported separately rather than folded into the
+        # flag above, because that one is also the gate ``get_for_dispatch`` reads —
+        # making it true here would send lines to agents that are not ready.
+        live_payload["buffering_dispatches"] = ACTIVE.buffering_dispatches
     return web.json_response(
         {
             "meta": meta,
@@ -320,9 +324,16 @@ async def handle_start_meeting(request: web.Request) -> web.Response:
         outgoing = await ACTIVE.drain_and_clear()
         async with DISPATCH_LOCK:
             ACTIVE.set(session)
-            # Agent initialization may await several model turns. Keep ingress
-            # closed until every enabled agent knows its output contract.
-            ACTIVE.suspend_dispatches(session)
+            # Agent initialization may await several model turns. Keep DIRECT
+            # fan-out closed until every enabled agent knows its output contract —
+            # but HOLD what is said meanwhile instead of refusing it.
+            #
+            # Refusing was measured at ~46s of a real meeting (issue #4610): the
+            # speaker opens with the agenda, every line 409s, and the notes and
+            # tasks begin partway through the first topic with nothing to show a
+            # turn was lost. The hold is bounded and drains in arrival order right
+            # after `init_agents` returns, below.
+            ACTIVE.suspend_dispatches(session, buffer_speech=True)
 
         # A replacement of a DIFFERENT meeting is a teardown of that meeting, so its
         # metadata needs the same terminal status every other teardown writes.
@@ -370,6 +381,30 @@ async def handle_start_meeting(request: web.Request) -> web.Response:
             await sess.broadcast_system(session, k.SYSTEM_MEETING_RESTARTED)
         async with DISPATCH_LOCK:
             ACTIVE.resume_dispatches(session)
+            # Drain under the SAME acquisition that reopened ingress. A live
+            # dispatch needs this lock too, so nothing spoken after the reopen can
+            # overtake speech that was held while it was shut — releasing between
+            # the two would let the meeting's opening land after its second topic.
+            buffered, dropped = session.drain_init_buffer()
+        if buffered or dropped:
+            logger.info(
+                "meetings: %r delivered %d line(s) held during agent init, %d dropped",
+                meeting_id,
+                buffered,
+                dropped,
+            )
+        if dropped:
+            # Off the lock (this is disk IO) but still inside START_LOCK. Recorded
+            # so the human transcript states the loss too: the agents were told by
+            # `drain_init_buffer`, and a gap only one reader can see is the silent
+            # truncation the bound exists to avoid.
+            await asyncio.to_thread(
+                store.append_transcript,
+                meeting_id,
+                k.SYSTEM_INIT_BUFFER_OVERFLOW.format(count=dropped, limit=k.MAX_INIT_BUFFER_LINES),
+                k.TRANSCRIPT_SOURCE_SYSTEM,
+                root,
+            )
 
     audit("meetings.start", meeting_id, outcome="ok")
     return web.json_response(

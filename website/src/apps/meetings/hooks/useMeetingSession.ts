@@ -197,16 +197,23 @@ export function canTransition(from: MeetingStatus, to: MeetingStatus): boolean {
  *
  * `status === 'active'` alone is NOT dispatch readiness. `POST /start` persists
  * `active` up front and then initializes agents with transcript ingress
- * SUSPENDED — every dispatch in that window is rejected with a 409
- * (`no_active_meeting`, see the backend's `get_for_dispatch`). The fast start
- * poll exists to observe `active` early, so without a readiness gate it opened
- * the microphone tens of seconds before ingress: early finals burned through
- * the short dispatch retry schedule (~4.6s) against a ~46s initialization and
- * were PERMANENTLY lost from the notes and tasks.
+ * SUSPENDED for direct fan-out. The fast start poll exists to observe `active`
+ * early, so without a readiness gate it opened the microphone tens of seconds
+ * before ingress: early finals burned through the short dispatch retry schedule
+ * (~4.6s) against a ~46s initialization and were PERMANENTLY lost from the notes
+ * and tasks.
  *
- * `ingressReady` is the server's own admission flag, `accepting_dispatches`,
- * reported on every meta poll — the same holder flag the dispatch endpoint
- * itself checks. Gating on the POLLED value rather than on the start
+ * That gate cost the opening of every meeting instead — the mic simply stayed
+ * shut for those ~46s and the speech was never captured at all (issue #4610).
+ * The server now HOLDS speech through initialization, so there are two states in
+ * which a line lands: fanned out immediately (`accepting_dispatches`) or held and
+ * replayed in order when the agents are ready (`buffering_dispatches`). Capture
+ * must open for BOTH, and a server that reports neither is still the closed case
+ * this gate was written for — stopping, reviewing, expired, or no live session.
+ *
+ * `ingressReady` is that pair of server flags, reported on every meta poll — the
+ * same holder state the dispatch endpoint itself checks. Gating on the POLLED
+ * value rather than on the start
  * mutation's lifecycle makes every client-side inference hole unreachable at
  * once, because the mutation's outcome is not evidence about ingress in either
  * direction: an error settlement can hide a server-side success (the ~46s
@@ -298,11 +305,14 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
   const meta: MeetingMeta | undefined = metaQuery.data?.meta
   const status: MeetingStatus = meta?.status ?? 'idle'
   const live = metaQuery.data?.live ?? null
-  // The server's own dispatch-admission flag, straight off the poll. `=== true`
-  // rather than truthy-or-default: a missing `live` (no session installed — a
-  // gateway restart left the meeting `active` on disk with nothing live) means a
-  // dispatch CANNOT land, so unknown must read as not-ready.
-  const ingressReady = live?.accepting_dispatches === true
+  // The server's own dispatch-admission state, straight off the poll. Either flag
+  // means a line sent now LANDS: directly, or held for the agents that are still
+  // initializing (issue #4610). `=== true` rather than truthy-or-default: a
+  // missing `live` (no session installed — a gateway restart left the meeting
+  // `active` on disk with nothing live) means a dispatch CANNOT land, so unknown
+  // must read as not-ready.
+  const ingressReady =
+    live?.accepting_dispatches === true || live?.buffering_dispatches === true
 
   const outputsQuery = useQuery({
     queryKey: [...scope, 'outputs'],
