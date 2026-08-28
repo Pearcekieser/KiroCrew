@@ -12,7 +12,7 @@ import time as _time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from kiro_crew import git_coord, platform_compat, shutdown_event
+from kiro_crew import git_coord, name_grant, platform_compat, shutdown_event
 from kiro_crew.acp.client import AcpProcessDied
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.executors import run_in_embed_pool
@@ -391,8 +391,35 @@ async def execute_task(
                             )
                             continue
                         if tool_result.action == TOOL_AUTO_APPROVE:
-                            _auto_approved = True
-                            _auto_reason = "hook_auto_approve"
+                            # The hook granted this by NAME (its
+                            # `auto_approve_tools` globs, or the read-only
+                            # allowlist). Honour it only while each program name
+                            # in the command still resolves to the program it
+                            # appears to name; a shadowed, agent-tree or
+                            # unidentified resolution DOWNGRADES to this
+                            # surface's normal path below (interactive approval
+                            # when a handler is present, deny-by-default when
+                            # headless) — never a hard block.
+                            _ng_refusal = await name_grant.refusal_for_event(event)
+                            if _ng_refusal is None:
+                                _auto_approved = True
+                                _auto_reason = "hook_auto_approve"
+                            else:
+                                logger.warning(
+                                    "declining a hook auto-approve: %s; the request "
+                                    "falls through to the task runner's normal "
+                                    "approval path",
+                                    _ng_refusal.log_text,
+                                )
+                                name_grant.log_decline(
+                                    source="taskrunner",
+                                    session_key=session_key,
+                                    agent=agent or "kirocrew",
+                                    event=event,
+                                    refusal=_ng_refusal,
+                                    tier="hook_auto_approve",
+                                    sel_factory=sel,
+                                )
 
                     # Per-run trust toggle: the user explicitly opted THIS run into
                     # unattended execution via the dashboard. It is NOT the global

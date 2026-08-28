@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from kiro_crew import mcp_apps_render, model_registry, platform_compat, session_directive
+from kiro_crew import mcp_apps_render, model_registry, session_directive
 from kiro_crew.acp.client import (
     AcpAuthRequired,
     AcpError,
@@ -199,7 +199,13 @@ from kiro_crew.messaging.link import (
 from kiro_crew.messaging.renderer import chunk_for_transport
 from kiro_crew.metrics.events import TURN_TIMEOUT_CAUSE, emit_counter
 from kiro_crew.metrics.provider import get_recorder
-from kiro_crew.name_grant import Refusal, name_grant_refusal, pin_human_approval
+from kiro_crew.name_grant import (
+    Refusal,
+    log_decline,
+    pin_human_approval,
+    refusal_for_command_off_loop,
+    shell_command_for_event,
+)
 from kiro_crew.platform import redact_via_context
 from kiro_crew.providers.acp import is_claude_backend
 from kiro_crew.providers.base import (
@@ -2236,29 +2242,13 @@ def _session_principal(session_key: str) -> str:
     return parsed.scope[0]
 
 
-async def _name_grant_refusal_off_loop(command: str) -> Refusal | None:
-    """The ONE place this module's tiers reach the name-grant check.
-
-    It resolves names against ``PATH`` and digests the file behind each one, so
-    it runs on a worker thread: the gateway's loop must not stat a stalled
-    network mount or read a large binary. Every tier goes through here rather
-    than calling ``asyncio.to_thread`` itself, so there is a single place to
-    reason about (and, for the rung tests, a single place to stub -- three tiers
-    each spawning their own thread is what crashed the Windows xdist workers).
-
-    Windows is answered ON the loop, because there the verdict needs no
-    filesystem access at all: the check declines every name-based grant outright
-    (neither ``cmd.exe`` search order nor POSIX-mode tokenization is modelled),
-    so the thread would do nothing but hand back a constant. Paying a hop for it
-    is not merely waste -- the worker can outlive a caller's event loop, which is
-    what crashes an xdist worker rather than merely failing its test.
-    """
-
-    if not command:
-        return None
-    if platform_compat.IS_WINDOWS:
-        return name_grant_refusal(command)
-    return await asyncio.to_thread(name_grant_refusal, command)
+#: The ONE off-loop entry point to the name-grant check, promoted to
+#: :mod:`kiro_crew.name_grant` so every surface that honours a name-based grant
+#: (this module's rungs, the task runner, subagents, the channel turn driver)
+#: shares it. Kept as a module attribute because this name is the seam the
+#: dashboard rungs are stubbed through — the rungs below look it up on this
+#: module at call time.
+_name_grant_refusal_off_loop = refusal_for_command_off_loop
 
 
 async def _name_grant_refusal_for(event: object) -> Refusal | None:
@@ -2273,14 +2263,19 @@ async def _name_grant_refusal_for(event: object) -> Refusal | None:
     this downgrades an auto-approve it granted, so a refusal costs one
     interactive prompt and never blocks.
 
+    A thin wrapper over :func:`kiro_crew.name_grant.refusal_for_event` rather
+    than an alias to it, so the module-level ``_name_grant_refusal_off_loop``
+    stub seam still covers this path. The decline-not-raise guard lives inside
+    :func:`kiro_crew.name_grant.refusal_for_command_off_loop` (the chokepoint
+    every tier reaches), so this — and the trusted-pattern and trust-reads
+    rungs that call the seam directly — inherit it without a second copy.
+
     ``None`` for a non-shell tool or an unrecoverable command: there is no
     program name to vouch for, and those tiers are unchanged.
     """
 
-    if not getattr(event, "is_shell", False):
-        return None
-    command = getattr(event, "shell_command", None)
-    if not command:
+    command = shell_command_for_event(event)
+    if command is None:
         return None
     return await _name_grant_refusal_off_loop(command)
 
@@ -2290,30 +2285,20 @@ def _audit_name_grant_refusal(
 ) -> None:
     """Record that a name-based auto-approve was DECLINED, and on which tier.
 
-    Declining is a security decision, so it belongs in the audit log beside the
-    approvals and denials. Without it the log shows a command arriving at the
-    interactive card and never says that a grant was withheld, or why.
-
-    The CODE, never the ``detail``: the detail names the program and the resolved
-    paths, and an audit sink is exactly where that becomes a disclosure. Both
-    ``code`` and ``log_text`` are constants read out of a module table.
-
-    Not ``critical=True``. That flag is for audit-or-deny, where a caller must
-    refuse rather than run something unaudited. Nothing runs unaudited here:
-    declining sends the request to the approval card, and the human's own answer
-    is audited in turn.
+    A thin wrapper over :func:`kiro_crew.name_grant.log_decline`, which owns
+    the payload convention (the CODE, never the ``detail``; redacted title;
+    not ``critical``) for every surface. This module's ``sel`` binding is
+    passed through so the dashboard's audit seam still observes the row.
     """
 
-    sel().log_tool_invocation(
+    log_decline(
+        source="dashboard",
         session_key=session_key,
         agent=slot.agent or "kirocrew",
-        source="dashboard",
-        tool_name=_redact_display_text(event.title),
-        tool_kind=getattr(event, "tool_kind", ""),
-        outcome="auto_approve_declined",
-        request_id=event.request_id,
-        error=refusal.log_text,
-        metadata={"reason": "name_grant", "code": refusal.code, "tier": tier},
+        event=event,
+        refusal=refusal,
+        tier=tier,
+        sel_factory=sel,
     )
 
 

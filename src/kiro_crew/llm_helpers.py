@@ -18,6 +18,7 @@ from dataclasses import field as dataclass_field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from kiro_crew import name_grant
 from kiro_crew.acp.client import AcpError, AcpPromptBusy, advertised_model_ids
 from kiro_crew.acp.types import EVENT_STEER_CONSUMED, TurnUsage
 from kiro_crew.config.loader import KiroCrewConfig
@@ -1795,9 +1796,41 @@ async def _resolve_permission(
             )
             return False
         if tool_result.action == TOOL_AUTO_APPROVE:
-            await provider.approve_tool(event.request_id)
-            _log("auto_approved", metadata={"reason": "hook_auto_approve"})
-            return True
+            # The hook granted this by NAME (its `auto_approve_tools` globs, or
+            # the read-only allowlist). Verify it UNCONDITIONALLY: this helper
+            # serves unattended callers (cron / autonudge / heartbeat / Meetings
+            # transcript turns), some of which pass no approver, and the shell
+            # resolves the command's program names again through a PATH that can
+            # lead with agent-writable directories. A refusal DOWNGRADES to the
+            # caller's normal path — the interactive approver when one is
+            # present, else deny-by-default (reject) below — never a
+            # silent auto-approve of a shadowed name on an unwatched turn.
+            _ng_refusal = await name_grant.refusal_for_event(event)
+            if _ng_refusal is None:
+                await provider.approve_tool(event.request_id)
+                _log("auto_approved", metadata={"reason": "hook_auto_approve"})
+                return True
+            logger.warning(
+                "declining a hook auto-approve: %s; the request falls through "
+                "to this caller's approval path",
+                _ng_refusal.log_text,
+            )
+            name_grant.log_decline(
+                source="",
+                session_key=session_key,
+                agent=agent,
+                event=event,
+                refusal=_ng_refusal,
+                tier="hook_auto_approve",
+                sel_factory=sel,
+            )
+            # No interactive approver on this caller: the hook grant was the
+            # only positive authorization and it was withheld, so fall through
+            # to deny-by-default rather than the caller-less auto-approve below.
+            if on_tool_approval is None:
+                await provider.reject_tool(event.request_id)
+                _log("rejected", metadata={"reason": "name_grant_headless_reject"})
+                return False
 
     # Interactive approval if callback provided
     if on_tool_approval:

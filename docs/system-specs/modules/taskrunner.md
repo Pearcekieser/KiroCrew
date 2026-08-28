@@ -549,7 +549,13 @@ Independent review using separate session (`taskrunner:{task_id}:review`):
 
 Two-layer approval during step execution:
 
-1. **Hook rules** checked first: `hooks.on_tool_call(title)` → DENY/ALLOW
+1. **Hook rules** checked first: `hooks.on_tool_call(title)` → DENY/ALLOW. A
+   hook `TOOL_AUTO_APPROVE` (the `auto_approve_tools` globs / read-only
+   allowlist — a grant made by program NAME) is honoured only after
+   `name_grant.refusal_for_event(event)` confirms each program name in the
+   shell command still resolves to the program it appears to name; a refusal
+   DOWNGRADES to the interactive prompt (or the headless deny-by-default) and
+   is audited as `outcome=auto_approve_declined` with `reason=name_grant`.
 2. **Interactive approval** via `on_tool_approval` callback (if set):
    - In gateway: routes through `_interactive_approval` → checks YOLO/Trust mode → `DashboardState.request_approval()` → WS broadcast → user clicks ✅/🚫
    - 2-hour timeout on interactive approval (auto-reject)

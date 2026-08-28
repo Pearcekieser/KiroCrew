@@ -608,6 +608,8 @@ async def handle_message_transport(
             directive_consumer=build_directive_consumer(
                 session_key=session_key, sessions=sessions, dispatcher=gateway
             ),
+            audit_session_key=session_key,
+            audit_agent=_agent or "kirocrew",
         )
         # The thread's owner as of the moment the turn starts producing output.
         # A dashboard link landing during the run moves the conversation to a

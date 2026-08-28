@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from kiro_crew.acp.runtime import AcpRuntime
     from kiro_crew.providers.base import LLMProvider
 
-from kiro_crew import platform_compat
+from kiro_crew import name_grant, platform_compat
 from kiro_crew.agent_discovery import cached_project_agent_names, list_agents
 from kiro_crew.config.loader import DEFAULT_MODEL, KiroCrewConfig
 from kiro_crew.constants import SUBAGENT_COMPLETION_PREFIX
@@ -6260,15 +6260,41 @@ class SubagentManager:
                     )
                     continue
                 if tool_result.action == TOOL_AUTO_APPROVE:
-                    await self._approve_and_log(
-                        client,
-                        event.request_id,
-                        session_key,
-                        event,
-                        metadata={"subagent_id": info.id, "reason": "hook_auto_approve"},
-                        info=info,
+                    # The hook granted this by NAME (its `auto_approve_tools`
+                    # globs, or the read-only allowlist). Honour it only while
+                    # each program name in the command still resolves to the
+                    # program it appears to name; a shadowed, agent-tree or
+                    # unidentified resolution DOWNGRADES to the remaining rungs
+                    # below (parent policy, the interactive factory, the
+                    # gateway fallback, or the headless fail-closed reject) —
+                    # never a hard block. This surface runs unattended, which
+                    # makes an unverified name the cheaper attack path here,
+                    # not the rarer one.
+                    _ng_refusal = await name_grant.refusal_for_event(event)
+                    if _ng_refusal is None:
+                        await self._approve_and_log(
+                            client,
+                            event.request_id,
+                            session_key,
+                            event,
+                            metadata={"subagent_id": info.id, "reason": "hook_auto_approve"},
+                            info=info,
+                        )
+                        continue
+                    logger.warning(
+                        "declining a hook auto-approve: %s; the request falls "
+                        "through to the subagent's normal approval path",
+                        _ng_refusal.log_text,
                     )
-                    continue
+                    name_grant.log_decline(
+                        source="subagent",
+                        session_key=session_key,
+                        event=event,
+                        refusal=_ng_refusal,
+                        tier="hook_auto_approve",
+                        metadata={"subagent_id": info.id},
+                        sel_factory=sel,
+                    )
                 if parent_policy == "auto":
                     await self._approve_and_log(
                         client,

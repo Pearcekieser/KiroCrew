@@ -1181,6 +1181,12 @@ NON_EGRESS_REDACTION_MODULES: frozenset[str] = frozenset(
         # hygiene so a response echoing a credential or exfiltration URL cannot
         # leak into the log ring / /api/logs stream; not an egress boundary.
         "task_planner.py",
+        # Audit-side log hygiene: log_decline scrubs the model-authored tool
+        # title before writing the shared auto_approve_declined SEL row. The
+        # audit log is a gate-side record, not an output bound for a human or
+        # a third party — the surfaces that SHOW a refusal (the dashboard's
+        # notice line) are the registered sinks.
+        "name_grant.py",
         # The shared recursive redactor helper itself — a pure scrubber, not an
         # egress boundary; the modules that CALL it (mochi routes/hooks) are the
         # registered sinks.

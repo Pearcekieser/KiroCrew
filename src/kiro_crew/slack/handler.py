@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from kiro_crew.dashboard.state import DashboardState
 
+from kiro_crew import name_grant
 from kiro_crew.acp.client import AcpError, AcpProcessDied, AcpPromptBusy, AcpTimeoutError
 from kiro_crew.acp.types import (
     STOP_REASON_CANCELLED,
@@ -3474,18 +3475,42 @@ async def handle_message(
                         is_shell=event.is_shell,
                     )
                     if tool_result.action == TOOL_AUTO_APPROVE:
-                        await client.approve_tool(event.request_id)
-                        Stats().inc_tool_auto_approved()
-                        sel().log_tool_invocation(
-                            session_key=session_key,
-                            source="slack",
-                            tool_name=event.title,
-                            tool_kind=event.tool_kind,
-                            outcome="auto_approved",
-                            request_id=event.request_id,
-                            metadata={"reason": "hook_auto_approve"},
+                        # The hook granted this by NAME (its `auto_approve_tools`
+                        # globs, or the read-only allowlist). Honour it only
+                        # while each program name in the command still resolves
+                        # to the program it appears to name; a shadowed,
+                        # agent-tree or unidentified resolution DOWNGRADES to
+                        # the remaining rungs below (spawn hook, approval mode,
+                        # trust/YOLO, the interactive buttons) — never a hard
+                        # block.
+                        _ng_refusal = await name_grant.refusal_for_event(event)
+                        if _ng_refusal is None:
+                            await client.approve_tool(event.request_id)
+                            Stats().inc_tool_auto_approved()
+                            sel().log_tool_invocation(
+                                session_key=session_key,
+                                source="slack",
+                                tool_name=event.title,
+                                tool_kind=event.tool_kind,
+                                outcome="auto_approved",
+                                request_id=event.request_id,
+                                metadata={"reason": "hook_auto_approve"},
+                            )
+                            continue
+                        logger.warning(
+                            "declining a hook auto-approve: %s; the request "
+                            "falls through to the Slack handler's normal "
+                            "approval ladder",
+                            _ng_refusal.log_text,
                         )
-                        continue
+                        name_grant.log_decline(
+                            source="slack",
+                            session_key=session_key,
+                            event=event,
+                            refusal=_ng_refusal,
+                            tier="hook_auto_approve",
+                            sel_factory=sel,
+                        )
                     if tool_result.action == TOOL_DENY:
                         await client.reject_tool(event.request_id)
                         Stats().inc_tool_denial()

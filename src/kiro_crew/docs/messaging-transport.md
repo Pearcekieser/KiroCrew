@@ -112,6 +112,12 @@ reimplement this. It consumes the provider (LLM) event stream and:
    (default `APPROVAL_INTERACTIVE` = deny-by-default unless a decider resolves).
    Injected predicates preserve hook auto-approval (`spawn_run`) and
    per-session Trust without the driver depending on any channel module.
+   A hook auto-approve for a **shell** command is honoured only after the
+   name-grant check confirms each program name still resolves to the program
+   it appears to name; a shadowed or agent-writable resolution falls through
+   to the rest of the ladder instead (on a channel without a decider that
+   means deny-by-default). On Windows the check cannot model the shell's
+   lookup, so name-based shell auto-approve is declined entirely there.
 3. Emits neutral `OutputEvent`s (`TEXT_CHUNK`, `THINKING`, `TOOL_CALL`,
    `PROMPT_CHOICE`, `COMPACTION`, `DONE`) to the `Renderer`.
 4. SEL-audits each approval decision.

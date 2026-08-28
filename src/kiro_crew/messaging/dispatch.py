@@ -628,6 +628,8 @@ async def drive_turn(turn: ChannelTurn, *, sessions: Any, ctx_builder: Any) -> N
             auto_approve_tool=build_auto_approve(ctx_builder),
             tool_gate=build_tool_gate(ctx_builder, session_key=session_key, agent=turn.agent),
             directive_consumer=turn.directive_consumer,
+            audit_session_key=session_key,
+            audit_agent=turn.agent or "kirocrew",
         )
         accumulated = await driver.run(full_message)
 

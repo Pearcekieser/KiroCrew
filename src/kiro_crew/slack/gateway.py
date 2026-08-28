@@ -42,7 +42,7 @@ from slack_sdk.socket_mode.websockets import SocketModeClient as WSSocketModeCli
 
 import kiro_crew
 import kiro_crew.crash_guard as crash_guard
-from kiro_crew import agent_scratch, beacon, dep_sync, platform_compat, shutdown_event
+from kiro_crew import agent_scratch, beacon, dep_sync, name_grant, platform_compat, shutdown_event
 from kiro_crew.acp.client import AcpError, AcpProcessDied
 from kiro_crew.agents_janitor import sweep_agents_dir
 from kiro_crew.autonudge import (
@@ -1832,6 +1832,33 @@ class GatewayOrchestrator:
                     and not _child_lf
                     and _is_read_only_tool(event.title or "")
                 )
+                if approve and self._approval_mode == "reads":
+                    # 'reads' is a NAME-shaped grant: it classifies the title,
+                    # and the shell resolves the command's program names again
+                    # through a PATH that can lead with agent-writable
+                    # directories — the same tier the dashboard's trust-reads
+                    # rung verifies. A refused name falls through to the
+                    # interactive prompt below (never a hard block), so a
+                    # PATH-shadowed program cannot ride the reads grant on an
+                    # unattended cron/autonudge turn. 'yolo' is unconditional
+                    # (consumes no event data) and stays unverified by design.
+                    _ng_refusal = await name_grant.refusal_for_event(event)
+                    if _ng_refusal is not None:
+                        logger.warning(
+                            "declining a reads-mode auto-approve: %s; the "
+                            "request falls through to the interactive prompt",
+                            _ng_refusal.log_text,
+                        )
+                        name_grant.log_decline(
+                            source="background",
+                            session_key=parent_session_key,
+                            event=event,
+                            refusal=_ng_refusal,
+                            tier="cli_approval_reads",
+                            metadata={"caller_source": source},
+                            sel_factory=sel,
+                        )
+                        approve = False
                 if approve:
                     # Emit a SEL audit event so the audit trail records WHICH
                     # mode auto-approved the tool. Downstream sites already
