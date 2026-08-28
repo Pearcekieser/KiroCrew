@@ -23,3 +23,4 @@ single subsystem belongs in [../modules/](../modules/README.md) instead.
 | [model-fallback.md](model-fallback.md) | The throttle-exhaustion model fallback (`agent.fallback_model`): trigger, shared walk, sticky restore, visibility. |
 | [code-approvers.md](code-approvers.md) | Tier routing for code review approvers. |
 | [claude-code-provider.md](claude-code-provider.md) | The removed standalone provider, kept as the record of what the KiroACP-only collapse took out. |
+| [agent-host-contract.md](agent-host-contract.md) | What an agent backend must supply besides speaking ACP: agent layout, session store, identity, sandbox, MCP delivery, billing, permission engine, auxiliary runtimes — kiro-cli, KAS and Claude Code side by side, with the new-provider checklist. |

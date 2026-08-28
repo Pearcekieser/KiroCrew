@@ -21,6 +21,11 @@ The seam's binary-resolution details (`_resolve_claude_acp_bin`, the per-session
 documented in [`acp-client.md`](../modules/acp-client.md) for the companion that
 re-enables it — they are not user-facing in the public build.
 
+The host facts this backend needs that Kiro does not — its agent format, its
+own transcript store, its own credential command, its native permission engine —
+are tabulated beside kiro-cli and KAS in
+[`agent-host-contract.md`](agent-host-contract.md).
+
 ## Model registry
 
 `model_registry.json` (loaded by `model_registry.py`, mirrored to
