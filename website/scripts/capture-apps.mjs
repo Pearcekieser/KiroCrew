@@ -13,7 +13,8 @@
  *   discover.png           spotlight + feature duo + category rail + rows
  *   discover-category.png  category-filtered view (editorial layer collapses)
  *   sources.png            Sources popover (registries + install from path)
- *   library.png            Library page with the updates hint row
+ *   library.png            Library launchpad grid (pin badges + updates hint row)
+ *   library-hover.png      a pinned tile hovered so its action bar is visible
  *   updates.png            Discover Updates sub-tab with a pending update row
  *   updates-empty.png      Updates sub-tab everything-up-to-date state
  *
@@ -188,10 +189,23 @@ await page.screenshot({ path: `${OUT}/sources.png` })
 await page.keyboard.press('Escape')
 await settle(600)
 
-// ---- Library (standalone page after the split; updates hint row)
+// ---- Library (standalone page after the split; launchpad grid, PR3)
 await page.goto(`http://127.0.0.1:${PORT}/apps/library`, { waitUntil: 'domcontentloaded' })
 await settle(1400)
 await page.screenshot({ path: `${OUT}/library.png` })
+
+// ---- Library hover: a real pointer hover over a PINNED tile reveals its
+// floating action bar (Unpin / Open / Disable / Uninstall). Research Lab is
+// a pinnable builtin with a UI page, so its pin badge renders filled and the
+// bar carries the Unpin verb. Hover the tile's center (the bar floats BELOW
+// the tile, so hovering the face keeps :hover on the group container), then
+// wait for the bar's reveal transition before shooting.
+const hoverTile = page.getByTestId('launchpad-tile-auto-research')
+await hoverTile.hover()
+await hoverTile.getByRole('toolbar').getByRole('button', { name: /Unpin/ }).waitFor({ state: 'visible' })
+await page.waitForTimeout(400) // opacity transition
+await page.screenshot({ path: `${OUT}/library-hover.png` })
+await page.mouse.move(0, 0) // park the pointer so later captures have no stray hover state
 
 // ---- Updates sub-tab (deep link; secretary fixture has 1.0.0 -> 1.1.0 pending)
 await page.goto(`http://127.0.0.1:${PORT}/apps/-/updates`, { waitUntil: 'domcontentloaded' })

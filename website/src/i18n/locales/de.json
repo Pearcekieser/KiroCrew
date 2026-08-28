@@ -10086,6 +10086,16 @@
       "usage": "Verbrauch",
       "use_filter_to_narrow": "— Filter verwenden, um einzuschränken"
     },
+    "libraryPage": {
+      "pin": "Anheften",
+      "pin_to_sidebar": "{{name}} an die Seitenleiste anheften",
+      "tile_actions": "Aktionen für {{name}}",
+      "tile_disabled": "Deaktiviert",
+      "tile_pinned": "Angeheftet",
+      "tile_unpinned": "Nicht angeheftet",
+      "unpin": "Lösen",
+      "unpin_from_sidebar": "{{name}} von der Seitenleiste lösen"
+    },
     "logsPage": {
       "filter_logs": "Protokolle filtern",
       "filter_logs_2": "Protokolle filtern…",

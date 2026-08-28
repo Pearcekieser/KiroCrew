@@ -2,17 +2,21 @@
  * LibraryPage — installed-app management, split out of the old AppsPage
  * (PR1 App Store split; route `/apps/library`).
  *
- * Search, the management cards (InstalledAppCard), and the uninstall preview
- * flow — all moved unchanged from AppsPage's library branch. Data identity
- * (installed list, update map, mc:apps-changed announcement) lives in the
- * shared `useAppsData` hook so this page and Discover cannot drift.
+ * The list presentation is a macOS-Launchpad-style icon grid (PR3, approved
+ * mockup frame #a): each installed app is a `LaunchpadTile` whose pin badge
+ * toggles whether the app appears in the sidebar (persisted as the HIDDEN
+ * set under `mc-app-nav-hidden`, owned by `lib/appNavHidden.ts`), with a
+ * hover action bar carrying the management verbs the old cards offered.
+ * Search and the uninstall preview flow survive from the card list. Data
+ * identity (installed list, update map, mc:apps-changed announcement) lives
+ * in the shared `useAppsData` hook so this page and Discover cannot drift.
  *
  * Pending updates surface here as a light one-line hint linking to the
  * Discover Updates sub-page (`/apps/-/updates`), which owns the update
- * worklist and Update All (PR2 App Store split). Per-row Update stays on the
- * cards via the shared `useAppUpdates` hook.
+ * worklist and Update All (PR2 App Store split). Per-tile Update stays on
+ * the action bar via the shared `useAppUpdates` hook.
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   Package, Bot, Zap, Clock, Lock, Trash2, X, ArrowUp, Compass,
@@ -22,16 +26,19 @@ import { api } from '../../api/client'
 import { appNavTarget } from '../../appNav'
 import { Btn, EmptyState, PageHeader, SearchInput } from '../../components/ui'
 import { recordEvent } from '../../rum'
-import InstalledAppCard from '../../components/appstore/InstalledAppCard'
 import TrustAppModal, { isTrustDeniedError } from '../../components/appstore/TrustAppModal'
 import type { InstalledApp } from '../../components/appstore/types'
 import { i18nT } from '../../i18n/t'
 import ErrorNotice from '../../components/ErrorNotice'
 import ErrorBoundary from '../../components/ErrorBoundary'
+import {
+  APP_NAV_HIDDEN_KEY, readAppNavHidden, subscribeAppNavHidden, toggleAppNavHidden,
+} from '../../lib/appNavHidden'
 import useAppsData from './useAppsData'
 import { useAppActions } from './useAppActions'
 import { useAppUpdates } from './useAppUpdates'
 import { cardDataKey } from './cardDataKey'
+import LaunchpadTile from './LaunchpadTile'
 
 /** Uninstall preview payload (mirrors ``api.uninstallPreview`` return shape). */
 type UninstallPreview = Awaited<ReturnType<typeof api.uninstallPreview>>
@@ -72,6 +79,38 @@ export default function LibraryPage() {
     apps, updatables, announceAppsChanged, updateApp,
     setError, setSuccess: showSuccess,
   })
+
+  // Which sidebar rows the user unpinned (`mc-app-nav-hidden`) — held as
+  // React state, not a raw read, so a pin toggle repaints every tile's badge
+  // at once. The module's own event covers same-tab writes (this page's
+  // toggles included, via the module's dispatch-on-write); the `storage`
+  // listener covers a toggle made in ANOTHER tab — the same two-listener
+  // shape App.tsx's sidebar filter uses.
+  const [navHidden, setNavHidden] = useState<ReadonlySet<string>>(() => readAppNavHidden())
+  useEffect(() => {
+    const reread = () => setNavHidden(readAppNavHidden())
+    const unsubscribe = subscribeAppNavHidden(reread)
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === APP_NAV_HIDDEN_KEY) reread()
+    }
+    window.addEventListener('storage', onStorage)
+    return () => {
+      unsubscribe()
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [])
+
+  // Pin toggle — resolve the tile's app to the SAME nav id the sidebar rows
+  // carry (`appNavTarget(app).id`, the rail's own derivation) and flip it in
+  // the persisted hidden set. The module's write dispatches the sync event,
+  // which feeds the state above and App.tsx's sidebar filter — no local
+  // set-state here. A tile without a nav target never offers the toggle
+  // (`pinnable` below), so the null branch is only a race guard.
+  const togglePin = (name: string) => {
+    const app = installedApps.find(a => a.name === name)
+    const id = app ? appNavTarget(app)?.id : undefined
+    if (id) toggleAppNavHidden(id)
+  }
 
   // Uninstall confirmation state
   const [uninstallTarget, setUninstallTarget] = useState<InstalledApp | null>(null)
@@ -385,27 +424,37 @@ export default function LibraryPage() {
                 </Link>
               </div>
             )}
-            <div className="space-y-3">
-              {filteredInstalled.map(app => (
-                <ErrorBoundary
-                  /* Full-data key (cardDataKey): the boundary latches
-                     its error state, so remount when the installed app or its
-                     update availability changes — e.g. when an updated payload
-                     fixes a broken card (#3719). */
-                  key={cardDataKey(app)}
-                  scope="apps:installed-card"
-                  fallback={
-                    <div className="border border-border rounded-lg p-4 flex items-center gap-3">
-                      <AlertTriangle aria-hidden className="lucide-inline text-[var(--warn)] shrink-0" />
-                      <div className="min-w-0 text-sm flex-1">
-                        <span className="font-medium text-text">{app.manifest?.displayName || app.name}</span>
-                        <span className="text-muted ml-2">{i18nT('pages.appsPage.this_app_could_not_be_displayed')}</span>
-                      </div>
-                      {/* The crashed card removed the app's management surface, so the
-                          fallback must keep one recovery path: quiet a broken enabled
-                          app, or remove a disabled one entirely (locked apps cannot
-                          be uninstalled). Same handlers as the healthy card. */}
-                      <div className="shrink-0">
+            {/* Launchpad grid (mockup frame #a): ~5 columns at desktop width,
+                stepping down responsively. Tiles come from `installedApps`
+                (GET /api/apps records) — the Discover/Library built-in
+                SURFACES are frontend nav entries, never installed-app
+                records, so they cannot appear as tiles. */}
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 xl:grid-cols-6 gap-x-3 gap-y-7">
+              {filteredInstalled.map(app => {
+                // The sidebar's own eligibility/id derivation decides
+                // pinnability: a tile only offers a pin for a row the rail
+                // could actually show, under the byte-identical id the
+                // sidebar filter matches against.
+                const target = appNavTarget(app)
+                return (
+                  <ErrorBoundary
+                    /* Full-data key (cardDataKey): the boundary latches
+                       its error state, so remount when the installed app or its
+                       update availability changes — e.g. when an updated payload
+                       fixes a broken tile (#3719). */
+                    key={cardDataKey(app)}
+                    scope="apps:installed-card"
+                    fallback={
+                      <div className="flex flex-col items-center gap-2 rounded-xl border border-border px-1.5 pt-3.5 pb-2.5 text-center">
+                        <div className="w-[58px] h-[58px] rounded-[15px] bg-bg-elevated flex items-center justify-center">
+                          <AlertTriangle aria-hidden className="lucide-inline text-[var(--warn)]" />
+                        </div>
+                        <span className="text-[12px] font-semibold text-text-strong max-w-full truncate">{app.manifest?.displayName || app.name}</span>
+                        <span className="text-[10.5px] text-muted leading-tight">{i18nT('pages.appsPage.this_app_could_not_be_displayed')}</span>
+                        {/* The crashed tile removed the app's management surface, so the
+                            fallback must keep one recovery path: quiet a broken enabled
+                            app, or remove a disabled one entirely (locked apps cannot
+                            be uninstalled). Same handlers as the healthy tile. */}
                         {app.enabled ? (
                           <Btn
                             onClick={() => handleAction(app.name, 'disable')}
@@ -419,20 +468,23 @@ export default function LibraryPage() {
                           </Btn>
                         )}
                       </div>
-                    </div>
-                  }
-                >
-                  <InstalledAppCard
-                    app={app}
-                    actionLoading={updatingAll
-                      ? `${app.name}:update`
-                      : updatePending ? `${updatePending}:update` : actionLoading}
-                    onAction={handleAction}
-                    onOpen={() => navigate(appNavTarget(app)?.route || `/apps/${app.name}`)}
-                    onDetail={() => openDetail(app.name)}
-                  />
-                </ErrorBoundary>
-              ))}
+                    }
+                  >
+                    <LaunchpadTile
+                      app={app}
+                      pinned={!!target && !navHidden.has(target.id)}
+                      pinnable={!!target}
+                      actionLoading={updatingAll
+                        ? `${app.name}:update`
+                        : updatePending ? `${updatePending}:update` : actionLoading}
+                      onTogglePin={togglePin}
+                      onAction={handleAction}
+                      onOpen={() => navigate(target?.route || `/apps/${app.name}`)}
+                      onDetail={() => openDetail(app.name)}
+                    />
+                  </ErrorBoundary>
+                )
+              })}
             </div>
           </>
         )}

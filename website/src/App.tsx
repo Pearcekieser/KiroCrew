@@ -30,6 +30,7 @@ import { useSidePanelDock } from './hooks/useSidePanelDock'
 import { usePreviewFlagRevision } from './hooks/usePreviewFlag'
 import { setRailWidth, railWidthFor } from './hooks/useRailWidth'
 import { useFocusMode, useFocusChromeVisible, setFocusChromeVisible, FOCUS_INSET } from './hooks/useFocusMode'
+import { APP_NAV_HIDDEN_KEY, readAppNavHidden, subscribeAppNavHidden } from './lib/appNavHidden'
 import { computeHeaderDragGaps, type DragGap } from './lib/dragGaps'
 import { isEmbeddedPane } from './lib/embedded'
 import { useHoverIntent } from './hooks/useHoverIntent'
@@ -1437,6 +1438,26 @@ export default function App() {
   // Dynamic app nav items — all apps (builtin + installed) with UI pages
   const [appNavItems, setAppNavItems] = useState<Array<{ path: string; id: string; label: string; group: string; icon: React.ReactElement }>>([])
   const [appNavOrder, setAppNavOrder] = useState<string[]>(() => { try { return JSON.parse(localStorage.getItem('mc-app-nav-order') || '[]') } catch { return [] } })
+  // Which app rows the user UNPINNED from the sidebar via the Library
+  // launchpad grid (`mc-app-nav-hidden`, owned by `lib/appNavHidden.ts`).
+  // Held as React state — not a raw read — so a pin toggle in LibraryPage
+  // re-renders the rail immediately: the module dispatches
+  // `mc:app-nav-hidden-changed` on every same-tab write (same-tab localStorage
+  // writes never fire `storage`), and the `storage` listener covers a toggle
+  // made in ANOTHER tab, mirroring `usePreviewFlag`'s two-listener shape.
+  const [appNavHidden, setAppNavHiddenSet] = useState<ReadonlySet<string>>(() => readAppNavHidden())
+  useEffect(() => {
+    const reread = () => setAppNavHiddenSet(readAppNavHidden())
+    const unsubscribe = subscribeAppNavHidden(reread)
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === APP_NAV_HIDDEN_KEY) reread()
+    }
+    window.addEventListener('storage', onStorage)
+    return () => {
+      unsubscribe()
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [])
   // Preview-gated surfaces (see `utils/previewFlags.ts`) must not be advertised
   // anywhere. `surfacePreviewEnabled` is a synchronous storage read, so the rail
   // needs this subscription to re-render when Developer > Feature Previews flips a flag —
@@ -1480,11 +1501,20 @@ export default function App() {
   const [appsExpanded, setAppsExpanded] = useState(() => localStorage.getItem('mc-apps-expanded') === '1')
   const toggleAppsExpanded = useCallback(() => setAppsExpanded(v => { const next = !v; safeSetItem('mc-apps-expanded', next ? '1' : '0'); return next }), [])
   const sortedAppGroup = useMemo(() => {
+    // Drop rows the user unpinned in the Library launchpad BEFORE the
+    // APPS_NAV_LIMIT slice downstream, so a hidden row never consumes a
+    // visible slot. The hidden set only ever contains ids written by the
+    // Library grid — `appNavTarget(app).id` values, byte-identical to the
+    // ids these rows carry — so set membership can only hide grid-managed
+    // app rows. The Discover/Library built-ins are not list rows here
+    // (`hiddenFromNav`, rendered as the section-header accent links) and
+    // can never be filtered out by this.
     const items = [...advertisedNavItems.filter(n => n.group === 'Apps'), ...appNavItems]
+      .filter(n => !appNavHidden.has(n.id))
     if (appNavOrder.length === 0) return items
     const orderMap = new Map(appNavOrder.map((id, i) => [id, i]))
     return items.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999))
-  }, [advertisedNavItems, appNavItems, appNavOrder])
+  }, [advertisedNavItems, appNavItems, appNavOrder, appNavHidden])
   const handleAppDragStart = useCallback((e: DragStartEvent) => setActiveAppDragId(e.active.id as string), [])
   const handleAppDragEnd = useCallback((e: DragEndEvent) => {
     setActiveAppDragId(null)

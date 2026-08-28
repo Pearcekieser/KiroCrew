@@ -3752,6 +3752,16 @@
         "retry": "Retry"
       }
     },
+    "libraryPage": {
+      "pin": "Pin",
+      "pin_to_sidebar": "Pin {{name}} to the sidebar",
+      "tile_actions": "Actions for {{name}}",
+      "tile_disabled": "Disabled",
+      "tile_pinned": "Pinned",
+      "tile_unpinned": "Not pinned",
+      "unpin": "Unpin",
+      "unpin_from_sidebar": "Unpin {{name}} from the sidebar"
+    },
     "logsPage": {
       "latest_first": "Latest: first",
       "latest_last": "Latest: last",

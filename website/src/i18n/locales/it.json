@@ -10239,6 +10239,16 @@
       "usage": "Utilizzo",
       "use_filter_to_narrow": "— usa il filtro per restringere"
     },
+    "libraryPage": {
+      "pin": "Fissa",
+      "pin_to_sidebar": "Fissa {{name}} alla barra laterale",
+      "tile_actions": "Azioni per {{name}}",
+      "tile_disabled": "Disattivata",
+      "tile_pinned": "Fissata",
+      "tile_unpinned": "Non fissata",
+      "unpin": "Sblocca",
+      "unpin_from_sidebar": "Sblocca {{name}} dalla barra laterale"
+    },
     "logsPage": {
       "filter_logs": "Filtra i log",
       "filter_logs_2": "Filtra i log...",

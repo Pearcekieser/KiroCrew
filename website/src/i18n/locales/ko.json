@@ -9933,6 +9933,16 @@
       "usage": "사용량",
       "use_filter_to_narrow": "— 필터로 좁히세요"
     },
+    "libraryPage": {
+      "pin": "고정",
+      "pin_to_sidebar": "{{name}}을(를) 사이드바에 고정",
+      "tile_actions": "{{name}}의 작업",
+      "tile_disabled": "비활성화됨",
+      "tile_pinned": "고정됨",
+      "tile_unpinned": "고정되지 않음",
+      "unpin": "고정 해제",
+      "unpin_from_sidebar": "사이드바에서 {{name}} 고정 해제"
+    },
     "logsPage": {
       "filter_logs": "로그 필터",
       "filter_logs_2": "로그 필터…",

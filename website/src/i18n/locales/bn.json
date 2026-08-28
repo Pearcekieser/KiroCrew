@@ -10086,6 +10086,16 @@
       "usage": "ব্যবহার",
       "use_filter_to_narrow": "— সংকুচিত করতে ফিল্টার ব্যবহার করুন"
     },
+    "libraryPage": {
+      "pin": "পিন করুন",
+      "pin_to_sidebar": "{{name}} সাইডবারে পিন করুন",
+      "tile_actions": "{{name}}-এর জন্য অ্যাকশন",
+      "tile_disabled": "নিষ্ক্রিয়",
+      "tile_pinned": "পিন করা",
+      "tile_unpinned": "পিন করা নেই",
+      "unpin": "আনপিন করুন",
+      "unpin_from_sidebar": "{{name}} সাইডবার থেকে আনপিন করুন"
+    },
     "logsPage": {
       "filter_logs": "লগ ফিল্টার করুন",
       "filter_logs_2": "লগ ফিল্টার করুন...",

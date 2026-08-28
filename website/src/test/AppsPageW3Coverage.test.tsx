@@ -363,7 +363,7 @@ describe('AppsPage — query failures and empty states', () => {
 
   it('shows the no-match Library state when the search excludes every installed app', async () => {
     renderLibrary()
-    await screen.findByText('Slack inbox manager.')
+    await screen.findByTestId('launchpad-tile-secretary')
     fireEvent.change(screen.getByLabelText('Search library'), { target: { value: 'nothing-matches-this' } })
     expect(await screen.findByText('No matching apps')).toBeInTheDocument()
     expect(screen.getByText('Try a different search term')).toBeInTheDocument()
@@ -371,11 +371,11 @@ describe('AppsPage — query failures and empty states', () => {
 
   it('matches an installed app by its manifest tags', async () => {
     renderLibrary()
-    await screen.findByText('Slack inbox manager.')
+    await screen.findByTestId('launchpad-tile-secretary')
     fireEvent.change(screen.getByLabelText('Search library'), { target: { value: 'inbox' } })
-    // The tag match keeps the row; nothing falls through to the empty state.
+    // The tag match keeps the tile; nothing falls through to the empty state.
     await waitFor(() => expect(screen.queryByText('No matching apps')).toBeNull())
-    expect(screen.getByText('Slack inbox manager.')).toBeInTheDocument()
+    expect(screen.getByTestId('launchpad-tile-secretary')).toBeInTheDocument()
   })
 })
 
@@ -391,7 +391,14 @@ describe('AppsPage — Library actions', () => {
     expect(probe).toHaveAttribute('data-path', '/apps/secretary')
   })
 
-  it('routes to the detail page when the card name is clicked', async () => {
+  it('routes to the detail page when the tile face of a non-openable app is clicked', async () => {
+    // The tile face opens the app when it can open (previous test); an
+    // enabled app with no UI and no openCommand has nowhere to open, so its
+    // face falls back to the detail page — plain navigation, no autoAction.
+    listApps.mockResolvedValue([{
+      ...SECRETARY,
+      manifest: { ...SECRETARY.manifest, ui: undefined },
+    }])
     renderLibrary()
     fireEvent.click(await screen.findByRole('button', { name: 'Secretary' }))
     const probe = await screen.findByTestId('detail-route')
@@ -441,8 +448,10 @@ describe('AppsPage — Library actions', () => {
     expect(screen.getByRole('link', { name: 'View updates' }))
       .toHaveAttribute('href', '/apps/-/updates')
     expect(screen.queryByRole('button', { name: 'Update All' })).toBeNull()
-    // The affected card still wears its version chip (current → pending).
-    expect(screen.getByText('v1.0.0 (v1.1.0 available)')).toBeInTheDocument()
+    // The affected tile still offers per-app Update on its hover bar, and
+    // the button's title names the pending version (current → pending).
+    expect(screen.getByRole('button', { name: 'Update' }))
+      .toHaveAttribute('title', 'Update to v1.1.0')
   })
 })
 
@@ -638,32 +647,38 @@ describe('AppsPage — Library enable and update', () => {
   })
 
   it('syncs a PATH-installed app in place instead of routing at the registry', async () => {
-    // A directory install has no registry row, so the streaming registry install
-    // the detail page runs can only answer "not found in registry". Its refresh
-    // is POST /api/apps/{name}/update, which re-copies the recorded directory.
+    // The grid only offers Update while one is pending (a registry row later
+    // published for this name), but ROUTING stays keyed on the RECORDED
+    // source: a directory install refreshes via POST /api/apps/{name}/update
+    // (re-copying the recorded directory), never the streaming registry
+    // install the detail page runs.
     listApps.mockResolvedValue([{
       ...SECRETARY, name: 'orchestrator-switch', displayName: 'Orchestrator Switch',
       source: '/home/u/apps/orchestrator-switch', origin: 'local',
     }])
-    listRegistry.mockResolvedValue({ apps: [] })
+    listRegistry.mockResolvedValue({
+      apps: [{ ...REGISTRY_APPS[1], name: 'orchestrator-switch', displayName: 'Orchestrator Switch' }],
+    })
     renderLibrary()
-    fireEvent.click(await screen.findByRole('button', { name: 'Sync' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Update' }))
     await waitFor(() => expect(updateApp).toHaveBeenCalledWith('orchestrator-switch'))
     expect(screen.queryByTestId('detail-route')).toBeNull()
   })
 
   it('reflects a completed in-place sync, which is otherwise invisible', async () => {
     // Re-copying a source directory usually carries the SAME version, so the
-    // card re-renders identically and silence is indistinguishable from a
+    // tile re-renders identically and silence is indistinguishable from a
     // no-op. Without this the primary action the fix creates has no success
     // signal at all.
     listApps.mockResolvedValue([{
       ...SECRETARY, name: 'orchestrator-switch', displayName: 'Orchestrator Switch',
       source: '/home/u/apps/orchestrator-switch', origin: 'local',
     }])
-    listRegistry.mockResolvedValue({ apps: [] })
+    listRegistry.mockResolvedValue({
+      apps: [{ ...REGISTRY_APPS[1], name: 'orchestrator-switch', displayName: 'Orchestrator Switch' }],
+    })
     renderLibrary()
-    fireEvent.click(await screen.findByRole('button', { name: 'Sync' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Update' }))
     expect(await screen.findByText(/Synced Orchestrator Switch from its source directory/)).toBeInTheDocument()
   })
 
@@ -672,20 +687,25 @@ describe('AppsPage — Library enable and update', () => {
       ...SECRETARY, name: 'orchestrator-switch', displayName: 'Orchestrator Switch',
       source: '/home/u/apps/orchestrator-switch', origin: 'local',
     }])
-    listRegistry.mockResolvedValue({ apps: [] })
+    listRegistry.mockResolvedValue({
+      apps: [{ ...REGISTRY_APPS[1], name: 'orchestrator-switch', displayName: 'Orchestrator Switch' }],
+    })
     updateApp.mockRejectedValue(new Error('source path no longer exists'))
     renderLibrary()
-    fireEvent.click(await screen.findByRole('button', { name: 'Sync' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Update' }))
     expect(await screen.findByText('source path no longer exists')).toBeInTheDocument()
   })
 
-  it('still routes a registry-sourced app at the registry when it has no update', async () => {
+  it('offers no update affordance on a tile when nothing is pending', async () => {
+    // Grid contract (mockup frame #a): Update appears on the hover bar only
+    // WHEN an update is pending. With no registry row flagging one, the tile
+    // carries no Update/Sync button at all — the recorded-source routing for
+    // that case is the shared hook's contract (useAppUpdates.test.tsx).
     listApps.mockResolvedValue([{ ...SECRETARY, source: 'registry:secretary' }])
     listRegistry.mockResolvedValue({ apps: [] })
     renderLibrary()
-    fireEvent.click(await screen.findByRole('button', { name: 'Sync' }))
-    const probe = await screen.findByTestId('detail-route')
-    expect(probe).toHaveAttribute('data-auto', 'update')
+    await screen.findByTestId('launchpad-tile-secretary')
+    expect(screen.queryByRole('button', { name: 'Update' })).toBeNull()
     expect(updateApp).not.toHaveBeenCalled()
   })
 

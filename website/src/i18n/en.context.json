@@ -184,6 +184,7 @@
     "pages.hooksPage.ok": "Status value in a table or log line, meaning the operation succeeded. A state, not the confirmation button.",
     "pages.hooksPage.s": "The unit \"s\" = seconds, rendered directly after a number (`30s`). Not a plural marker.",
     "pages.knowledge.index.esc": "The literal Esc key cap. Do not translate unless the target locale's keyboards are genuinely labelled differently: it names a physical key.",
+    "pages.libraryPage.pin": "Verb on the hover action bar of a Library launchpad tile: adds the app's page to the sidebar navigation. The imperative \"pin\" as in attach/fasten, not the noun (a peg) and not a PIN code. Paired with the sibling \"Unpin\"; space is tight, keep it to one short word if the language allows.",
     "pages.mcpGatewayCard.pid": "\"PID\" = operating-system process id, labelling a number. A term of art; keep the acronym practitioners in the target language use.",
     "pages.mcpGatewayCard.rss": "\"RSS\" = resident set size, the process's physical memory use, labelling a byte count. NOT the web feed format.",
     "pages.mcpGatewayCard.s": "The unit \"s\" = seconds, rendered directly after a number (`30s`). Not a plural marker.",

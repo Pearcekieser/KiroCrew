@@ -173,8 +173,10 @@ describe('AppsPage — hybrid Discover', () => {
       .toHaveAttribute('href', '/apps/-/updates')
     // Update All left with the banner — the hint row carries no batch action.
     expect(screen.queryByRole('button', { name: 'Update All' })).toBeNull()
-    // The affected card still wears its version chip (current → pending).
-    expect(screen.getByText('v1.0.0 (v1.1.0 available)')).toBeInTheDocument()
+    // The affected tile still offers per-app Update on its hover bar (PR3
+    // grid): the button's title names the pending version (current → pending).
+    expect(screen.getByRole('button', { name: 'Update' }))
+      .toHaveAttribute('title', 'Update to v1.1.0')
   })
 
   it('persists and migrates the stored tab (installed → library)', async () => {
