@@ -1131,6 +1131,8 @@
       "constants": {
         "blocked_figma_app_missing_hint": "Open the file in Figma desktop and try again, or export the frames as PNGs and drop them here.",
         "blocked_figma_app_missing_say": "I can’t reach Figma — the desktop app isn’t running, or I don’t have the Figma tools available.",
+        "blocked_figma_export_needed_hint": "Export each frame as a PNG and drop them in as screenshots — I critique the pixels either way.",
+        "blocked_figma_export_needed_say": "I can’t pull frames straight from a Figma link here — I don’t run the Figma desktop tools.",
         "blocked_figma_file_closed_hint": "Open it in Figma desktop, then try again.",
         "blocked_figma_file_closed_say": "Figma is running, but that file isn’t open.",
         "blocked_figma_no_permission_auth_lead": "Figma access is per account, and I read whatever the desktop app has open — I have no login of my own. Here is how to fix it.",
