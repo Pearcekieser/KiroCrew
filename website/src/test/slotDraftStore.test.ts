@@ -134,7 +134,11 @@ describe('slotDraftStore', () => {
       for (let i = 0; i < 6; i++) d[`slot-${i}`] = `d${i}`
       const orig = Storage.prototype.setItem
       Storage.prototype.setItem = () => { throw new Error('QuotaExceeded') }
-      try { s.save(d) } finally { Storage.prototype.setItem = orig }
+      let stuck: boolean | undefined
+      try { stuck = s.save(d) } finally { Storage.prototype.setItem = orig }
+      // The caller decides whether its state is recoverable from this boolean, so
+      // a refused write must say so on the evict-after-write path too.
+      expect(stuck).toBe(false)
       // Persist failed, so NO eviction is mirrored back — every draft survives.
       expect(Object.keys(d).length).toBe(6)
       expect(d['slot-0']).toBe('d0')

@@ -3,6 +3,8 @@ import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderWithProviders } from './helpers'
 import { RemoteCrewPanel } from '../pages/settings/RemoteCrewPanel'
+import { consumeChatHandoff, __resetErrorJournalForTests } from '../utils/errorReport'
+import { __resetInstanceFailuresForTests } from '../utils/instanceFailureReport'
 
 vi.mock('../api/client', () => {
   class ApiError extends Error {
@@ -25,6 +27,7 @@ vi.mock('../api/client', () => {
       disconnectInstance: vi.fn(),
       removeInstance: vi.fn(),
       instanceStatus: vi.fn(),
+      updateInstance: vi.fn(),
       patchConfig: vi.fn(),
       cloudLaunches: vi.fn(),
       cloudPreflight: vi.fn(),
@@ -104,6 +107,9 @@ const PREFLIGHT_OK = {
 beforeEach(() => {
   vi.clearAllMocks()
   localStorage.clear()
+  sessionStorage.clear()
+  __resetErrorJournalForTests()
+  __resetInstanceFailuresForTests()
 })
 
 describe('RemoteCrewPanel', () => {
@@ -550,5 +556,73 @@ describe('RemoteCrewPanel', () => {
     await waitFor(() => expect(api.cloudLaunch).toHaveBeenCalledWith({ profile: '', region: 'us-east-1', size_key: 'balanced' }))
     // Progress card polls the job and renders its steps.
     expect(await screen.findByText('Installing Kiro Crew')).toBeInTheDocument()
+  })
+
+  describe('agent hand-off from the diagnosis note', () => {
+    // These live HERE, on the panel SettingsPage actually renders. The same
+    // surfaces exist on the unreachable `InstancesPanel`, whose only importers are
+    // test files — a hand-off wired there would pass its tests and reach nobody.
+    const BROKEN = {
+      id: 'c1', name: 'Nimbus', connection_method: 'ssh', ssh_host: 'nimbus-alias',
+      remote_port: 5476,
+      status: { instance_id: 'c1', state: 'error', error: 'Remote dashboard did not answer' },
+    }
+    const DIAGNOSED = {
+      instance_id: 'c1',
+      state: 'error',
+      error: 'Remote dashboard did not answer',
+      diagnosis: {
+        code: 'remote_down', ok: false, reason: 'Remote dashboard down',
+        probes: [{ name: 'ssh', ok: true }, { name: 'remote_dashboard', ok: false }],
+      },
+    }
+
+    it('hands the diagnosis to the agent with the ladder code and probe chain', async () => {
+      // A diagnosis that names the broken link and then leaves the user with
+      // nothing to do about it is the dead end this change exists to remove. The
+      // prompt must carry the verdict CODE and the probes, not the `id: reason`
+      // string rendered on screen.
+      sessionStorage.clear()
+      ;vi.mocked(api.listInstances).mockResolvedValue({ active: true, warm_set_cap: 5, instances: [BROKEN] } as never)
+      ;vi.mocked(api.instanceStatus).mockResolvedValue(DIAGNOSED as never)
+      const u = userEvent.setup()
+      renderWithProviders(<RemoteCrewPanel />)
+
+      await screen.findByText('Nimbus')
+      await openRowMenu(u)
+      await u.click(await screen.findByRole('menuitem', { name: /Diagnose Nimbus/i }))
+      await screen.findByText(/c1: Remote dashboard down/i)
+      await u.click(screen.getByRole('button', { name: /agent/i }))
+
+      const prompt = consumeChatHandoff() || ''
+      expect(prompt).toContain('remote_down')
+      expect(prompt).toContain('ssh=ok -> remote_dashboard=FAILED')
+      expect(prompt).toContain('Nimbus')
+    })
+
+    it('keeps the typed add-form draft across that hand-off', async () => {
+      // The navigation unmounts this whole panel, the add form included, and a
+      // first-time user has just typed the crew by hand. The draft is stashed on
+      // every form change rather than by the button, so an exit the button knows
+      // nothing about still costs nothing.
+      sessionStorage.clear()
+      ;vi.mocked(api.listInstances).mockResolvedValue({ active: true, warm_set_cap: 5, instances: [BROKEN] } as never)
+      ;vi.mocked(api.instanceStatus).mockResolvedValue(DIAGNOSED as never)
+      const u = userEvent.setup()
+      const first = renderWithProviders(<RemoteCrewPanel />)
+
+      await screen.findByText('Nimbus')
+      await u.type(screen.getByPlaceholderText('Remote Host 1'), 'Cirrus')
+      await openRowMenu(u)
+      await u.click(await screen.findByRole('menuitem', { name: /Diagnose Nimbus/i }))
+      await screen.findByText(/c1: Remote dashboard down/i)
+      await u.click(screen.getByRole('button', { name: /agent/i }))
+      first.unmount()
+
+      renderWithProviders(<RemoteCrewPanel />)
+      await waitFor(() =>
+        expect(screen.getByPlaceholderText('Remote Host 1')).toHaveValue('Cirrus'),
+      )
+    })
   })
 })

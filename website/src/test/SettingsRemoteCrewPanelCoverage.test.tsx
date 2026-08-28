@@ -174,6 +174,11 @@ async function openSetupTab(u: ReturnType<typeof setup>) {
 beforeEach(() => {
   vi.clearAllMocks()
   localStorage.clear()
+  // The panel now persists an unsaved edit to sessionStorage so the agent hand-off
+  // cannot lose it, and restores it on mount. Nothing drains that between tests, so
+  // without this a draft typed by one case re-opens its form in the next and its
+  // fields read as that case's own edits.
+  sessionStorage.clear()
   // The copy affordances schedule a 1.5s revert. Without fake timers that
   // callback fires after teardown and throws as an unhandled error.
   vi.useFakeTimers({ shouldAdvanceTime: true })

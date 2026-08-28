@@ -10,7 +10,7 @@
  * tab strip can obtain the iframe token independently without sharing in-memory
  * state with this panel.
  */
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Server,
@@ -38,6 +38,10 @@ import { SettingRef } from '../../components/settingRef/SettingRef'
 import {
   InstanceFormFields,
   useInstanceFormState,
+  clearInstanceFormDraft,
+  peekInstanceFormDraft,
+  stashInstanceFormDraft,
+  isBlankInstanceForm,
   EMPTY_INSTANCE_FORM,
 } from './InstanceFormFields'
 const STATE_DOT: Record<InstanceTunnelStatus['state'], string> = {
@@ -70,11 +74,38 @@ export function StatusBadge({ status }: { status: InstanceTunnelStatus }) {
 }
 
 export function AddInstanceForm({ onAdded }: { onAdded: () => void }) {
-  const form = useInstanceFormState(EMPTY_INSTANCE_FORM)
+  // Restore what the user typed before an error hand-off navigated them away.
+  // Read once per mount: a later read would fight the live form state.
+  const [restored] = useState(() => peekInstanceFormDraft())
+  const form = useInstanceFormState(EMPTY_INSTANCE_FORM, restored)
+
+  // Stash on every change, not only when this card's own banner hands off. The
+  // navigation unmounts the WHOLE panel, so the crew rows above carry their own
+  // "Ask the agent" links that destroy this form just as thoroughly — as does a
+  // sidebar click or the browser's back button. Making the draft a property of the
+  // form rather than of one button covers every exit instead of the one we wired.
+  //
+  // Undebounced deliberately: the chat composer debounces because it holds a long
+  // body typed continuously, and pairs that with an immediate flush at the moments
+  // that matter. A sibling row's button is not a moment this form can flush at, so
+  // any debounce window is a window where a click loses the fields. Nine short
+  // inputs typed once are not a write budget worth protecting.
+  useEffect(() => {
+    if (isBlankInstanceForm(form.values)) {
+      // Erasing the form erases the draft, or navigating away and back would
+      // restore text the user deliberately cleared.
+      clearInstanceFormDraft()
+      return
+    }
+    stashInstanceFormDraft({ ...form.values })
+  }, [form.values])
 
   const addMutation = useMutation({
     mutationFn: () => api.addInstance(form.body()),
     onSuccess: () => {
+      // The draft described a crew that now exists; leaving it would pre-fill the
+      // next add with the one just created.
+      clearInstanceFormDraft()
       form.reset(EMPTY_INSTANCE_FORM)
       onAdded()
     },
@@ -91,7 +122,18 @@ export function AddInstanceForm({ onAdded }: { onAdded: () => void }) {
         <Plus className="lucide-inline" /> {i18nT('pages.settings.instancesPanel.add_instance')}
       </div>
       <InstanceFormFields idPrefix="add-instance" form={form} />
-      <ErrorNotice message={err} className="mt-3" />
+      {/* `askAgent` is safe here only BECAUSE of the stash: the hand-off navigates
+          away and unmounts this form, and a first-time user has just typed up to
+          nine fields by hand. `beforeHandoff` runs while the subtree is still alive,
+          and returning the stash's verdict vetoes the navigation when the values
+          could not be persisted — a hand-off that costs the form is worse than no
+          hand-off. */}
+      <ErrorNotice
+        message={err}
+        className="mt-3"
+        askAgent
+        beforeHandoff={() => stashInstanceFormDraft({ ...form.values })}
+      />
       <div className="mt-3">
         <Btn primary onClick={() => addMutation.mutate()} disabled={addMutation.isPending || !form.valid}>
           {addMutation.isPending ? i18nT('pages.settings.instancesPanel.adding') : i18nT('pages.settings.instancesPanel.add_remote_crew')}
@@ -122,6 +164,9 @@ function InstanceRow({
   const connected = inst.status.state === 'connected'
   const ttl = inst.status.token_ttl_remaining
   const diag = inst.status.diagnosis
+  const broken = !!diag && !diag.ok
+  // The report the hand-off carries, held in state because producing it journals —
+  // a side effect that belongs in an effect, not in render. Passing the object is
   return (
     <div className="flex items-center justify-between gap-3 py-2.5 border-b border-border last:border-b-0">
       <div className="min-w-0">
@@ -136,8 +181,12 @@ function InstanceRow({
           {typeof ttl === 'number' ? ' ' + i18nT('pages.settings.instancesPanel.token_left', { time: humanizeSecs(ttl) }) : ''}
         </div>
         <div className="mt-1"><StatusBadge status={inst.status} /></div>
-        {diag && !diag.ok ? (
-          <div className="mt-1 text-[12px] text-warn"><AlertTriangle size={12} className="lucide-inline" /> {diag.reason}</div>
+        {broken && diag ? (
+          <div className="mt-1 flex items-start gap-2 text-[12px] text-warn">
+            <span className="min-w-0" style={{ overflowWrap: 'anywhere' }}>
+              <AlertTriangle size={12} className="lucide-inline" /> {diag.reason}
+            </span>
+          </div>
         ) : null}
       </div>
       <div className="flex items-center gap-2 shrink-0">

@@ -31,6 +31,8 @@ export default function ErrorNotice({
   onDismiss,
   variant = 'block',
   askAgent = false,
+  beforeHandoff,
+  afterHandoff,
   className = '',
 }: {
   /** Human error text. Falsy renders nothing, so `<ErrorNotice message={err} />` needs no `&&` guard. */
@@ -64,6 +66,19 @@ export default function ErrorNotice({
    * field whose contents are not yet saved somewhere durable.
    */
   askAgent?: boolean
+  /**
+   * Runs just before the hand-off is staged, while this banner's subtree is still
+   * mounted — the one moment a caller can persist what the navigation is about to
+   * destroy. This is what lets `askAgent` be safe next to an unsaved form: stash
+   * the draft here and the opt-out default's whole reason for existing (silent
+   * data loss) no longer applies to that call site. Return `false` when the
+   * persist did NOT stick and the hand-off is abandoned instead.
+   */
+  beforeHandoff?: () => boolean | void
+  /** Runs only once the hand-off proceeded — for dismissing a surface whose job
+   *  is done. Kept separate from {@link beforeHandoff} because dismissing on a
+   *  staging failure would erase the error with nothing shown in its place. */
+  afterHandoff?: () => void
   className?: string
 }) {
   if (!message) return null
@@ -74,7 +89,14 @@ export default function ErrorNotice({
         <AlertTriangle size={14} className="shrink-0" aria-hidden="true" />
         {title && <strong className="font-semibold">{title}</strong>}
         <span className="min-w-0" style={{ overflowWrap: 'anywhere' }}>{message}</span>
-        {askAgent && <AskAgentButton report={report} message={message} />}
+        {askAgent && (
+          <AskAgentButton
+            report={report}
+            message={message}
+            beforeHandoff={beforeHandoff}
+            afterHandoff={afterHandoff}
+          />
+        )}
         {onDismiss && (
           <button
             type="button"
@@ -99,7 +121,15 @@ export default function ErrorNotice({
         {title && <strong className="font-semibold">{title} </strong>}
         {message}
       </div>
-      {askAgent && <AskAgentButton report={report} message={message} className="mt-[1px]" />}
+      {askAgent && (
+        <AskAgentButton
+          report={report}
+          message={message}
+          beforeHandoff={beforeHandoff}
+          afterHandoff={afterHandoff}
+          className="mt-[1px]"
+        />
+      )}
       {onDismiss && (
         <button
           type="button"

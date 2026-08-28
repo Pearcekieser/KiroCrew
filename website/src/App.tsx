@@ -2917,7 +2917,7 @@ export default function App() {
             {/* A failed self-update is exactly what the agent can diagnose
                 (channel, feed, venv state), and a modal has no draft to lose. */}
             <div className="flex items-center justify-center gap-3">
-              <AskAgentButton message={updateError} variant="solid" onHandoff={() => setUpdateError('')} />
+              <AskAgentButton message={updateError} variant="solid" afterHandoff={() => setUpdateError('')} />
               <button className="px-4 py-1.5 rounded-lg text-[13px] font-medium cursor-pointer bg-card border border-border text-text hover:border-border-strong transition-colors" onClick={() => setUpdateError('')}>
                 {i18nT('app.dismiss')}
               </button>

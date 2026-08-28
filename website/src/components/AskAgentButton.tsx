@@ -48,7 +48,8 @@ export default function AskAgentButton({
   message,
   variant = 'link',
   hard = false,
-  onHandoff,
+  beforeHandoff,
+  afterHandoff,
   className = '',
 }: {
   report?: ErrorReport
@@ -58,11 +59,33 @@ export default function AskAgentButton({
   /** Force a full page load (crash fallbacks, where the live tree is suspect). */
   hard?: boolean
   /**
-   * Called after the hand-off is staged. For callers that render inside a
-   * modal: the soft navigation does not unmount the modal's owner, so the
-   * modal would sit over the chat the hand-off lands on — close it here.
+   * Runs immediately BEFORE the hand-off is staged, while this subtree is still
+   * mounted — the only moment a caller can persist state the navigation would
+   * destroy (a form the user half-filled, which on a save-failure banner is by
+   * definition not saved anywhere else).
+   *
+   * **Return `false` to VETO the hand-off.** A caller that could not protect its
+   * state says so, and the navigation is abandoned rather than proceeding to
+   * destroy it. Returning nothing never vetoes.
+   *
+   * **A throw vetoes too.** This callback exists to persist, so a throwing
+   * persist is a failed persist: swallowing it and navigating anyway destroys the
+   * state the veto exists to protect. Only `afterHandoff` may throw harmlessly,
+   * because by then the hand-off has already succeeded.
    */
-  onHandoff?: () => void
+  beforeHandoff?: () => boolean | void
+  /**
+   * Runs only once the hand-off has actually proceeded — for a caller that
+   * DISMISSES something (a modal that would otherwise sit over the chat, an error
+   * banner whose job is done).
+   *
+   * Deliberately not the same hook as {@link beforeHandoff}: the two have opposite
+   * timing requirements. Persisting must happen before the navigation or there is
+   * nothing left to persist; dismissing must happen after, or a staging failure
+   * leaves the surface cleared with no navigation and no visible diagnostic — the
+   * error erased with nothing shown in its place.
+   */
+  afterHandoff?: () => void
   className?: string
 }) {
   // Render only needs to know whether there is anything to offer. The report is
@@ -78,8 +101,19 @@ export default function AskAgentButton({
     const resolved: ErrorReport | { message: string } | null =
       report ?? findReport(message) ?? (message ? { message } : null)
     if (!resolved) return
-    sendErrorToChat(askAgentPrompt(resolved), { hard })
-    onHandoff?.()
+    // Persist first: `sendErrorToChat` navigates, and the navigation unmounts the
+    // subtree this button was rendered in, so this is the caller's only usable
+    // moment. An explicit `false` means it could NOT — abandon rather than
+    // navigate away from state nothing is holding. A THROW is the same answer: a
+    // callback whose job is persisting did not finish, so proceeding would
+    // destroy exactly what the veto protects.
+    try {
+      if (beforeHandoff?.() === false) return
+    } catch { return }
+    // Dismiss only once the hand-off actually proceeded. Clearing a surface on a
+    // staging failure would leave neither a navigation nor a visible error.
+    if (!sendErrorToChat(askAgentPrompt(resolved), { hard })) return
+    try { afterHandoff?.() } catch { /* dismissal is cosmetic; never throw here */ }
   }
 
   const base = 'inline-flex items-center gap-1 shrink-0 cursor-pointer transition-colors'

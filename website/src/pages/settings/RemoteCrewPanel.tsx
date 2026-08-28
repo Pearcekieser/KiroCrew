@@ -57,13 +57,20 @@ import {
   DropdownMenuSeparator,
 } from '../../components/ui/dropdown-menu'
 import ErrorNotice from '../../components/ErrorNotice'
+import AskAgentButton from '../../components/AskAgentButton'
+import type { ErrorReport } from '../../utils/errorReport'
+import { reportInstanceFailure } from '../../utils/instanceFailureReport'
 import { readPersistedString, usePersistedString } from '../../hooks/usePersistedString'
 import { copyToClipboard } from '../../utils/clipboard'
 import { useAppDispatch } from '../../store'
 import { removeWarm } from '../../store/instancesSlice'
 import { i18nT } from '../../i18n/t'
 import { AddInstanceForm, StatusBadge } from './InstancesPanel'
-import { EditInstanceForm, instanceFormFromView, type InstanceDraft } from './InstanceFormFields'
+import {
+  EditInstanceForm,
+  instanceFormFromView,
+  type InstanceDraft,
+} from './InstanceFormFields'
 
 
 /** A launch job the user is still waiting on (not yet a switchable crew). */
@@ -687,6 +694,11 @@ export function RemoteCrewPanel() {
   const [deletingTags, setDeletingTags] = useState<Set<string>>(new Set())
   const [actionErr, setActionErr] = useState<string | null>(null)
   const [diagNote, setDiagNote] = useState<string | null>(null)
+  // The diagnosis note's own report, so the hand-off carries the ladder's verdict
+  // code and probe chain rather than the `id: reason` string on screen. Held as an
+  // object because message text is not an identity: two crews unreachable the same
+  // way produce byte-identical prose.
+  const [diagReport, setDiagReport] = useState<ErrorReport | null>(null)
   const [restartPending, setRestartPending] = useState(false)
 
   const errMsg = useCallback(
@@ -852,10 +864,23 @@ export function RemoteCrewPanel() {
   })
   const diagnoseMutation = useMutation({
     mutationFn: (id: string) => api.instanceStatus(id, true),
-    onMutate: () => { setActionErr(null); setDiagNote(null) },
+    onMutate: () => { setActionErr(null); setDiagNote(null); setDiagReport(null) },
     onSuccess: (st, id) => {
       const reason = st.diagnosis?.reason || st.error
       if (reason) setDiagNote(`${id}: ${reason}`)
+      // Journal unconditionally, healthy verdict included: the recorder's
+      // no-failure path is what clears its de-dup signature, so skipping the call
+      // on a healthy diagnose would leave the signature standing and suppress the
+      // next identical failure. It returns null when there is nothing to describe.
+      const inst = instances.find(i => i.id === id)
+      setDiagReport(reportInstanceFailure({
+        id,
+        name: inst?.name || id,
+        transport: inst?.connection_method === 'ssm' ? 'ssm' : 'ssh',
+        status: st,
+        stage: 'connect',
+        fallbackMessage: reason || '',
+      }))
     },
     onError: (e, id) => setActionErr(i18nT('pages.settings.instancesPanel.diagnose_failed', { id, error: errMsg(e, i18nT('pages.settings.instancesPanel.unknown_error')) })),
     onSettled: reloadInstances,
@@ -1049,7 +1074,12 @@ export function RemoteCrewPanel() {
         <div role="status" className="flex items-start gap-2 px-3 py-2 mb-3 text-[13px] rounded-md bg-accent/10 text-accent border border-accent/30">
           <Stethoscope size={14} className="lucide-inline mt-0.5 shrink-0" />
           <span className="flex-1 break-words">{diagNote}</span>
-          <button type="button" aria-label={i18nT('pages.settings.instancesPanel.dismiss_diagnosis')} className="shrink-0 opacity-70 hover:opacity-100" onClick={() => setDiagNote(null)}><X size={12} /></button>
+          {/* The dead end this PR exists to remove: a diagnosis names the broken
+              link and then leaves the user with nothing to do about it. No stash
+              needed — this panel's add form persists its own draft on every
+              change, so the navigation costs no typed fields. */}
+          {diagReport && <AskAgentButton report={diagReport} />}
+          <button type="button" aria-label={i18nT('pages.settings.instancesPanel.dismiss_diagnosis')} className="shrink-0 opacity-70 hover:opacity-100" onClick={() => { setDiagNote(null); setDiagReport(null) }}><X size={12} /></button>
         </div>
       )}
     </>

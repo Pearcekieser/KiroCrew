@@ -14,6 +14,7 @@ import { api, ApiError, type AddInstanceBody, type InstanceView } from '../../ap
 import SimpleSelect from '../../components/SimpleSelect'
 import { Btn } from '../../components/ui'
 import ErrorNotice from '../../components/ErrorNotice'
+import { createSlotDraftStore } from '../../utils/slotDraftStore'
 import { i18nT } from '../../i18n/t'
 
 /** Form-shaped mirror of an instance record: every field is a string the user typed. */
@@ -76,6 +77,99 @@ export const EMPTY_INSTANCE_FORM: InstanceFormValues = {
   remotePort: DEFAULT_REMOTE_PORT,
   ttl: DEFAULT_TTL,
   remoteBin: '',
+}
+
+/**
+ * Validate a persisted draft back into form values.
+ *
+ * Doubles as the draft store's `sanitize`, which is why it lives beside the
+ * shape rather than in the store module. Every field must be present and a
+ * string — a partial or corrupted payload is rejected WHOLE rather than merged
+ * over the defaults, because a half-restored form looks complete while silently
+ * carrying a field the user never typed. `method` is additionally constrained to
+ * the two transports, since it selects which of `sshHost` / `ssmTarget` the
+ * submit gate requires.
+ */
+export function instanceFormValuesFrom(raw: unknown): InstanceFormValues | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const src = raw as Record<string, unknown>
+  const out = {} as Record<keyof InstanceFormValues, string>
+  for (const key of Object.keys(EMPTY_INSTANCE_FORM) as (keyof InstanceFormValues)[]) {
+    const value = src[key]
+    if (typeof value !== 'string') return null
+    out[key] = value
+  }
+  if (out.method !== 'ssh' && out.method !== 'ssm') return null
+  return out as unknown as InstanceFormValues
+}
+
+/**
+ * Session-scoped stash for the Add-remote-crew form's typed values.
+ *
+ * `ErrorNotice`'s `askAgent` hand-off navigates to the chat, unmounting whatever
+ * rendered the banner — and a rejected ADD means the crew was NOT persisted, so
+ * the fields the user typed exist nowhere else. The form writes them here in the
+ * hand-off's pre-navigation window and reads them back on its next mount, which
+ * is what makes the button safe to offer on a form at all.
+ *
+ * A thin `createSlotDraftStore` instance rather than its own skeleton: that
+ * factory already owns load → sanitize → quota-safe persist, and a second
+ * spelling of the same thing is a spelling that drifts. One fixed slot, since
+ * there is exactly one Add form.
+ *
+ * **No TTL, deliberately.** sessionStorage already scopes the draft to the tab,
+ * which is the honest lifetime: the draft dies when the work does. A time bound
+ * on top of that only adds a way to lose the fields *while the user is still in
+ * the very agent conversation the hand-off opened.* Retirement is by success
+ * ({@link clearInstanceFormDraft}) or by closing the tab.
+ */
+const ADD_FORM_SLOT = 'add'
+
+const draftStore = createSlotDraftStore<InstanceFormValues>({
+  key: 'kirocrew_instance_form_draft',
+  storage: 'session',
+  sanitize: instanceFormValuesFrom,
+})
+
+/** Whether the form holds nothing worth keeping. Compared against the defaults,
+ *  not against emptiness: `method` and `remotePort` ship with values, so a
+ *  never-touched form is not all-blank. */
+export function isBlankInstanceForm(values: InstanceFormValues): boolean {
+  return (Object.keys(EMPTY_INSTANCE_FORM) as (keyof InstanceFormValues)[]).every(
+    key => values[key] === EMPTY_INSTANCE_FORM[key],
+  )
+}
+
+/**
+ * Stash the typed add-form values so the hand-off's navigation does not cost the
+ * user nine fields, returning whether they are actually recoverable.
+ *
+ * The verdict comes from the write itself: `save` reports whether the value
+ * reached storage. A read-back comparison would re-derive the same answer in a
+ * second spelling that has to be kept in sync with the form's shape, and a
+ * refused write is precisely the case where the OLD draft is still sitting in
+ * storage — so "something is stored" was never the question.
+ */
+export function stashInstanceFormDraft(values: InstanceFormValues): boolean {
+  const drafts = draftStore.load()
+  draftStore.set(drafts, ADD_FORM_SLOT, values)
+  // `set` drops a payload its sanitizer rejects, and an accepted write of nothing
+  // is not a stash: the draft must be present for the caller to have saved it.
+  if (!drafts[ADD_FORM_SLOT]) return false
+  return draftStore.save(drafts)
+}
+
+/** The stashed draft, or null. Non-destructive: StrictMode mounts twice, and a
+ *  consume-on-read would let the first mount eat what the second one shows. */
+export function peekInstanceFormDraft(): InstanceFormValues | null {
+  return draftStore.load()[ADD_FORM_SLOT] ?? null
+}
+
+/** Retire the draft after a successful add, so the next add opens empty. */
+export function clearInstanceFormDraft(): void {
+  const drafts = draftStore.load()
+  delete drafts[ADD_FORM_SLOT]
+  draftStore.save(drafts)
 }
 
 /** Seed the form from an existing crew, so editing starts from what is stored. */
