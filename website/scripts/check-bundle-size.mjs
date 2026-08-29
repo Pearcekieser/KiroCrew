@@ -43,7 +43,16 @@ export const CHUNK_BUDGETS = {
   // ceiling catches is a NEW library or surface landing in the catalog chunk.
   // The built-in App Store guidance adds one use-case and one configuration
   // string for each of 23 apps across all 12 shipped catalogs.
-  all: 9750 * KB, // measured 9278 KB after built-in App Store guidance
+  // Re-measured 2026-08-29 at 9767 KB after the Drive gallery's 28 keys across
+  // 13 catalogs. Raised from 9750, which main had reached EXACTLY -- 9750.0 KB,
+  // zero headroom -- so the next translated string from anyone was going to fail
+  // this gate regardless of what it was. The whole 17.2 KB of that measurement
+  // is catalog text (`git diff origin/main -- src/i18n/locales/` nets 17.2 KB,
+  // the same figure the gate reported as the overage), so there is no library or
+  // new surface hiding in it and nothing here an import() boundary could move:
+  // these are strings the shipped languages need eagerly. Headroom is deliberate
+  // this time rather than sized to the day's measurement.
+  all: 9900 * KB, // measured 9767 KB after the Drive gallery i18n keys
 
   // The i18n RUNTIME — the i18next singleton, `initI18n`, the English catalog —
   // named after `src/i18n/t.ts`. Held separately from `all` above because

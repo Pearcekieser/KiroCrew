@@ -23,26 +23,35 @@
  * react-query key. All AWS access runs through the gateway's audited CLI
  * chokepoint; this surface never talks to AWS from the browser.
  */
-import { Fragment, useRef, useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Fragment, useEffect, useRef, useState } from 'react'
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronLeft, ChevronDown, RefreshCw, HardDrive, Library, Archive, Share2,
   Download, Trash2, Upload, FolderClosed, FolderPlus, FileText, X,
-  MoreHorizontal, Code, ChevronRight,
+  MoreHorizontal, Code, LayoutGrid, List, Search, CloudOff, Plus,
 } from 'lucide-react'
 import { Btn, Badge, Toggle, Input, ContentSkeleton, IconButton } from '../../components/ui'
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
 } from '../../components/ui/dropdown-menu'
+import SegmentedControl from '../../components/SegmentedControl'
 import { LibraryTableHead } from '../../components/library/LibraryTable'
 import type { LibraryColumn } from '../../components/library/LibraryTable'
+import {
+  WidgetThumb, ContentThumb, ImageThumb, WebAppThumb,
+} from '../../components/library/ArtifactThumbs'
+import { useColumnCount } from '../../hooks/useColumnCount'
+import { usePersistedString } from '../../hooks/usePersistedString'
+import { api } from '../../api/client'
+import type { Artifact } from '../../types'
+import { useNearViewport } from '../../hooks/useNearViewport'
 import { useScrollEdges } from '../../hooks/useScrollEdges'
 import { i18nT } from '../../i18n/t'
-import { fmtBytes, fmtRelative } from '../../i18n/format'
+import { fmtBytes, fmtNumber, fmtRelative } from '../../i18n/format'
 import { awsControlApi } from './api'
 import type {
   AwsAccount, DriveSection, DriveStatus, ArtifactKind, LibraryArtifact,
-  BackupKind, Share,
+  BackupKind, Share, DriveUsage, DriveSectionUsage,
 } from './types'
 import { CopyBtn, SectionHeader } from './shared'
 
@@ -59,7 +68,9 @@ const KIND_LABEL_KEY: Record<ArtifactKind, string> = {
   widget: 'apps.awsControl.console.kind_widget',
   markdown: 'apps.awsControl.console.kind_markdown',
   html: 'apps.awsControl.console.kind_html',
+  svg: 'apps.awsControl.console.kind_svg',
   json: 'apps.awsControl.console.kind_json',
+  text: 'apps.awsControl.console.kind_text',
   webapp: 'apps.awsControl.console.kind_webapp',
   image: 'apps.awsControl.console.kind_image',
 }
@@ -116,98 +127,572 @@ function CliDrawer({ bucket, prefix }: { bucket: string; prefix: string }) {
 
 /* ── Section 4: Library ──────────────────────────────────────────────────── */
 
-const KIND_KEYS: ArtifactKind[] = ['widget', 'markdown', 'html', 'json', 'webapp', 'image']
+const KIND_KEYS: ArtifactKind[] =
+  ['widget', 'markdown', 'html', 'svg', 'json', 'text', 'webapp', 'image']
 
+/**
+ * How a listing is drawn: as thumbnail cards, or as table rows.
+ *
+ * Persisted PER SECTION, with a different default for each, because the two
+ * folders hold different things. Library holds artifacts that have a real
+ * rendered preview, so a grid of thumbnails is what makes it readable at a
+ * glance. Files holds arbitrary uploads with no preview but with a size, a type
+ * and a modified time worth comparing down a column, so it opens as a table --
+ * the same split a file manager makes between a photo folder and a documents
+ * folder. Once a reader chooses, that choice is remembered for that section.
+ */
+type ViewMode = 'grid' | 'list'
+
+/* Literal keys, not an interpolated one. Same discipline as the catalog-key maps
+ * above: a key assembled at the call site is invisible to any tool that greps for
+ * it, and the i18n added-lines gate reads a template literal in this position as a
+ * built string rather than a constant. Spelling the three out costs two lines. */
+const VIEW_MODE_STORAGE_KEY: Record<DriveSection, string> = {
+  drive: 'awsControl.drive.viewMode.drive',
+  library: 'awsControl.drive.viewMode.library',
+  backup: 'awsControl.drive.viewMode.backup',
+}
+
+function useViewMode(section: DriveSection, fallback: ViewMode): readonly [ViewMode, (v: ViewMode) => void] {
+  const [raw, setRaw] = usePersistedString(VIEW_MODE_STORAGE_KEY[section], fallback)
+  // Anything other than the two known words reads as the section's own default
+  // rather than rendering nothing: localStorage is writable by hand and survives
+  // a rename of these values, so an unknown string must not be able to blank a
+  // folder the reader can no longer get back.
+  const mode: ViewMode = raw === 'list' ? 'list' : raw === 'grid' ? 'grid' : fallback
+  return [mode, (v: ViewMode) => setRaw(v)] as const
+}
+
+/**
+ * The grid/list pair.
+ *
+ * This is `SegmentedControl`, not a hand-rolled pair of buttons: the Artifacts
+ * gallery already drives the IDENTICAL grid-vs-table choice through it, and a
+ * second spelling of one control is how the two drift apart. `collapse={false}`
+ * because this sits in a content-hugging header group rather than a measured
+ * column, which is the same reason the gallery passes it. Each section owns its
+ * own `layoutId` -- the indicator is a framer shared-layout animation, and two
+ * live controls sharing one id fight over it.
+ */
+function ViewModeToggle({ section, mode, onChange }: {
+  section: DriveSection
+  mode: ViewMode
+  onChange: (v: ViewMode) => void
+}) {
+  return (
+    <SegmentedControl<ViewMode>
+      segments={[
+        { key: 'grid', label: i18nT('apps.awsControl.console.view_grid'), icon: <LayoutGrid size={13} /> },
+        { key: 'list', label: i18nT('apps.awsControl.console.view_list'), icon: <List size={13} /> },
+      ]}
+      value={mode}
+      onChange={onChange}
+      layoutId={`aws-drive-view-${section}`}
+      collapse={false}
+    />
+  )
+}
+
+/**
+ * One artifact's preview, drawn with the SAME components the Artifacts gallery
+ * uses rather than a second set written for this page.
+ *
+ * The listing payloads here carry metadata only, so the full artifact (with its
+ * `content`) is fetched lazily per slug on the shared `['artifact', slug]` key --
+ * the same key the gallery and the detail page use, so a reader who has already
+ * seen an artifact anywhere else pays nothing to see it here.
+ *
+ * The fetch is gated on the card being NEAR THE VIEWPORT, and that gate is
+ * load-bearing rather than a nicety. The gallery this borrows from renders
+ * through `VirtuosoMasonry`, so only on-screen cards ever mount and the eager
+ * fetch costs what is visible. Both grids here are plain `.map()` with no
+ * virtualization -- a Library page can hold up to 500 slugs and the picker holds
+ * the WHOLE local library (212 artifacts on a real one) -- so an ungated fetch
+ * fires hundreds of concurrent full-artifact GETs at the gateway the moment the
+ * picker opens. `WidgetThumb` already defers its document mint through this same
+ * hook for the same reason; the JSON body needs it just as much.
+ */
+function ArtifactPreview({ slug, kind }: { slug: string; kind: ArtifactKind }) {
+  const boxRef = useRef<HTMLDivElement>(null)
+  const near = useNearViewport(boxRef)
+  const { data: full } = useQuery<Artifact>({
+    queryKey: ['artifact', slug],
+    queryFn: () => api.artifact(slug),
+    staleTime: 60_000,
+    enabled: !!slug && near,
+  })
+  const content = full?.content || ''
+  /* The box exists before the fetch does, because the observer needs something
+     mounted to watch -- and it reserves roughly the height a thumb settles at, so
+     a card does not jump when the preview arrives. */
+  return (
+    <div ref={boxRef} className="min-h-[120px]">
+      {!near || !full ? (
+        <div className="h-[120px] bg-bg-elevated" />
+      ) : kind === 'webapp' ? (
+        <WebAppThumb art={full} />
+      ) : kind === 'image' ? (
+        <ImageThumb a={full} />
+      ) : kind === 'widget' || kind === 'html' ? (
+        <WidgetThumb content={content} slug={slug} />
+      ) : (
+        <ContentThumb content={content} kind={kind} />
+      )}
+    </div>
+  )
+}
+
+/**
+ * A stored object with no local artifact behind it.
+ *
+ * The cloud copy outlives the local one — an artifact deleted locally, or a drive
+ * pushed to from another machine, both land here. There is nothing to preview
+ * (the bytes are in S3 and previewing them would cost a presign plus a fetch per
+ * card), so the card says so plainly instead of showing a broken frame.
+ */
+function OrphanThumb() {
+  return (
+    <div className="flex h-[120px] flex-col items-center justify-center gap-1.5 bg-bg-elevated p-3 text-center">
+      <CloudOff size={18} className="text-muted" aria-hidden="true" />
+      <span className="text-[11px] leading-tight text-muted">
+        {i18nT('apps.awsControl.console.library_cloud_only')}
+      </span>
+    </div>
+  )
+}
+
+/**
+ * The Library folder — what is ACTUALLY in the bucket's `artifacts/` prefix.
+ *
+ * This section used to render `GET /library/{account}`, which lists every LOCAL
+ * artifact with its push state. That made a folder inside the drive show 212
+ * things that were not in the drive, all of them labelled "not synced", while the
+ * Files folder next to it sat empty — so the two folders could not be told apart
+ * by looking at them, which is exactly what a reader asked about. It now lists
+ * the prefix, so an object is here if and only if it is in the cloud, and the
+ * local library is reached through the "add from Artifacts" picker instead.
+ *
+ * A push writes `library/{slug}/v{version}{ext}` plus `library/{slug}/meta.json`,
+ * so the prefix's top level is one FOLDER per slug. Each folder name IS the slug,
+ * which is what lets a card recover the artifact's name, kind and preview from
+ * the local library; an object with no local copy falls back to `OrphanThumb`.
+ */
 function LibrarySection({ account, bucket }: { account: string; bucket: string }) {
+  const [mode, setMode] = useViewMode('library', 'grid')
+  const [picking, setPicking] = useState(false)
+  const [gridRef, cols] = useColumnCount(258)
+
+  /* What is in the cloud, ACCUMULATED across pages. A plain query keyed by the
+     continuation token replaced the visible page on every "Load more", which is
+     the opposite of what that label promises -- the reader pressed it to see
+     more and the first page vanished. The page list stays under the same
+     ['aws-control','drive',account] prefix every mutation invalidates. */
+  const listQ = useInfiniteQuery({
+    queryKey: ['aws-control', 'drive', account, 'list', 'library'],
+    queryFn: ({ pageParam }) => awsControlApi.driveList(account, 'library', '', pageParam),
+    initialPageParam: '',
+    getNextPageParam: (last) => last.nextToken || undefined,
+  })
+  // The local library, used ONLY as a slug -> {name, kind} lookup for the cards
+  // and as the picker's source. Never as the listing itself.
+  const localQ = useQuery({
+    queryKey: ['aws-control', 'library', account],
+    queryFn: () => awsControlApi.library(account),
+  })
+
+  const bySlug = new Map<string, LibraryArtifact>()
+  for (const a of localQ.data?.artifacts ?? []) bySlug.set(a.slug, a)
+
+  const slugs = (listQ.data?.pages ?? []).flatMap((pg) => pg.folders.map((f) => f.split('/').pop() ?? f))
+  /* Only what can ACTUALLY be added. Counting images here overpromised on the
+     empty state's primary button -- they are the bulk of a real library and the
+     picker then refuses every one of them. */
+  const pushable = (localQ.data?.artifacts ?? [])
+    .filter((a) => a.pushedVersion === null && a.kind !== 'image')
+
+  return (
+    <section data-testid="library-section">
+      <SectionHeader
+        icon={<Library size={15} />}
+        title={i18nT('apps.awsControl.console.section_library')}
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <ViewModeToggle section="library" mode={mode} onChange={setMode} />
+            <Btn primary onClick={() => setPicking(true)} data-testid="library-add-open">
+              <Plus size={13} />
+              {i18nT('apps.awsControl.console.library_add')}
+            </Btn>
+          </div>
+        }
+      />
+
+      {/* What this folder holds, said once. The reader arrived here from a root
+          card next to one called Files, and the distinction is the whole point
+          of the section. */}
+      <p className="mb-3 text-[12px] text-muted" data-testid="library-blurb">
+        {i18nT('apps.awsControl.console.library_blurb')}
+      </p>
+
+      {listQ.isLoading && <ContentSkeleton rows={2} />}
+
+      {listQ.data && slugs.length === 0 && (
+        <div className="rounded-lg border border-dashed border-border p-8 text-center" data-testid="library-empty">
+          <div className="mb-1.5 text-[13px] font-medium text-text-strong">
+            {i18nT('apps.awsControl.console.library_empty_title')}
+          </div>
+          <p className="mx-auto mb-4 max-w-[52ch] text-[12px] leading-relaxed text-muted">
+            {i18nT('apps.awsControl.console.library_empty_body')}
+          </p>
+          <Btn primary onClick={() => setPicking(true)} data-testid="library-empty-add">
+            <Plus size={13} />
+            {i18nT('apps.awsControl.console.library_add_count', { count: fmtNumber(pushable.length) })}
+          </Btn>
+        </div>
+      )}
+
+      {slugs.length > 0 && mode === 'grid' && (
+        <div ref={gridRef} className="-mr-3" data-testid="library-grid">
+          <div className="grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+            {slugs.map((slug) => (
+              <LibraryCloudCard key={slug} slug={slug} local={bySlug.get(slug)} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {slugs.length > 0 && mode === 'list' && (
+        <div className="rounded-md border border-border bg-card divide-y divide-border" data-testid="library-list">
+          {slugs.map((slug) => {
+            const local = bySlug.get(slug)
+            return (
+              <div key={slug} className="flex items-center gap-3 px-3 py-2.5 text-[13px]" data-testid="library-list-row">
+                <FileText size={14} className="shrink-0 text-muted" aria-hidden="true" />
+                <span className="min-w-0 flex-1 truncate text-text">{local?.name || slug}</span>
+                {local ? (
+                  <Badge variant="muted">{i18nT(KIND_LABEL_KEY[local.kind])}</Badge>
+                ) : (
+                  <span className="text-[12px] text-muted">{i18nT('apps.awsControl.console.library_cloud_only')}</span>
+                )}
+                {local && <span className="hidden shrink-0 font-mono text-[12px] text-muted sm:inline">v{local.pushedVersion ?? local.version}</span>}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {listQ.hasNextPage && (
+        <div className="mt-2">
+          <Btn
+            onClick={() => listQ.fetchNextPage()}
+            disabled={listQ.isFetchingNextPage}
+            data-testid="library-load-more"
+          >
+            {i18nT('apps.awsControl.console.load_more')}
+          </Btn>
+        </div>
+      )}
+
+      <CliDrawer bucket={bucket} prefix="artifacts/" />
+
+      {picking && <AddFromArtifactsDialog account={account} onClose={() => setPicking(false)} />}
+    </section>
+  )
+}
+
+/**
+ * The confirm for one grid tile, rendered by that tile.
+ *
+ * Not one strip above the grid: that names a single item while sitting next to
+ * every other one -- the same trap the table rows avoid by making the confirm
+ * their own next row -- and in a scrolled folder it paints off-screen, so the
+ * menu click reads as a no-op while a live destructive control sits parked out
+ * of sight.
+ */
+function TileConfirm({ label, error, pending, onCancel, onConfirm, action }: {
+  label: string
+  error: string
+  pending: boolean
+  onCancel: () => void
+  onConfirm: () => void
+  action: string
+}) {
+  return (
+    <div className="mt-1 w-full border-t border-border pt-2" data-testid="drive-grid-confirm">
+      <p className="mb-2 text-[12px] leading-snug text-text">{label}</p>
+      {error && <p className="mb-2 text-[11px] text-danger" data-testid="drive-grid-confirm-error">{error}</p>}
+      <div className="flex flex-wrap items-center gap-2">
+        <Btn onClick={onCancel} data-testid="drive-grid-confirm-cancel">
+          {i18nT('apps.awsControl.console.cancel')}
+        </Btn>
+        <Btn danger disabled={pending} onClick={onConfirm} data-testid="drive-grid-confirm-action">
+          <Trash2 size={13} />{action}
+        </Btn>
+      </div>
+    </div>
+  )
+}
+
+/** One artifact that IS in the cloud, as a preview card. */
+function LibraryCloudCard({ slug, local }: { slug: string; local: LibraryArtifact | undefined }) {
+  /* With no local artifact behind it the name IS the slug, so printing both puts
+     the same string on the card twice. */
+  const title = local?.name || slug
+  const showSlug = title !== slug
+  return (
+    <div
+      className="mb-3 mr-3 overflow-hidden rounded-lg border border-border bg-card transition-all hover:border-border-strong"
+      data-testid="library-card"
+    >
+      <div className="pointer-events-none">
+        {local ? <ArtifactPreview slug={slug} kind={local.kind} /> : <OrphanThumb />}
+      </div>
+      <div className="p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[13px] font-medium text-text-strong">{title}</div>
+            {showSlug && <code className="text-[11px] text-muted">{slug}</code>}
+          </div>
+          {local && <Badge variant="muted">{i18nT(KIND_LABEL_KEY[local.kind])}</Badge>}
+        </div>
+        {/* Only a card with a local copy gets a "where it is" footer. An orphan's
+            thumb ALREADY says "in the cloud only", and adding "In the drive"
+            underneath made the card contradict itself -- cloud and drive are the
+            same place to a reader, so the card's one job read as two answers. */}
+        {local && (
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
+            <span>
+              {local.pushedAt
+                ? i18nT('apps.awsControl.console.library_added', { when: fmtRelative(local.pushedAt) })
+                : i18nT('apps.awsControl.console.library_in_cloud')}
+            </span>
+            {/* The preview above is rendered from the LOCAL artifact, because that
+                is the only copy we can read without presigning and fetching the
+                object. When the local copy has been edited since the push, that
+                preview is NOT what the bucket holds -- and this card's whole
+                contract is that it shows what IS in the cloud. So say which
+                version is stored rather than letting the picture imply it. */}
+            {local.pushedVersion !== null && local.pushedVersion !== local.version && (
+              <span className="text-warn" data-testid="library-card-stale">
+                {i18nT('apps.awsControl.console.library_stale_preview', { version: local.pushedVersion })}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The picker: the local artifact library, with an action that copies one INTO
+ * the drive.
+ *
+ * This is where the local artifacts went when the Library folder stopped
+ * listing them. It is the drive's Upload equivalent, so it lives behind a
+ * button rather than occupying a folder: a reader browsing the drive is looking
+ * at what they have stored, and a list of candidates for storage is a different
+ * question that they ask deliberately.
+ */
+function AddFromArtifactsDialog({ account, onClose }: { account: string; onClose: () => void }) {
   const qc = useQueryClient()
   const [kind, setKind] = useState<ArtifactKind | 'all'>('all')
+  const [q, setQ] = useState('')
+  const [gridRef, cols] = useColumnCount(258)
+  const backdropDown = useRef(false)
+
+  /* A large layered surface that can only be left by hitting one small X is a
+     trap for anyone driving from the keyboard, and Escape is what every reader
+     already tries first. Bound on the document because focus may sit in the
+     search field or on a card. */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   const libQ = useQuery({
     queryKey: ['aws-control', 'library', account],
     queryFn: () => awsControlApi.library(account),
   })
   const pushMut = useMutation({
     mutationFn: (slug: string) => awsControlApi.libraryPush(account, slug),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['aws-control', 'library', account] }),
+    // Both keys: the ledger changed (so the picker's rows restate their state)
+    // and the PREFIX changed (so the folder behind this dialog has a new object
+    // in it). Invalidating only the library key left the folder stale until a
+    // remount.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['aws-control', 'library', account] })
+      qc.invalidateQueries({ queryKey: ['aws-control', 'drive', account] })
+    },
   })
 
   const artifacts = libQ.data?.artifacts ?? []
   const counts: Record<string, number> = { all: artifacts.length }
   for (const k of KIND_KEYS) counts[k] = artifacts.filter((a) => a.kind === k).length
-  const shown = kind === 'all' ? artifacts : artifacts.filter((a) => a.kind === kind)
+  const needle = q.trim().toLowerCase()
+  const shown = artifacts
+    .filter((a) => (kind === 'all' ? true : a.kind === kind))
+    .filter((a) => (needle ? a.name.toLowerCase().includes(needle) || a.slug.includes(needle) : true))
 
   return (
-    <section data-testid="library-section">
-      <SectionHeader icon={<Library size={15} />} title={i18nT('apps.awsControl.console.library_title')} />
-      <div className="mb-3 flex flex-wrap gap-1.5" data-testid="library-chips">
-        {(['all', ...KIND_KEYS] as const).map((k) => (
+    // The SCRIM is presentational and owns click-to-dismiss; the panel inside it
+    // is the dialog. Putting the dialog role and the mouse handlers on one
+    // element made a non-interactive element carry mouse listeners with no
+    // keyboard path of its own, and a scrim keydown handler is unreachable
+    // anyway because focus never lands there -- Escape (above) is the keyboard
+    // route. Same shape as UpdateFoundModal.
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 sm:p-8"
+      data-testid="library-add-dialog"
+      role="presentation"
+      /* Dismiss only when the press both started and ended on the scrim: a drag
+         that begins on a card and releases outside it is not a request to close,
+         and treating it as one loses whatever the reader was doing. */
+      onMouseDown={(e) => { if (e.target === e.currentTarget) backdropDown.current = true }}
+      onClick={(e) => { if (e.target === e.currentTarget && backdropDown.current) onClose(); backdropDown.current = false }}
+    >
+      <div
+        className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-border bg-card shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-label={i18nT('apps.awsControl.console.library_add')}
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+          <h3 className="text-sm font-semibold text-text-strong">
+            {i18nT('apps.awsControl.console.library_add')}
+          </h3>
           <button
-            key={k}
-            onClick={() => setKind(k)}
-            className={`rounded-full border px-2.5 py-1 text-[12px] cursor-pointer transition-colors ${
-              kind === k ? 'border-accent bg-accent/10 text-accent' : 'border-border bg-transparent text-muted hover:text-text'
-            }`}
-            data-testid={`library-chip-${k}`}
+            onClick={onClose}
+            className="cursor-pointer border-none bg-transparent p-0 text-muted hover:text-text"
+            aria-label={i18nT('apps.awsControl.console.close')}
+            data-testid="library-add-close"
           >
-            {k === 'all' ? i18nT('apps.awsControl.console.library_all') : i18nT(KIND_LABEL_KEY[k])}{' '}
-            <span className="font-mono opacity-70">{counts[k] ?? 0}</span>
+            <X size={16} />
           </button>
-        ))}
-      </div>
+        </div>
 
-      {libQ.isLoading && <ContentSkeleton rows={2} />}
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
+          {/* The cue lives on this WRAPPER, not the bare input: the visible
+              control a reader sees is the whole bordered box (magnifier + field),
+              so lighting the box is what reads as "the search has focus". An
+              outline on the inner input alone would paint inside the border and
+              leave the box itself looking inert. */}
+          <div className="flex min-w-[180px] flex-1 items-center gap-2 rounded-md border border-border bg-bg px-2.5 py-1.5 focus-within:border-accent focus-within:ring-1 focus-within:ring-accent/40">
+            <Search size={13} className="shrink-0 text-muted" aria-hidden="true" />
+            {/* focus-cue-ok: the cue is the parent's focus-within border+ring above. */}
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder={i18nT('apps.awsControl.console.library_search')}
+              aria-label={i18nT('apps.awsControl.console.library_search')}
+              /* Takes focus on open: otherwise focus stays on the trigger BEHIND
+                 the overlay and Tab walks the occluded page (cards, Load more,
+                 the CLI drawer) before reaching this dialog. It also gives mouse
+                 users type-to-filter immediately. */
+              autoFocus
+              className="min-w-0 flex-1 border-none bg-transparent text-[13px] text-text outline-none"
+              data-testid="library-add-search"
+            />
+          </div>
+        </div>
 
-      {libQ.data && shown.length === 0 && (
-        <p className="text-[13px] text-muted" data-testid="library-empty">
-          {i18nT('apps.awsControl.console.library_empty')}
-        </p>
-      )}
-
-      {shown.length > 0 && (
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" data-testid="library-tiles">
-          {shown.map((a) => (
-            <LibraryTile key={a.slug} artifact={a} onPush={() => pushMut.mutate(a.slug)} pushing={pushMut.isPending && pushMut.variables === a.slug} />
+        <div className="flex flex-wrap gap-1.5 border-b border-border px-4 py-2.5" data-testid="library-chips">
+          {(['all', ...KIND_KEYS] as const).map((k) => (
+            <button
+              key={k}
+              onClick={() => setKind(k)}
+              aria-pressed={kind === k}
+              className={`cursor-pointer rounded-full border px-2.5 py-1 text-[12px] transition-colors ${
+                kind === k
+                  ? 'border-accent bg-accent/10 text-accent'
+                  : 'border-border bg-transparent text-muted hover:text-text'
+              }`}
+              data-testid={`library-chip-${k}`}
+            >
+              {k === 'all' ? i18nT('apps.awsControl.console.library_all') : i18nT(KIND_LABEL_KEY[k])}{' '}
+              <span className="font-mono opacity-70">{fmtNumber(counts[k] ?? 0)}</span>
+            </button>
           ))}
         </div>
-      )}
 
-      <CliDrawer bucket={bucket} prefix="artifacts/" />
-    </section>
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {libQ.isLoading && <ContentSkeleton rows={3} />}
+          {libQ.data && shown.length === 0 && (
+            <p className="py-6 text-center text-[13px] text-muted" data-testid="library-add-none">
+              {i18nT('apps.awsControl.console.library_add_none')}
+            </p>
+          )}
+          {shown.length > 0 && (
+            <div ref={gridRef} className="-mr-3">
+              <div className="grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+                {shown.map((a) => (
+                  <PickerCard
+                    key={a.slug}
+                    artifact={a}
+                    onPush={() => pushMut.mutate(a.slug)}
+                    pushing={pushMut.isPending && pushMut.variables === a.slug}
+                    failed={pushMut.isError && pushMut.variables === a.slug}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   )
 }
 
-function LibraryTile({ artifact, onPush, pushing }: { artifact: LibraryArtifact; onPush: () => void; pushing: boolean }) {
+/** One candidate in the picker: a real preview, and one action. */
+function PickerCard({ artifact, onPush, pushing, failed }: {
+  artifact: LibraryArtifact
+  onPush: () => void
+  pushing: boolean
+  failed: boolean
+}) {
   const synced = artifact.pushedVersion !== null
   const upToDate = artifact.pushedVersion === artifact.version
+  /* An image cannot be pushed yet: the backend's kind -> extension map carries
+     no image entry, so `push_artifact` refuses one. The card SAYS that rather
+     than only grey out its button, because images are the bulk of a real
+     library and a disabled control with no reason reads as a bug. */
   const notPushable = artifact.kind === 'image'
   return (
-    <div className="rounded-md border border-border bg-card px-3 py-2.5" data-testid="library-tile">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-[13px] font-medium text-text">{artifact.name}</span>
-            <Badge variant="muted">{i18nT(KIND_LABEL_KEY[artifact.kind])}</Badge>
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[12px] text-muted">
-            <span className="font-mono">v{artifact.version}</span>
-            <span>{fmtRelative(artifact.updatedAt)}</span>
-            <span className={synced ? 'text-ok' : 'text-muted'}>
-              {synced
-                ? i18nT('apps.awsControl.console.library_synced', { version: artifact.pushedVersion })
-                : i18nT('apps.awsControl.console.library_not_synced')}
-            </span>
-          </div>
+    <div className="mb-3 mr-3 overflow-hidden rounded-lg border border-border bg-card" data-testid="library-tile">
+      <div className="pointer-events-none">
+        <ArtifactPreview slug={artifact.slug} kind={artifact.kind} />
+      </div>
+      <div className="p-3">
+        <div className="flex items-start justify-between gap-2">
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-text-strong">{artifact.name}</span>
+          <Badge variant="muted">{i18nT(KIND_LABEL_KEY[artifact.kind])}</Badge>
         </div>
-        <Btn
-          onClick={onPush}
-          disabled={pushing || upToDate || notPushable}
-          data-testid="library-push"
-          title={notPushable ? i18nT('apps.awsControl.console.library_not_pushable') : undefined}
-        >
-          <Upload size={13} />
-          {upToDate
-            ? i18nT('apps.awsControl.console.library_up_to_date')
-            : i18nT('apps.awsControl.console.library_push')}
-        </Btn>
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] text-muted">
+          <span className="font-mono">v{artifact.version}</span>
+          <span>{fmtRelative(artifact.updatedAt)}</span>
+        </div>
+        {notPushable && (
+          <p className="mt-2 text-[11px] leading-snug text-muted" data-testid="library-not-pushable">
+            {i18nT('apps.awsControl.console.library_not_pushable')}
+          </p>
+        )}
+        {failed && !notPushable && (
+          <p className="mt-2 text-[11px] leading-snug text-danger" data-testid="library-push-error">
+            {i18nT('apps.awsControl.console.library_push_failed')}
+          </p>
+        )}
+        {!notPushable && (
+          <div className="mt-2.5">
+            <Btn onClick={onPush} disabled={pushing || upToDate} data-testid="library-push">
+              <Upload size={13} />
+              {upToDate
+                ? i18nT('apps.awsControl.console.library_up_to_date')
+                : synced
+                  ? i18nT('apps.awsControl.console.library_update')
+                  : i18nT('apps.awsControl.console.library_add_one')}
+            </Btn>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -254,6 +739,7 @@ const KEY_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9 ._()+@=-]*$/
 
 function DriveSectionView({ account, bucket }: { account: string; bucket: string }) {
   const qc = useQueryClient()
+  const [mode, setMode] = useViewMode('drive', 'list')
   const [path, setPath] = useState('')
   const [token, setToken] = useState('')
   const [share, setShare] = useState<{ key: string } | null>(null)
@@ -271,6 +757,7 @@ function DriveSectionView({ account, bucket }: { account: string; bucket: string
      what was removed rather than pretending to predict it. */
   const [deletedCount, setDeletedCount] = useState<number | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const [filesGridRef, fileCols] = useColumnCount(258)
   /* The pinned Actions cell paints its seam only when the table actually
      overflows, so the edge is measured rather than assumed. */
   const [attachScroller, edges] = useScrollEdges<HTMLDivElement>()
@@ -363,6 +850,7 @@ function DriveSectionView({ account, bucket }: { account: string; bucket: string
     <section data-testid="drive-section">
       <SectionHeader icon={<FolderClosed size={15} />} title={i18nT('apps.awsControl.console.section_files')} actions={
         <div className="flex flex-wrap items-center gap-2">
+        <ViewModeToggle section="drive" mode={mode} onChange={setMode} />
         <Input
           value={newFolder}
           onChange={(e) => setNewFolder(e.target.value)}
@@ -445,7 +933,145 @@ function DriveSectionView({ account, bucket }: { account: string; bucket: string
 
       {listQ.isLoading && <ContentSkeleton rows={2} />}
 
-      {listQ.data && (
+      {/* Empty, and said properly. "This folder is empty." inside a table with
+          five headers left a reader who had just come from a Library folder
+          holding 212 rows unable to tell what the two folders were FOR -- the
+          question was asked in exactly those words. So the empty state names
+          what belongs here and how it differs from Library, and carries the
+          upload action rather than making the reader find it in the header. */}
+      {listQ.data && listQ.data.folders.length === 0 && listQ.data.files.length === 0 && (
+        <div className="rounded-lg border border-dashed border-border p-8 text-center" data-testid="drive-empty">
+          <div className="mb-1.5 text-[13px] font-medium text-text-strong">
+            {i18nT('apps.awsControl.console.files_empty_title')}
+          </div>
+          <p className="mx-auto mb-4 max-w-[56ch] text-[12px] leading-relaxed text-muted">
+            {i18nT('apps.awsControl.console.files_empty_body')}
+          </p>
+          <Btn primary onClick={() => fileRef.current?.click()} data-testid="drive-empty-upload">
+            <Upload size={13} />
+            {i18nT('apps.awsControl.console.drive_upload')}
+          </Btn>
+        </div>
+      )}
+
+      {/* Grid mode. A stored object has no preview we can draw without a presign
+          and a fetch PER CARD, so a tile is a type glyph, its name, and its size
+          -- the same thing a file manager shows for a format it cannot render.
+          Every action a LIST row carries is carried here too: the view mode is a
+          way of LOOKING at a folder, not a capability tier, and because the
+          choice persists per section a reader who preferred tiles would
+          otherwise lose Share and Delete on every future visit with nothing to
+          tell them the controls existed. */}
+      {listQ.data && mode === 'grid' && (listQ.data.folders.length > 0 || listQ.data.files.length > 0) && (
+        <div ref={filesGridRef} className="-mr-3" data-testid="drive-grid">
+          <div className="grid" style={{ gridTemplateColumns: `repeat(${fileCols}, minmax(0, 1fr))` }}>
+            {listQ.data.folders.map((name) => (
+              <div
+                key={`gf-${name}`}
+                className="mb-3 mr-3 flex flex-col items-start gap-2 rounded-lg border border-border bg-card p-3 transition-colors hover:border-border-strong"
+                data-testid="drive-grid-folder"
+              >
+                <div className="flex w-full items-start justify-between gap-2">
+                  <FolderClosed size={22} className="text-accent" aria-hidden="true" />
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        className="cursor-pointer rounded border-none bg-transparent p-1 text-muted transition-colors hover:text-text"
+                        aria-label={i18nT('apps.awsControl.console.folder_actions')}
+                        data-testid="drive-grid-folder-more"
+                      >
+                        <MoreHorizontal size={14} />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onSelect={() => setConfirmFolder(name)} data-testid="drive-grid-folder-delete">
+                        <Trash2 size={13} />{i18nT('apps.awsControl.console.folder_delete_action')}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setPath(name); setToken(''); setDeletedCount(null) }}
+                  className="w-full cursor-pointer truncate border-none bg-transparent p-0 text-left text-[13px] font-medium text-text-strong"
+                  data-testid="drive-grid-folder-open"
+                >
+                  {name.split('/').pop()}
+                </button>
+                <span className="text-[11px] text-muted">{i18nT('apps.awsControl.console.kind_folder')}</span>
+                {confirmFolder === name && (
+                  <TileConfirm
+                    label={i18nT('apps.awsControl.console.folder_delete_confirm', { name: name.split('/').pop() ?? name })}
+                    error={folderDeleteMut.isError ? i18nT('apps.awsControl.console.folder_delete_failed') : ''}
+                    pending={folderDeleteMut.isPending}
+                    onCancel={() => setConfirmFolder(null)}
+                    onConfirm={() => folderDeleteMut.mutate(name, { onSuccess: () => setConfirmFolder(null) })}
+                    action={i18nT('apps.awsControl.console.folder_delete_action')}
+                  />
+                )}
+              </div>
+            ))}
+            {listQ.data.files.map((f) => (
+              <div
+                key={`go-${f.key}`}
+                className="mb-3 mr-3 flex flex-col items-start gap-2 rounded-lg border border-border bg-card p-3 transition-colors hover:border-border-strong"
+                data-testid="drive-grid-file"
+              >
+                <div className="flex w-full items-start justify-between gap-2">
+                  <FileText size={22} className="text-muted" aria-hidden="true" />
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => download(f.key)}
+                      className="cursor-pointer rounded border-none bg-transparent p-1 text-muted transition-colors hover:text-text"
+                      title={i18nT('apps.awsControl.console.download')}
+                      aria-label={i18nT('apps.awsControl.console.download')}
+                      data-testid="drive-grid-download"
+                    >
+                      <Download size={13} />
+                    </button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          className="cursor-pointer rounded border-none bg-transparent p-1 text-muted transition-colors hover:text-text"
+                          aria-label={i18nT('apps.awsControl.console.file_actions')}
+                          data-testid="drive-grid-more"
+                        >
+                          <MoreHorizontal size={14} />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onSelect={() => setShare({ key: f.key })} data-testid="drive-grid-share">
+                          <Share2 size={13} />{i18nT('apps.awsControl.console.share')}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => setConfirmDelete(f.key)} data-testid="drive-grid-delete">
+                          <Trash2 size={13} />{i18nT('apps.awsControl.console.delete')}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </div>
+                <span className="w-full truncate text-[13px] font-medium text-text-strong">{f.key.split('/').pop()}</span>
+                <span className="text-[11px] text-muted">{objectKind(f.key)} · {fmtBytes(f.size)}</span>
+                {confirmDelete === f.key && (
+                  <TileConfirm
+                    label={i18nT('apps.awsControl.console.delete_confirm', { name: f.key.split('/').pop() ?? f.key })}
+                    error={deleteMut.isError ? i18nT('apps.awsControl.console.delete_failed') : ''}
+                    pending={deleteMut.isPending}
+                    onCancel={() => setConfirmDelete(null)}
+                    onConfirm={() => deleteMut.mutate(f.key, { onSuccess: () => setConfirmDelete(null) })}
+                    action={i18nT('apps.awsControl.console.delete_confirm_action')}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {listQ.data && mode === 'list' && (listQ.data.folders.length > 0 || listQ.data.files.length > 0) && (
         <div ref={attachScroller} className="overflow-x-auto rounded-md border border-border bg-card" data-testid="drive-listing">
           <table className="w-full border-collapse text-[13px]">
             {/* Shared head, drive columns. No column is sortable and `sort` is
@@ -667,13 +1293,6 @@ function DriveSectionView({ account, bucket }: { account: string; bucket: string
                   )}
                 </Fragment>
               ))}
-              {listQ.data.folders.length === 0 && listQ.data.files.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="px-2.5 py-3 text-muted" data-testid="drive-empty">
-                    {i18nT('apps.awsControl.console.drive_empty')}
-                  </td>
-                </tr>
-              )}
             </tbody>
           </table>
         </div>
@@ -950,6 +1569,131 @@ const SECTION_ICON: Record<DriveSection, typeof HardDrive> = {
   backup: Archive,
 }
 
+/* Literal-key map from section → its one-line "what belongs here" description,
+ * so no i18nT() call assembles a key by interpolation (dynamicKeys gate).
+ * Mirrors SECTION_LABEL_ON_PAGE above. */
+const SECTION_DESC_KEY: Record<DriveSection, string> = {
+  drive: 'apps.awsControl.console.root_section_desc_drive',
+  library: 'apps.awsControl.console.root_section_desc_library',
+  backup: 'apps.awsControl.console.root_section_desc_backup',
+}
+
+/**
+ * Each section's meter colour, as a SEMANTIC token — never a hex.
+ *
+ * The three must be visually distinct AND survive a theme switch (including the
+ * light themes), so each is one of the palette's own role tokens rather than a
+ * literal: `accent` for the drive, `info` for the library, `warn` for backups.
+ * The legend swatch and the bar segment read the SAME token, so a segment and
+ * its legend entry can never drift to different colours.
+ */
+const SECTION_TONE: Record<DriveSection, string> = {
+  drive: 'bg-accent',
+  library: 'bg-info',
+  backup: 'bg-warn',
+}
+
+/**
+ * The storage meter: total usage, and one horizontal bar split by section.
+ *
+ * The bar is proportional to each section's BYTES, but a section with zero
+ * bytes still gets a legible legend row (its swatch and a `0` size) — a section
+ * that exists is worth naming even when empty, and a 0-width bar segment alone
+ * would silently drop it. When the whole drive is empty the bar renders as a
+ * single muted track so the card is never a bare outline.
+ */
+function StorageMeter({ usage }: { usage: DriveUsage }) {
+  const total = usage.bytes
+  return (
+    <div className="mb-4 rounded-lg border border-border bg-card p-4" data-testid="drive-storage-meter">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+        <span className="text-[13px] font-medium text-text-strong">
+          {i18nT('apps.awsControl.console.root_storage_used')}
+        </span>
+        <span className="text-[12px] text-muted" data-testid="drive-meter-summary">
+          {i18nT('apps.awsControl.console.root_meter_summary', {
+            size: fmtBytes(total),
+            objects: usage.objects,
+          })}
+        </span>
+      </div>
+
+      {/* The bar. Proportional segments when there is anything to show; a single
+          muted track when the drive is empty, so it is never a bare outline. */}
+      <div
+        className="mt-3 flex h-2.5 w-full overflow-hidden rounded-full bg-bg-hover"
+        data-testid="drive-meter-bar"
+      >
+        {total > 0 &&
+          SECTIONS.map((s) => {
+            const pct = (usage.sections[s].bytes / total) * 100
+            if (pct <= 0) return null
+            return (
+              <div
+                key={s}
+                className={`h-full ${SECTION_TONE[s]}`}
+                style={{ width: `${pct}%` }}
+                data-testid={`drive-meter-segment-${s}`}
+              />
+            )
+          })}
+      </div>
+
+      {/* Legend — every section, including 0-byte ones, with its own size. */}
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5" data-testid="drive-meter-legend">
+        {SECTIONS.map((s) => (
+          <div key={s} className="flex items-center gap-1.5 text-[12px]" data-testid={`drive-meter-legend-${s}`}>
+            <span className={`h-2.5 w-2.5 shrink-0 rounded-sm ${SECTION_TONE[s]}`} aria-hidden="true" />
+            <span className="text-muted">{i18nT(SECTION_LABEL_ON_PAGE[s])}</span>
+            <span className="font-mono text-text">{fmtBytes(usage.sections[s].bytes)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * One section as a Google-Drive-style folder card.
+ *
+ * The whole card is the control that opens the section — the same navigation
+ * the old row carried on `setSection`. It stays a real `<button>`, so it keeps
+ * button semantics (focusable, Enter/Space activation) for free rather than
+ * re-implementing role/tabIndex/onKeyDown by hand. The `data-testid` the tests
+ * resolve (`drive-section-<s>`) stays on that button.
+ */
+function SectionCard({ section, usage, onOpen }: {
+  section: DriveSection
+  usage: DriveSectionUsage
+  onOpen: () => void
+}) {
+  const Icon = SECTION_ICON[section]
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex flex-col gap-2 rounded-lg border border-border bg-card p-4 text-left cursor-pointer hover:bg-bg-hover hover:border-accent/40 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      data-testid={`drive-section-${section}`}
+    >
+      <div className="flex items-center gap-2">
+        <Icon size={16} className="shrink-0 text-accent" />
+        <span className="min-w-0 flex-1 truncate text-[14px] font-semibold text-text-strong">
+          {i18nT(SECTION_LABEL_ON_PAGE[section])}
+        </span>
+        <span className="shrink-0 font-mono text-[13px] text-text" data-testid={`drive-section-size-${section}`}>
+          {fmtBytes(usage.bytes)}
+        </span>
+      </div>
+      <p className="text-[12px] leading-snug text-muted">
+        {i18nT(SECTION_DESC_KEY[section])}
+      </p>
+      <div className="mt-auto pt-1 text-[12px] text-muted" data-testid={`drive-section-count-${section}`}>
+        {i18nT('apps.awsControl.console.root_section_objects', { objects: fmtNumber(usage.objects) })}
+      </div>
+    </button>
+  )
+}
+
 /**
  * A drive that EXISTS.
  *
@@ -1033,25 +1777,25 @@ export default function DrivePage({ account, drive: opened, onBack }: {
       <div className="flex-1 overflow-y-auto px-4 pb-6 md:px-6">
         {section === null && (
           <>
-            {/* The bucket's three prefixes, as the folders they are. */}
-            <div className="overflow-hidden rounded-lg border border-border bg-card divide-y divide-border" data-testid="drive-sections">
-              {SECTIONS.map((s) => {
-                const Icon = SECTION_ICON[s]
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => setSection(s)}
-                    className="flex w-full items-center gap-3 px-4 py-3 text-left cursor-pointer bg-transparent border-none hover:bg-bg-hover"
-                    data-testid={`drive-section-${s}`}
-                  >
-                    <Icon size={15} className="shrink-0 text-accent" />
-                    <span className="text-[13px] font-medium text-text-strong">{i18nT(SECTION_LABEL_ON_PAGE[s])}</span>
-                    <span className="flex-1" />
-                    <ChevronRight size={14} className="shrink-0 text-muted" />
-                  </button>
-                )
-              })}
+            {/* The storage meter: totals, plus one bar split by section. */}
+            <StorageMeter usage={drive.usage} />
+
+            {/* The bucket's three prefixes, as folder cards that state their own
+                size. A responsive auto-fill grid so the cards reflow instead of
+                stretching to a full-bleed row with a dead gap at wide widths. */}
+            <div
+              className="grid gap-3"
+              style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(258px, 1fr))' }}
+              data-testid="drive-sections"
+            >
+              {SECTIONS.map((s) => (
+                <SectionCard
+                  key={s}
+                  section={s}
+                  usage={drive.usage.sections[s]}
+                  onOpen={() => setSection(s)}
+                />
+              ))}
             </div>
 
             {/* The share ledger governs links into all three sections, so it

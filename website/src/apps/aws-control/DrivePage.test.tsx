@@ -101,6 +101,11 @@ function stubDrivePresent() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // The grid/list toggle persists per section to localStorage, which outlives a
+  // single test. Without this, a test that switches a section's view silently
+  // changes what every LATER test in the file renders -- the table controls
+  // vanish and the failure points at the wrong test.
+  localStorage.clear()
   vi.mocked(api.awsConsent).mockReturnValue(new Promise(() => {}) as ReturnType<typeof api.awsConsent>)
 })
 
@@ -546,13 +551,81 @@ describe('DrivePage', () => {
     expect(screen.getByTestId('drive-delete-confirm')).toBeTruthy()
   })
 
-  /* ── Library: chip filtering + push flow ─────────────────────────────────── */
+  /* ── Library: the cloud prefix, and the picker that fills it ─────────────── */
 
-  it('filters library tiles by kind chip and pushes an out-of-date artifact', async () => {
+  /**
+   * THE assertion for this section's redesign.
+   *
+   * The Library folder used to render the LOCAL artifact list, so it showed
+   * artifacts that were not in the drive at all -- every one labelled "not
+   * synced" -- while the Files folder beside it sat empty, which left the two
+   * folders impossible to tell apart. It now lists the bucket prefix, so a card
+   * is here if and only if the object is in the cloud. The local library is only
+   * a name/kind lookup for the cards.
+   */
+  it('lists the cloud prefix, not the local artifact library', async () => {
     stubDrivePresent()
+    // One artifact IS in the cloud; a second exists locally and was never pushed.
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({ files: [], folders: ['notes'] })
     vi.mocked(awsControlApi.library).mockResolvedValue({
       artifacts: [
-        // A markdown never synced (pushable), and an image (not pushable).
+        { slug: 'notes', name: 'Notes', kind: 'markdown', version: 3, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: 3, pushedAt: '2026-08-21T00:00:00Z' },
+        { slug: 'draft', name: 'Draft', kind: 'markdown', version: 1, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: null, pushedAt: null },
+      ],
+    })
+
+    await renderDrive('library')
+    await screen.findByTestId('library-section')
+
+    // Exactly the one cloud object -- NOT the two local artifacts.
+    const cards = await screen.findAllByTestId('library-card')
+    expect(cards).toHaveLength(1)
+    // Named from the local lookup, keyed by the prefix folder name.
+    expect(cards[0].textContent).toContain('Notes')
+    // The never-pushed local artifact does not appear in the folder at all.
+    expect(screen.queryByText('Draft')).toBeNull()
+    // And the listing came from the library section of the bucket.
+    expect(awsControlApi.driveList).toHaveBeenCalledWith(ACCOUNT.account, 'library', '', '')
+  })
+
+  it('falls back to a cloud-only card when no local artifact backs the object', async () => {
+    stubDrivePresent()
+    // In the cloud, but the local copy is gone (deleted locally, or pushed from
+    // another machine) -- there is nothing to preview.
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({ files: [], folders: ['orphan'] })
+    vi.mocked(awsControlApi.library).mockResolvedValue({ artifacts: [] })
+
+    await renderDrive('library')
+
+    const card = await screen.findByTestId('library-card')
+    // The slug still identifies it, and the card says why there is no preview.
+    expect(card.textContent).toContain('orphan')
+    expect(screen.getByText(/only/i)).toBeTruthy()
+  })
+
+  it('the empty Library folder sends the reader to the picker', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({ files: [], folders: [] })
+    vi.mocked(awsControlApi.library).mockResolvedValue({
+      artifacts: [
+        { slug: 'draft', name: 'Draft', kind: 'markdown', version: 1, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: null, pushedAt: null },
+      ],
+    })
+
+    await renderDrive('library')
+
+    // The empty state, not a bare "this folder is empty" row.
+    expect(await screen.findByTestId('library-empty')).toBeTruthy()
+    // Its action opens the picker rather than leaving the reader to hunt.
+    fireEvent.click(screen.getByTestId('library-empty-add'))
+    expect(await screen.findByTestId('library-add-dialog')).toBeTruthy()
+  })
+
+  it('the picker filters by kind chip and pushes an artifact into the drive', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({ files: [], folders: [] })
+    vi.mocked(awsControlApi.library).mockResolvedValue({
+      artifacts: [
         { slug: 'notes', name: 'Notes', kind: 'markdown', version: 3, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: null, pushedAt: null },
         { slug: 'pic', name: 'Pic', kind: 'image', version: 1, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: null, pushedAt: null },
       ],
@@ -560,37 +633,238 @@ describe('DrivePage', () => {
     vi.mocked(awsControlApi.libraryPush).mockResolvedValue({ pushed: true, slug: 'notes', version: 3 } as never)
 
     await renderDrive('library')
+    fireEvent.click(await screen.findByTestId('library-add-open'))
+    await screen.findByTestId('library-add-dialog')
 
-    // Both tiles show under "all" (wait for the library query to settle).
-    await screen.findByTestId('library-section')
+    // Both candidates under "all"; the chips live in the picker now.
     expect(await screen.findAllByTestId('library-tile')).toHaveLength(2)
-
-    // Selecting the image chip narrows to the single image tile.
     fireEvent.click(screen.getByTestId('library-chip-image'))
     expect(screen.getAllByTestId('library-tile')).toHaveLength(1)
 
-    // Back to markdown chip, then push the markdown artifact.
     fireEvent.click(screen.getByTestId('library-chip-markdown'))
     fireEvent.click(screen.getByTestId('library-push'))
     await waitFor(() => expect(awsControlApi.libraryPush).toHaveBeenCalledWith(ACCOUNT.account, 'notes'))
   })
 
-  it('shows the library empty state when a filter matches nothing', async () => {
+  /**
+   * An image is refused by the backend (its kind has no pushed-file extension),
+   * and images are the bulk of a real library -- so the card must SAY so. A
+   * disabled button with no reason reads as a broken page.
+   */
+  it('tells the reader why an image cannot be added yet, instead of only disabling', async () => {
     stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({ files: [], folders: [] })
     vi.mocked(awsControlApi.library).mockResolvedValue({
       artifacts: [
-        { slug: 'notes', name: 'Notes', kind: 'markdown', version: 1, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: 1, pushedAt: '2026-08-20T00:00:00Z' },
+        { slug: 'pic', name: 'Pic', kind: 'image', version: 1, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: null, pushedAt: null },
       ],
     })
 
     await renderDrive('library')
+    fireEvent.click(await screen.findByTestId('library-add-open'))
 
-    // Filter to a kind with no artifacts → the empty state renders.
-    fireEvent.click(await screen.findByTestId('library-chip-webapp'))
-    expect(await screen.findByTestId('library-empty')).toBeTruthy()
-    // The synced markdown tile was up-to-date, so its push button is disabled.
-    fireEvent.click(screen.getByTestId('library-chip-markdown'))
-    expect((screen.getByTestId('library-push') as HTMLButtonElement).disabled).toBe(true)
+    expect(await screen.findByTestId('library-not-pushable')).toBeTruthy()
+    // No push control at all on an image card -- nothing to click and be refused.
+    expect(screen.queryByTestId('library-push')).toBeNull()
+  })
+
+  it('the picker searches by name and reports when nothing matches', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({ files: [], folders: [] })
+    vi.mocked(awsControlApi.library).mockResolvedValue({
+      artifacts: [
+        { slug: 'notes', name: 'Notes', kind: 'markdown', version: 1, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: null, pushedAt: null },
+      ],
+    })
+
+    await renderDrive('library')
+    fireEvent.click(await screen.findByTestId('library-add-open'))
+    await screen.findByTestId('library-tile')
+
+    fireEvent.change(await screen.findByTestId('library-add-search'), { target: { value: 'zzz' } })
+    expect(screen.queryByTestId('library-tile')).toBeNull()
+    expect(screen.getByTestId('library-add-none')).toBeTruthy()
+  })
+
+  /* ── Review fixes: capability parity, honest counts, no self-contradiction ── */
+
+  /**
+   * Grid mode is a way of LOOKING at a folder, not a capability tier.
+   *
+   * The first cut gave grid cards only a Download link, so a reader who
+   * preferred tiles lost Share and Delete -- and because the choice persists per
+   * section, they lost them on every future visit with nothing to tell them the
+   * controls existed.
+   */
+  it('grid mode carries the same actions the table rows carry', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({
+      files: [{ key: 'a.txt', size: 10, modified: '2026-08-20T00:00:00Z' }],
+      folders: ['invoices'],
+    })
+
+    await renderDrive('drive')
+    fireEvent.click(await screen.findByTitle('Grid view'))
+    await screen.findByTestId('drive-grid')
+
+    // A file tile keeps Download AND gains the overflow the list row has.
+    expect(screen.getByTestId('drive-grid-download')).toBeTruthy()
+    expect(screen.getByTestId('drive-grid-more')).toBeTruthy()
+    // A folder tile is no longer action-less.
+    expect(screen.getByTestId('drive-grid-folder-more')).toBeTruthy()
+  })
+
+  /** A Delete offered in grid mode must actually be able to complete. */
+  it('grid mode renders its own delete confirmation', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({
+      files: [{ key: 'a.txt', size: 10, modified: '2026-08-20T00:00:00Z' }],
+      folders: [],
+    })
+    vi.mocked(awsControlApi.driveDelete).mockResolvedValue({ deleted: true } as never)
+
+    await renderDrive('drive')
+    fireEvent.click(await screen.findByTitle('Grid view'))
+    await screen.findByTestId('drive-grid')
+
+    // The confirm strips live inside the TABLE, so grid mode needs its own or the
+    // action sets state and nothing ever renders.
+    // Enter on the trigger, matching how the row-overflow tests above open it:
+    // the menu is a portaled Radix dropdown, which a bare click does not open.
+    fireEvent.keyDown(screen.getByTestId('drive-grid-more'), { key: 'Enter' })
+    fireEvent.click(await screen.findByTestId('drive-grid-delete'))
+    expect(await screen.findByTestId('drive-grid-confirm')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('drive-grid-confirm-action'))
+    await waitFor(() => expect(awsControlApi.driveDelete).toHaveBeenCalledWith(ACCOUNT.account, 'drive', 'a.txt'))
+  })
+
+  /**
+   * The empty state's primary button counts what can be added, not what exists.
+   *
+   * Images cannot be pushed and are the bulk of a real library, so counting them
+   * made the first-run CTA promise work the picker then refuses.
+   */
+  it('the ready-to-add count excludes artifacts that cannot be added', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({ files: [], folders: [] })
+    vi.mocked(awsControlApi.library).mockResolvedValue({
+      artifacts: [
+        { slug: 'notes', name: 'Notes', kind: 'markdown', version: 1, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: null, pushedAt: null },
+        { slug: 'pic', name: 'Pic', kind: 'image', version: 1, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: null, pushedAt: null },
+        { slug: 'pic2', name: 'Pic2', kind: 'image', version: 1, updatedAt: '2026-08-20T00:00:00Z', pushedVersion: null, pushedAt: null },
+      ],
+    })
+
+    await renderDrive('library')
+    const cta = await screen.findByTestId('library-empty-add')
+    // One addable markdown, not three artifacts.
+    expect(cta.textContent).toContain('1')
+    expect(cta.textContent).not.toContain('3')
+  })
+
+  /** "In the cloud only" and "In the drive" on one card are two answers to one question. */
+  it('a cloud-only card does not also claim to be in the drive', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({ files: [], folders: ['orphan'] })
+    vi.mocked(awsControlApi.library).mockResolvedValue({ artifacts: [] })
+
+    await renderDrive('library')
+    const card = await screen.findByTestId('library-card')
+
+    expect(card.textContent).toMatch(/only/i)
+    // The footer that would have said "In the drive" is suppressed, and the slug
+    // is not printed twice when it is already serving as the name.
+    expect(card.textContent).not.toMatch(/In the drive/i)
+    expect(card.textContent!.match(/orphan/g)).toHaveLength(1)
+  })
+
+  it('the picker closes on Escape, not only on its X', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({ files: [], folders: [] })
+
+    await renderDrive('library')
+    fireEvent.click(await screen.findByTestId('library-add-open'))
+    expect(await screen.findByTestId('library-add-dialog')).toBeTruthy()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByTestId('library-add-dialog')).toBeNull())
+  })
+
+  /** "Load more" must ADD to what is on screen, not replace it. */
+  it('load more appends the next page instead of swapping it', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.library).mockResolvedValue({ artifacts: [] })
+    vi.mocked(awsControlApi.driveList)
+      .mockResolvedValueOnce({ files: [], folders: ['first'], nextToken: 'tok' })
+      .mockResolvedValueOnce({ files: [], folders: ['second'] })
+
+    await renderDrive('library')
+    expect(await screen.findAllByTestId('library-card')).toHaveLength(1)
+
+    fireEvent.click(screen.getByTestId('library-load-more'))
+    // Both pages are on screen -- the first did not vanish.
+    await waitFor(() => expect(screen.getAllByTestId('library-card')).toHaveLength(2))
+    const text = screen.getByTestId('library-grid').textContent!
+    expect(text).toContain('first')
+    expect(text).toContain('second')
+  })
+
+  /**
+   * Every kind the backend can hand us must render a label, not a blank badge.
+   *
+   * `list_pushable` returns `artifact.kind` VERBATIM from the store's
+   * ALLOWED_KINDS, with no filtering, and `_KIND_EXT` makes svg and text
+   * pushable too -- so a union that listed only six kinds did not make the other
+   * two unreachable, it just stopped the compiler from noticing their badge
+   * resolved to `undefined`. A QA capture caught an SVG artifact rendering an
+   * empty badge in the Library list. This is the ratchet: the list below is the
+   * backend's set, so adding a kind there without a label here fails HERE.
+   */
+  it('renders a label for every artifact kind the backend can return', async () => {
+    const BACKEND_KINDS = ['widget', 'html', 'markdown', 'svg', 'json', 'text', 'image', 'webapp'] as const
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({ files: [], folders: [] })
+    vi.mocked(awsControlApi.library).mockResolvedValue({
+      artifacts: BACKEND_KINDS.map((kind, i) => ({
+        slug: `a${i}`, name: `A${i}`, kind, version: 1,
+        updatedAt: '2026-08-20T00:00:00Z', pushedVersion: null, pushedAt: null,
+      })),
+    })
+
+    await renderDrive('library')
+    fireEvent.click(await screen.findByTestId('library-add-open'))
+    await screen.findByTestId('library-add-dialog')
+
+    // One chip per kind, and not one of them is blank.
+    for (const kind of BACKEND_KINDS) {
+      const chip = screen.getByTestId(`library-chip-${kind}`)
+      // The chip carries a label plus its count; strip the digits and require
+      // something legible is left.
+      expect(chip.textContent!.replace(/\d+/g, '').trim(), `${kind} chip label`).not.toBe('')
+    }
+    // ...and every card's kind badge resolved too.
+    const tiles = await screen.findAllByTestId('library-tile')
+    expect(tiles).toHaveLength(BACKEND_KINDS.length)
+  })
+
+  it('remembers the view mode per section, so Files opens as a table', async () => {
+    stubDrivePresent()
+    vi.mocked(awsControlApi.driveList).mockResolvedValue({
+      files: [{ key: 'a.txt', size: 10, modified: '2026-08-20T00:00:00Z' }],
+      folders: [],
+    })
+
+    await renderDrive('drive')
+
+    // Files holds arbitrary uploads with comparable columns, so it opens listed.
+    expect(await screen.findByTestId('drive-listing')).toBeTruthy()
+    expect(screen.queryByTestId('drive-grid')).toBeNull()
+    // ...and the toggle switches it to tiles. The control is the shared
+    // SegmentedControl (the same one the Artifacts gallery uses for grid/table),
+    // so the segment is addressed by its accessible name rather than a testid of
+    // its own.
+    fireEvent.click(screen.getByTitle('Grid view'))
+    expect(await screen.findByTestId('drive-grid')).toBeTruthy()
   })
 
   /* ── Share: error branch, and cancel via the close button ────────────────── */
