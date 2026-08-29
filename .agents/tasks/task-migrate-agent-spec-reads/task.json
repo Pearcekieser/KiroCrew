@@ -1,7 +1,24 @@
 {
   "task_id": "task-migrate-agent-spec-reads",
   "task_description": "Migrate the seven remaining hand-rolled agent-spec reads (plain `json.loads(path.read_text())` over the user-writable agents dir) onto agent_discovery._read_agent_spec, the one hardened reader (size cap, sensitive-symlink refusal, UTF-8/AppleDouble screening, non-object-JSON rejection). Introduce a single shared name->model helper (agent_model_map) to collapse the three divergent name->model scan spellings (_resolve_agent_model, _build_kiro_model_map, list_agents) at the root. Preserve each caller's existing failure semantics: a refused spec degrades exactly like an absent one, with no new fatal paths. Follow-up to PR #5423 (First Principles review CONCERNS, accepted-and-deferred).",
-  "status": "in_progress",
+  "status": "completed",
   "feature_order": ["FEAT-001", "FEAT-002"],
-  "blocked_reason": null
+  "blocked_reason": null,
+  "verification": {
+    "build": "skipped",
+    "tests": "skipped",
+    "test_quality": "pass",
+    "docker_build": "skipped",
+    "summary": "Network is INTEGRATIONS_ONLY: no .venv, aiohttp/pytest uninstallable (PyPI 403), so `make build`/`make test`/docker build cannot run in-sandbox and are DEFERRED to networked CI (`.venv/bin/pytest -q`). Host verification PASSED: py_compile OK on all changed files; ruff total findings DROPPED 217->212 across the edited source files (no new lint violations); all new test modules pass `ruff check` and `ruff format --check`. Migration completeness confirmed by grep + semantic review: all 7 enumerated sites now read via _read_agent_spec/_read_spec_capped; agent.py rewrite site and the (initially-missed) 8th under-lock PATCH re-read in api_agent_detail are additionally gated on _spec_path_is_safe (write-through copy-out fence); out-of-scope _GLOBAL_MCP_JSON and _installed_agent_config (fixed kirocrew.json/defaults.json) reads correctly untouched. Test quality PASS: new tests plant real oversized/non-utf8/AppleDouble/non-object/symlink-to-sensitive inputs and assert skip-and-continue / 409-not-500 against the actual migrated code paths (revert-sensitive)."
+  },
+  "review": {
+    "passes": 2,
+    "final_verdict": "APPROVED",
+    "v1": "NEEDS_CHANGES — flagged an 8th sibling: the unhardened bare json.loads under-lock re-read in api_agent_detail's PATCH branch (agents.py ~1680), a size-cap/symlink bypass plus a TypeError->500 and write-through copy-out hazard.",
+    "v2": "APPROVED — remediation commit 12aa07c28 routes the authoritative re-read through an offloaded _spec_path_is_safe + _read_agent_spec closure returning 409 agent_changed on refusal; happy path unchanged; two revert-sensitive async regression tests added; completeness re-confirmed.",
+    "artifacts": [
+      ".agents/tasks/task-migrate-agent-spec-reads/2026-08-29-044440-review.md",
+      ".agents/tasks/task-migrate-agent-spec-reads/2026-08-29-045557-review.md"
+    ]
+  }
 }
