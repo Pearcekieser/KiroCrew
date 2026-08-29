@@ -524,6 +524,31 @@ describe('ChatPanel — Subagents', () => {
   })
 })
 
+describe('ChatPanel — Model section immediate feedback', () => {
+  it.each([
+    ['Default Model', 'claude-opus-4.8', 'claude-opus-4.8', { model: 'auto' }],
+    ['Background Model', 'claude-opus-4.8', 'claude-opus-4.8', {}],
+    ['Subagent Model', 'claude-opus-4.8', 'claude-opus-4.8', {}],
+    ['Fallback model', 'Disabled', 'Disabled', {}],
+    ['Default Reasoning Effort', 'High', 'High', { model: 'claude-opus-4.8' }],
+    ['Background Effort', 'High', 'High', {
+      role_models: { background: 'claude-opus-4.8' },
+    }],
+    ['Subagent Effort', 'High', 'High', {
+      role_models: { subagent: 'claude-opus-4.8' },
+    }],
+  ])('%s reflects its selection while the PATCH is pending', async (label, option, expected, agent) => {
+    seedMc({ agent })
+    patchConfigMock.mockImplementationOnce(() => new Promise(() => {}) as never)
+    wrap()
+    await openSelect(label)
+    fireEvent.click(screen.getByRole('option', { name: option }))
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: label })).toHaveTextContent(expected)
+    )
+  })
+})
+
 describe('ChatPanel — per-role models', () => {
   it.each([
     ['Background Model', 'agent.role_models.background'],

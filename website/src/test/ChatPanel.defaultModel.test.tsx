@@ -167,6 +167,22 @@ describe('ChatPanel — default reasoning effort', () => {
     )
   })
 
+  it('updates the selected effort before the PATCH finishes', async () => {
+    let resolvePatch: (() => void) | undefined
+    patchConfigMock.mockImplementationOnce(() => new Promise<void>(resolve => { resolvePatch = resolve }) as never)
+    wrap(<ChatPanel />)
+    await openSelect('Default Reasoning Effort')
+    fireEvent.click(screen.getByRole('option', { name: 'Extra High' }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Default Reasoning Effort' })).toHaveTextContent(
+        'Extra High'
+      )
+    )
+    expect(resolvePatch).toBeTypeOf('function')
+    resolvePatch?.()
+  })
+
   it('clears back to the model default with an empty value, not a sentinel', async () => {
     seed({ model: 'claude-opus-4.8', reasoning_effort: 'high' })
     wrap(<ChatPanel />)
@@ -192,11 +208,21 @@ describe('ChatPanel — default reasoning effort', () => {
     expect(screen.getAllByTitle(/reasoning-capable/).length).toBeGreaterThan(0)
   })
 
-  it('surfaces an error banner when the write fails', async () => {
+  it('surfaces an error banner and rolls back when the write fails', async () => {
     patchConfigMock.mockImplementationOnce(() => Promise.reject(new Error('boom')) as never)
+    kirocrewConfigMock
+      .mockImplementationOnce(() => Promise.resolve({
+        agent: { model: 'claude-opus-4.8', reasoning_effort: '' },
+      }) as never)
+      .mockImplementation(() => new Promise(() => {}) as never)
     wrap(<ChatPanel />)
     await openSelect('Default Reasoning Effort')
     fireEvent.click(screen.getByRole('option', { name: 'High' }))
     expect(await screen.findByText(/Failed to save default reasoning effort/)).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Default Reasoning Effort' })).toHaveTextContent(
+        'Model default'
+      )
+    )
   })
 })

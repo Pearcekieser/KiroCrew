@@ -169,6 +169,28 @@ export function ChatPanel() {
   })
   const mcCfg = mcQ.data
 
+  const optimisticAgentMutation = (
+    updateAgent: (
+      agent: NonNullable<NonNullable<typeof mcCfg>['agent']>,
+      value: string,
+    ) => NonNullable<NonNullable<typeof mcCfg>['agent']>,
+    errorMessage: (error: unknown) => string,
+  ) => ({
+    onMutate: async (value: string) => {
+      await qc.cancelQueries({ queryKey: ['kirocrewConfig'] })
+      const previous = qc.getQueryData<typeof mcCfg>(['kirocrewConfig'])
+      qc.setQueryData<typeof mcCfg>(['kirocrewConfig'], current => current
+        ? { ...current, agent: updateAgent(current.agent ?? {}, value) }
+        : current)
+      return { previous }
+    },
+    onError: (error: unknown, _value: string, ctx: { previous: typeof mcCfg } | undefined) => {
+      if (ctx?.previous) qc.setQueryData(['kirocrewConfig'], ctx.previous)
+      setSaveError(errorMessage(error))
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
+  })
+
   // ── User profile (About You) ──
   // Same slugs as onboarding step 2 (OnboardingFlow.tsx), validated by the
   // config PATCH allowlist (handlers/core.py) and mapped to the prompt's
@@ -248,13 +270,13 @@ export function ChatPanel() {
   const fallbackModel = mcCfg?.agent?.fallback_model ?? 'auto'
   const fallbackMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.fallback_model', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: (err: unknown) => {
-      // Surface the backend's actual deny reason (e.g. an unentitled id)
-      // next to the generic failure line.
-      const reason = err instanceof Error && err.message ? `: ${err.message}` : ''
-      setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_fallback_model') + reason)
-    },
+    ...optimisticAgentMutation(
+      (agent, value) => ({ ...agent, fallback_model: value }),
+      (err) => {
+        const reason = err instanceof Error && err.message ? `: ${err.message}` : ''
+        return i18nT('pages.settings.chatPanel.failed_to_save_fallback_model') + reason
+      },
+    ),
   })
   const fallbackModelOptions = (current: string): string[] => {
     const opts = ['', 'auto', ...availableModels.map(m => m.name).filter(m => m !== 'auto')]
@@ -312,8 +334,10 @@ export function ChatPanel() {
 
   const defaultModelMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.model', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_default_model')),
+    ...optimisticAgentMutation(
+      (agent, value) => ({ ...agent, model: value }),
+      () => i18nT('pages.settings.chatPanel.failed_to_save_default_model'),
+    ),
   })
 
   const defaultEffort = mcCfg?.agent?.reasoning_effort ?? ''
@@ -323,8 +347,10 @@ export function ChatPanel() {
   const effortSupported = modelSupportsEffort(defaultModel)
   const defaultEffortMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.reasoning_effort', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_default_reasoning_effort')),
+    ...optimisticAgentMutation(
+      (agent, value) => ({ ...agent, reasoning_effort: value }),
+      () => i18nT('pages.settings.chatPanel.failed_to_save_default_reasoning_effort'),
+    ),
   })
 
   // ── Per-role model defaults (agent.role_models) ──
@@ -347,13 +373,23 @@ export function ChatPanel() {
     opts.map(m => (m === 'auto' ? i18nT('pages.settings.chatPanel.role_model_auto') : m))
   const backgroundModelMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.role_models.background', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_model')),
+    ...optimisticAgentMutation(
+      (agent, value) => ({
+        ...agent,
+        role_models: { ...agent.role_models, background: value },
+      }),
+      () => i18nT('pages.settings.chatPanel.failed_to_save_role_model'),
+    ),
   })
   const subagentModelMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.role_models.subagent', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_model')),
+    ...optimisticAgentMutation(
+      (agent, value) => ({
+        ...agent,
+        role_models: { ...agent.role_models, subagent: value },
+      }),
+      () => i18nT('pages.settings.chatPanel.failed_to_save_role_model'),
+    ),
   })
 
   // Per-role reasoning effort, paired with each role's model. Empty inherits the
@@ -373,13 +409,23 @@ export function ChatPanel() {
   const effortLabels = EFFORT_LEVELS.map(l => (l === '' ? i18nT('pages.settings.chatPanel.model_default') : effortLabel(l)))
   const backgroundEffortMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.role_efforts.background', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_effort')),
+    ...optimisticAgentMutation(
+      (agent, value) => ({
+        ...agent,
+        role_efforts: { ...agent.role_efforts, background: value },
+      }),
+      () => i18nT('pages.settings.chatPanel.failed_to_save_role_effort'),
+    ),
   })
   const subagentEffortMut = useMutation({
     mutationFn: (v: string) => api.patchConfig('agent.role_efforts.subagent', v),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['kirocrewConfig'] }),
-    onError: () => setSaveError(i18nT('pages.settings.chatPanel.failed_to_save_role_effort')),
+    ...optimisticAgentMutation(
+      (agent, value) => ({
+        ...agent,
+        role_efforts: { ...agent.role_efforts, subagent: value },
+      }),
+      () => i18nT('pages.settings.chatPanel.failed_to_save_role_effort'),
+    ),
   })
 
   // ── Local chat config (localStorage) ──
