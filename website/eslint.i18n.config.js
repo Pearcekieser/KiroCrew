@@ -853,7 +853,10 @@ export default [
               // fixed vocabulary (`message_sent`, `tool_call`, `approval_required`), read
               // by the behaviour state machine, never rendered.
               '^report[A-Z]\\w*$', '^pickFile$',
-              'querySelector(All)?', 'getElementById', 'createElement',
+              // `closest` takes the same CSS-selector contract as querySelector:
+              // its argument is an attribute/type selector walked up the tree,
+              // never rendered copy.
+              'querySelector(All)?', 'closest', 'getElementById', 'createElement',
               'addEventListener', 'removeEventListener', 'matchMedia',
               // WebGL/DOM capability lookups take registry identifiers
               // (`WEBGL_lose_context`), which are mixed-case and so escape the
