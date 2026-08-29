@@ -192,6 +192,78 @@ no longer destroy older turns.
   patiently to a bounded deadline. The same discipline applies to every other
   session-JSONL writer: `clear_closed` (resume un-flags `closed` under `_locked`,
   offloaded via `asyncio.to_thread`) and all `history.py` mutators hold `_locked`.
+- **Delete-won guard**: `delete_session` unlinks the session file under the
+  same `_locked` and leaves no tombstone, and the patient off-loop acquire
+  means a save can legitimately sit waiting while a permanent delete runs to
+  completion ahead of it. Inside the lock, before any `mkdir`/`atomic_write`,
+  the save therefore aborts cleanly (no write, no error — the flush loop
+  clears `_dirty`) when the file is gone AND the slot has OBSERVED its session
+  on disk. The observation witness is `_disk_meta_created_at` — recorded
+  exactly at the hydrate sites and at each committed save, nowhere else — and
+  it is the SOLE gate: the window counters take no part in either direction,
+  because fork/transfer set `_resumed_count` optimistically after a
+  best-effort first save (a transient first-write failure must not read as a
+  deletion and eat the retry), and a restored zero-message session has
+  all-zero counters while its delete must still win against the save of its
+  first message. A delete that already
+  reported success is not silently undone. Only `FileNotFoundError` from
+  `stat` counts as the delete witness; any other failure (permissions, device
+  not ready) propagates and leaves the retry armed. A file that EXISTS can
+  also be delete-won: `delete_session` leaves no tombstone, so a foreign
+  append landing after the delete creates a fresh file — the save tells the
+  incarnations apart by the metadata `created_at` (the file's identity, which
+  a save always carries forward and which therefore never changes for a
+  continuously-existing file) against `_disk_meta_created_at`, the identity
+  the slot last observed at restore or at its own save; a known-vs-known
+  mismatch aborts rather than merging the deleted window into the new
+  transcript, while a readable-but-absent `created_at` (legacy meta) fails
+  open. The metadata is read through `get_metadata_status`, and an UNREADABLE
+  line fails CLOSED: the save raises (leaving `_dirty` armed for the flush
+  retry) and `session_was_deleted` returns True (the copy is refused,
+  retryably) — a transient read failure must not blank the identity
+  comparison and let deleted content overwrite a replacement session. A brand-new slot's first
+  save has none of that evidence and creates the file normally. The abort
+  returns `False` (every other completion returns `True`), and
+  `save_slot_off_loop` forwards it — for BOTH `best_effort` modes the skip
+  raises nothing, so a clean return no longer proves a committed write.
+  Callers that republish the slot's content elsewhere check it: the fork
+  aborts with 409 and the transfer export refuses the bundle, because a copy
+  made from the surviving in-memory window would resurrect the destroyed
+  conversation under a fresh key whose own save carries no delete evidence.
+  Because the periodic 5s flush can hit the guard FIRST and clear `_dirty` —
+  after which fork/transfer skip their dirty-gated flush arms and never see
+  the `False` — both also call `session_was_deleted(state, slot)` directly at
+  their copy choke points: the same evidence + stat-ENOENT witness, answered
+  independently of flush ordering (lock-free, safe because a permanent delete
+  never un-happens). Being lock-free also means the delete can land INSIDE the
+  probe, between its stat and its metadata read, and `get_metadata_status`
+  reports a vanished file as a genuine `({}, True)` -- so an empty `created_at`
+  is re-stated before it is trusted, which is what tells "legacy metadata"
+  (fails open) from "deleted a moment ago" (refuses). The save's guard needs no
+  equivalent: it reads the metadata and stats the path inside `_locked`, the
+  lock `delete_session` unlinks under, so no delete can interleave between its
+  two reads.
+  A single pre-copy probe is not enough, because writing the copy is itself an
+  await that does not serialise against the source's delete: the transfer
+  re-probes after bundle assembly, and the fork re-probes after its DESTINATION
+  save, both before the copy is acknowledged. The boundary a handler owns is
+  ACKNOWLEDGMENT — a delete committing before it wins, and the fork therefore
+  removes the destination transcript it had already written (`delete_session`
+  on the destination key, off-loop) and pops the never-broadcast slot before
+  answering 409; a delete committing after the copy is acknowledged is out of
+  scope and the copy survives its source, the way a repo fork outlives what it
+  came from. Rolling the destination back cannot harm the source (different
+  key, different lock), so the fail-closed probe costs at worst a retryable
+  409. If that removal itself fails the copy stays on disk and is logged at
+  ERROR — the one case that still needs a human.
+  Archival callers (close/cleanup) ignore it — the delete already disposed of
+  what they were archiving. Residuals: a slot that never observed its session
+  on disk (fresh slot adopting an existing key whose file is deleted while it
+  waits) still recreates — the writer-recreates case `delete_session`'s
+  docstring already accepts; and for a slot the delete's cleanup cannot pop
+  (e.g. a cron-linked tab whose slot key matches none of the spellings the
+  cleanup probes), the abort latches — every later save of new activity is
+  skipped, which is why the skip logs at WARNING with the slot key.
 - **Turn persistence is offloaded through ONE choke point**
   (`save_conversation_turn_off_loop`, `llm_helpers.py`): `save_conversation_turn`
   makes TWO `append` calls, so an on-loop caller pays ~24 ms of loop time per turn

@@ -5766,6 +5766,10 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
     # so the auto-titler can still name it on the next turn.
     if meta.get("created_at"):
         slot.created_at = meta["created_at"]
+    # The identity of the transcript this resume read — lets a later save
+    # recognize a file recreated by another writer after a permanent delete
+    # (the delete-won guard in ``_save_slot_to_history``).
+    slot._disk_meta_created_at = str(meta.get("created_at") or "")
     # On a member key the pin came from the BINDING at slot creation above and
     # metadata may not override it (same tamperable file the guard refused to
     # trust). On an ordinary key, mode="member" may not ride in either — the

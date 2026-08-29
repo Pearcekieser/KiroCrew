@@ -8,7 +8,7 @@ import logging
 from aiohttp import web
 
 from kiro_crew.config.loader import KiroCrewConfig
-from kiro_crew.dashboard.chat_persistence import save_slot_off_loop
+from kiro_crew.dashboard.chat_persistence import save_slot_off_loop, session_was_deleted
 from kiro_crew.dashboard.chat_utils import (
     _sync_dashboard_slots,
     effective_session_key,
@@ -257,7 +257,9 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
                         # (``test_a_first_entry_pending_rewrite_save_archives_as_
                         # before`` pins that). Stating it here removes the dependence
                         # on that promotion, which is the thing that silently failed.
-                        await save_slot_off_loop(state, slot, rewrite=True, best_effort=False)
+                        saved = await save_slot_off_loop(
+                            state, slot, rewrite=True, best_effort=False
+                        )
                     except Exception:
                         logger.warning(
                             "chat_fork: could not persist the pending rewrite for "
@@ -272,6 +274,24 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
                                 "code": "fork_snapshot_unstable",
                             },
                             status=503,
+                        )
+                    if not saved:
+                        # Delete-won: the source session was permanently deleted
+                        # while this flush awaited the lock. Do not fork — the
+                        # copy would republish the destroyed conversation under
+                        # a fresh key (see the identical check at the plain
+                        # flush site below).
+                        logger.warning(
+                            "chat_fork: source slot=%s was permanently deleted "
+                            "during the pending-rewrite flush; aborting fork",
+                            slot.key,
+                        )
+                        return web.json_response(
+                            {
+                                "error": "the source session was permanently deleted",
+                                "code": "fork_source_deleted",
+                            },
+                            status=409,
                         )
                     # A moved generation means a genuine re-dirty landed across the
                     # await -- i.e. a rewind, whose ``_pending_rewrite`` this save
@@ -510,7 +530,7 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
             # abort the fork (leaving ``_dirty`` set) rather than fork from a
             # partially-persisted source.
             try:
-                await save_slot_off_loop(state, slot, best_effort=False)
+                saved = await save_slot_off_loop(state, slot, best_effort=False)
             except Exception:
                 logger.warning(
                     "chat_fork: durable save of source slot=%s failed; "
@@ -522,10 +542,51 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
                     {"error": "could not persist source session before fork; " "please retry"},
                     status=503,
                 )
+            if not saved:
+                # The delete-won guard skipped the write: the source session was
+                # permanently deleted while the flush awaited the lock. Forking
+                # now would republish the destroyed conversation under a fresh
+                # key (a brand-new slot carries no delete evidence, so ITS save
+                # would proceed) — the exact resurrection the guard exists to
+                # prevent, laundered through a copy. Abort instead; the delete's
+                # reported success stands.
+                logger.warning(
+                    "chat_fork: source slot=%s was permanently deleted during "
+                    "the pre-fork flush; aborting fork",
+                    slot.key,
+                )
+                return web.json_response(
+                    {
+                        "error": "the source session was permanently deleted",
+                        "code": "fork_source_deleted",
+                    },
+                    status=409,
+                )
             slot._resumed_count = len(slot.messages)
             slot._dirty = False
         if not all_messages:
             all_messages = list(slot.messages)
+        # Direct delete check, independent of the flush arms above: if the
+        # periodic 5s flush hit the delete-won guard first, it cleared
+        # ``_dirty`` and this handler's own flush arms never ran — the disk
+        # read came back empty and ``all_messages`` just fell back to the
+        # in-memory window of a permanently deleted conversation. The two
+        # ``saved``-checks above only cover a delete observed by THIS
+        # handler's flush; this probe answers regardless of who consumed the
+        # signal.
+        if session_was_deleted(state, slot):
+            logger.warning(
+                "chat_fork: source slot=%s belongs to a permanently deleted "
+                "session; refusing to fork it",
+                slot.key,
+            )
+            return web.json_response(
+                {
+                    "error": "the source session was permanently deleted",
+                    "code": "fork_source_deleted",
+                },
+                status=409,
+            )
     visible = [m for m in all_messages if m.get("role") in ("user", "assistant")]
     if not visible:
         return web.json_response({"error": "no messages to fork"}, status=400)
@@ -630,6 +691,85 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
             error="fork finalisation failed",
         )
         raise
+    # Acknowledgment boundary. The destination save above is the last await
+    # before this fork is answered, and it takes the DESTINATION's history lock
+    # -- nothing in it serialises against the SOURCE's permanent delete. So a
+    # delete that began after the pre-copy probe passed can commit inside that
+    # await, and the copy now on disk is a conversation the user has since
+    # destroyed. ``build_transfer_bundle_async`` already closes its equivalent
+    # window by re-probing after bundle assembly and before the peer send is
+    # acknowledged; this is the same rule at the same boundary, for the copy
+    # this handler makes.
+    #
+    # A delete that commits AFTER this point is deliberately out of scope: a
+    # fork acknowledged while its source was alive is its own session and
+    # survives the source, the way a repo fork outlives what it came from.
+    # Acknowledgment is the only boundary a handler owns, so it is the line
+    # drawn here.
+    if session_was_deleted(state, slot):
+        # Roll the destination back. It has been neither acknowledged nor
+        # broadcast (``push_slots_update`` is below, and every ``append`` above
+        # passed ``broadcast=False``), so nothing outside this handler has seen
+        # it: removing it leaves no trace of the deleted conversation instead of
+        # a fresh key holding a full copy. Removing the destination cannot harm
+        # the source -- different key, different lock -- so a false positive
+        # here (``session_was_deleted`` fails CLOSED when a stat or metadata
+        # read is unverifiable) costs a retryable 409 against a still-live
+        # source, not data.
+        removed = False
+        if state.conversation_log is not None:
+            try:
+                removed = bool(
+                    await asyncio.to_thread(
+                        state.conversation_log.delete_session,
+                        slot_history_key(new_slot),
+                    )
+                )
+            except Exception:
+                removed = False
+                logger.warning(
+                    "chat_fork: removing the unacknowledged fork transcript for %s raised",
+                    new_slot.key,
+                    exc_info=True,
+                )
+        state._slots.pop(new_slot.key, None)
+        if removed:
+            logger.warning(
+                "chat_fork: source slot=%s was permanently deleted during the "
+                "destination save; removed the unacknowledged fork %s",
+                slot.key,
+                new_slot.key,
+            )
+        else:
+            # The copy is still on disk and WILL be listed in Older Sessions.
+            # Loud, because this is the resurrection the guard exists to
+            # prevent and it now needs a human -- but still a 409: reporting
+            # success would additionally hide it.
+            logger.error(
+                "chat_fork: source slot=%s was permanently deleted during the "
+                "destination save, but the fork transcript for %s could not be "
+                "removed; a copy of the deleted conversation remains on disk",
+                slot.key,
+                new_slot.key,
+            )
+        sel().log_api_access(
+            caller=request_app or "dashboard",
+            operation="chat.slot_fork",
+            outcome="denied",
+            source="dashboard",
+            resources=(
+                f"from={slot.key},to={new_slot.key},"
+                f"rollback={'removed' if removed else 'failed'}"
+            ),
+            error="source session permanently deleted during the destination save",
+        )
+        return web.json_response(
+            {
+                "error": "the source session was permanently deleted",
+                "code": "fork_source_deleted",
+            },
+            status=409,
+        )
     sel().log_api_access(
         caller=request_app or "dashboard",
         operation="chat.slot_fork",

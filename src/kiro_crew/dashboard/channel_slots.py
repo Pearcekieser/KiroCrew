@@ -245,9 +245,7 @@ def needs_default_filing(meta: dict[str, Any]) -> bool:
     first surface happens exactly once per conversation.
     """
     return not (
-        meta.get("folder_id")
-        or meta.get("channel_folder_filed")
-        or meta.get("channel_origin")
+        meta.get("folder_id") or meta.get("channel_folder_filed") or meta.get("channel_origin")
     )
 
 
@@ -300,9 +298,7 @@ def surface_channel_session(
         )
         session_key = ""
     if not session_key:
-        logger.info(
-            "channel surface: %s has no mapped session key; surfacing unbound", stem
-        )
+        logger.info("channel surface: %s has no mapped session key; surfacing unbound", stem)
     try:
         slot = state.get_or_create_slot(
             name=slot_name,
@@ -321,6 +317,12 @@ def surface_channel_session(
     slot._titled = bool(raw_title)
     if meta.get("created_at"):
         slot.created_at = meta["created_at"]
+    # The identity of the transcript this surfacing read — lets a later save
+    # recognize a file recreated by another writer after a permanent delete
+    # (the delete-won guard in ``_save_slot_to_history``). Channel slots adopt
+    # append-created transcripts, so the observed on-disk value is the only
+    # honest anchor (the slot's own construction time never matches it).
+    slot._disk_meta_created_at = str(meta.get("created_at") or "")
     if meta.get("model"):
         slot.model = meta["model"]
     if meta.get("workspace"):
@@ -424,7 +426,7 @@ def _window_matches_disk(slot: "_ChatSlot", messages: list[dict[str, Any]]) -> b
     window = slot.messages
     if older + len(window) > len(messages):
         return False
-    expected = messages[older:older + len(window)]
+    expected = messages[older : older + len(window)]
     for mem, disk in zip(window, expected):
         if (
             mem.get("role") != disk.get("role")
@@ -435,9 +437,7 @@ def _window_matches_disk(slot: "_ChatSlot", messages: list[dict[str, Any]]) -> b
     return True
 
 
-def refresh_channel_window(
-    slot: "_ChatSlot", messages: list[dict[str, Any]], mtime: float
-) -> int:
+def refresh_channel_window(slot: "_ChatSlot", messages: list[dict[str, Any]], mtime: float) -> int:
     """Bring a bound slot's in-memory window up to date with its transcript.
 
     The tab and the channel write one file, but the tab's window is a snapshot
@@ -736,9 +736,7 @@ async def _reconcile_channel_slots_locked(state: "DashboardState", window_minute
     # fails the next pass re-qualifies them from the same (now-unflagged)
     # state.
     reactivated = [
-        s.get("key", "")
-        for s in pending
-        if (metadata.get(s.get("key", "")) or {}).get("closed")
+        s.get("key", "") for s in pending if (metadata.get(s.get("key", "")) or {}).get("closed")
     ]
     if reactivated:
 
@@ -820,9 +818,7 @@ async def _reconcile_channel_slots_locked(state: "DashboardState", window_minute
             # now existing is the evidence that happened — filing over it would
             # restore the default folder after the next restart.
             if channel_slot_name(key) in state._slots:
-                logger.debug(
-                    "channel reconcile: %s surfaced while this pass ran; not filing", key
-                )
+                logger.debug("channel reconcile: %s surfaced while this pass ran; not filing", key)
                 to_file = ""
         if to_file:
             # Persist the placement BEFORE the slot becomes visible.
@@ -857,7 +853,8 @@ async def _reconcile_channel_slots_locked(state: "DashboardState", window_minute
                 # filed again by the next pass. Leave the conversation unfiled
                 # and let a later pass retry.
                 logger.warning(
-                    "channel reconcile: could not persist folder filing for %s", key,
+                    "channel reconcile: could not persist folder filing for %s",
+                    key,
                     exc_info=True,
                 )
                 to_file = ""

@@ -2794,6 +2794,7 @@ class _ChatSlot:
         "_disk_older_count",
         "_disk_older_durable_count",
         "_disk_window_len",
+        "_disk_meta_created_at",
         "_disk_tail_ts",
         "_frozen_prefix_cache",
         "_pending_rewrite",
@@ -3249,6 +3250,17 @@ class _ChatSlot:
         # watermark is what makes the #8 trim credit safe. It is NOT a fragile
         # "what to append" counter — saves always re-serialize the WHOLE window.
         self._disk_window_len: int = 0
+        # The ``created_at`` of the on-disk metadata line this slot LAST
+        # OBSERVED (at restore or at its own save). This is the session file's
+        # identity: ``delete_session`` removes the file and a later writer
+        # (e.g. a channel/cron ``append_off_loop``) creates a FRESH one with a
+        # new ``created_at``, so a pending save comparing the current on-disk
+        # value against this field can tell "the same file I knew" from "a
+        # different file born after my session was permanently deleted" — the
+        # delete-won guard in ``_save_slot_to_history`` refuses to merge the
+        # deleted window into the latter. Empty means "never observed a disk
+        # identity" (fresh slot), which the guard treats as no evidence.
+        self._disk_meta_created_at: str = ""
         # The newest ``ts`` seen on disk at the last save, INCLUDING rows this
         # slot never observed. A subagent, cron, or CLI appending to a session a
         # live tab also has open writes rows that ``_save_slot_to_history``
