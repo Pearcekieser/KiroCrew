@@ -9772,7 +9772,19 @@
       "cutover_staged_run_cmd_to_finish_or_cancel": "Cambio preparado: este worktree se activará la próxima vez que arranque el gateway. Ejecuta `{{cmd}}` para completarlo, o usa el menú de esta fila → Cancelar el cambio preparado para deshacerlo. Hasta entonces el gateway sigue ejecutando el checkout anterior.",
       "keeps_the_live_checkout_the_live_target_and_disc": "Mantiene el checkout activo como destino activo y descarta el cambio preparado hacia {{staged}} (no se reinicia nada)",
       "restarting_completes_the_pending_cutover_boots": "Reiniciar completa el cambio pendiente: el gateway volverá con \"{{staged}}\", no con el checkout actual. El panel se desconectará brevemente y se reconectará automáticamente. Para deshacerlo, usa Cancelar el cambio preparado.",
-      "no_checkout_found_action": "Define la variable de entorno de abajo, o añade dev_fleet.repo_path al config.json de tu directorio de datos de {{productName}} (~/.kiro/crew por defecto) para que persista, y reinicia la puerta de enlace."
+      "no_checkout_found_action": "Define la variable de entorno de abajo, o añade dev_fleet.repo_path al config.json de tu directorio de datos de {{productName}} (~/.kiro/crew por defecto) para que persista, y reinicia la puerta de enlace.",
+      "pod_memory_of_ceiling": "Memoria del pod usada frente a su límite de cgroup",
+      "pod_cpu_usage": "Uso de CPU del pod",
+      "pod_task_count": "Número de tareas del pod (procesos/hilos)",
+      "pod_tasks_label": "tareas",
+      "pod_memory": "Memoria: {{value}}",
+      "pod_cpu": "CPU: {{value}}",
+      "pod_tasks": "Tareas: {{value}}",
+      "pod_home_size": "Home del pod: {{value}}",
+      "pod_home_disk": "Disco de homes de pods: {{value}}",
+      "orphan_pods_label": "Homes de pods huérfanos: {{value}}",
+      "total_disk_used_by_running_pod_homes": "Disco total usado por los homes de pods en ejecución",
+      "pod_homes_left_on_disk_with_no_live_pod": "Homes de pods que quedan en disco sin un pod activo"
     },
     "developer": {
       "agentBackendTab": {

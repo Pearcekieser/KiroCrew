@@ -9772,7 +9772,19 @@
       "cutover_staged_run_cmd_to_finish_or_cancel": "Bascule préparée : ce worktree deviendra actif au prochain démarrage de la passerelle. Exécutez `{{cmd}}` pour la terminer, ou utilisez le menu de cette ligne → Annuler la bascule préparée pour revenir en arrière. D'ici là, la passerelle exécute toujours le checkout précédent.",
       "keeps_the_live_checkout_the_live_target_and_disc": "Conserve le checkout actif comme cible active et abandonne la bascule préparée vers {{staged}} (rien ne redémarre)",
       "restarting_completes_the_pending_cutover_boots": "Redémarrer termine la bascule en attente : la passerelle reviendra sur «{{staged}}», pas sur le checkout actuel. Le tableau de bord se déconnectera brièvement puis se reconnectera automatiquement. Pour revenir en arrière, utilisez plutôt Annuler la bascule préparée.",
-      "no_checkout_found_action": "Définissez la variable d'environnement ci-dessous, ou ajoutez dev_fleet.repo_path au config.json de votre répertoire de données {{productName}} (~/.kiro/crew par défaut) pour la rendre permanente, puis redémarrez la passerelle."
+      "no_checkout_found_action": "Définissez la variable d'environnement ci-dessous, ou ajoutez dev_fleet.repo_path au config.json de votre répertoire de données {{productName}} (~/.kiro/crew par défaut) pour la rendre permanente, puis redémarrez la passerelle.",
+      "pod_memory_of_ceiling": "Mémoire du pod utilisée par rapport à son plafond cgroup",
+      "pod_cpu_usage": "Utilisation CPU du pod",
+      "pod_task_count": "Nombre de tâches du pod (processus/threads)",
+      "pod_tasks_label": "tâches",
+      "pod_memory": "Mémoire : {{value}}",
+      "pod_cpu": "CPU : {{value}}",
+      "pod_tasks": "Tâches : {{value}}",
+      "pod_home_size": "Home du pod : {{value}}",
+      "pod_home_disk": "Disque des homes de pods : {{value}}",
+      "orphan_pods_label": "Homes de pods orphelins : {{value}}",
+      "total_disk_used_by_running_pod_homes": "Disque total utilisé par les homes de pods en cours d'exécution",
+      "pod_homes_left_on_disk_with_no_live_pod": "Homes de pods restés sur le disque sans pod actif"
     },
     "developer": {
       "agentBackendTab": {

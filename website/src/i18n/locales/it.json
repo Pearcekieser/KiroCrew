@@ -9772,7 +9772,19 @@
       "cutover_staged_run_cmd_to_finish_or_cancel": "Passaggio preparato: questo worktree diventerà attivo al prossimo avvio del gateway. Esegui `{{cmd}}` per completarlo, oppure usa il menu di questa riga → Annulla il passaggio preparato per annullarlo. Fino ad allora il gateway continua a eseguire il checkout precedente.",
       "keeps_the_live_checkout_the_live_target_and_disc": "Mantiene il checkout attivo come destinazione attiva e scarta il passaggio preparato verso {{staged}} (non viene riavviato nulla)",
       "restarting_completes_the_pending_cutover_boots": "Il riavvio completa il passaggio in sospeso: il gateway ripartirà su \"{{staged}}\", non sul checkout attuale. La dashboard si disconnetterà brevemente e si riconnetterà automaticamente. Per annullare, usa invece Annulla il passaggio preparato.",
-      "no_checkout_found_action": "Imposta la variabile d'ambiente qui sotto, oppure aggiungi dev_fleet.repo_path al config.json nella directory dati di {{productName}} (~/.kiro/crew per impostazione predefinita) per renderla permanente, poi riavvia il gateway."
+      "no_checkout_found_action": "Imposta la variabile d'ambiente qui sotto, oppure aggiungi dev_fleet.repo_path al config.json nella directory dati di {{productName}} (~/.kiro/crew per impostazione predefinita) per renderla permanente, poi riavvia il gateway.",
+      "pod_memory_of_ceiling": "Memoria del pod usata rispetto al limite cgroup",
+      "pod_cpu_usage": "Utilizzo CPU del pod",
+      "pod_task_count": "Numero di task del pod (processi/thread)",
+      "pod_tasks_label": "task",
+      "pod_memory": "Memoria: {{value}}",
+      "pod_cpu": "CPU: {{value}}",
+      "pod_tasks": "Task: {{value}}",
+      "pod_home_size": "Home del pod: {{value}}",
+      "pod_home_disk": "Disco home dei pod: {{value}}",
+      "orphan_pods_label": "Home di pod orfani: {{value}}",
+      "total_disk_used_by_running_pod_homes": "Disco totale usato dagli home dei pod in esecuzione",
+      "pod_homes_left_on_disk_with_no_live_pod": "Home di pod rimasti su disco senza un pod attivo"
     },
     "developer": {
       "agentBackendTab": {

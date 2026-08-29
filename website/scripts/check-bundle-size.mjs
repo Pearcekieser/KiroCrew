@@ -42,8 +42,13 @@ export const CHUNK_BUDGETS = {
   // little with every translated string, which is expected and fine; what this
   // ceiling catches is a NEW library or surface landing in the catalog chunk.
   // The built-in App Store guidance adds one use-case and one configuration
-  // string for each of 23 apps across all 12 shipped catalogs.
-  all: 9750 * KB, // measured 9278 KB after built-in App Store guidance
+  // string for each of 23 apps across all 12 shipped catalogs. Dev Fleet's
+  // per-pod system readout then adds its own strings across the same 12
+  // catalogs, which is what pushed this past 9750 KB. A sibling Dev Fleet PR
+  // (the closed-PR prune group) raises this same constant to the same 9800 KB
+  // for the same reason, so whichever lands second takes a one-line rebase on
+  // this value rather than a disagreement.
+  all: 9800 * KB, // measured 9757 KB after the Dev Fleet pod-system catalog keys
 
   // The i18n RUNTIME — the i18next singleton, `initI18n`, the English catalog —
   // named after `src/i18n/t.ts`. Held separately from `all` above because

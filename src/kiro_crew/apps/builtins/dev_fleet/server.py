@@ -2676,6 +2676,274 @@ async def _provision_reattach_ids() -> dict[str, str]:
     return out
 
 
+# Per-pod system resources (memory / CPU / tasks / home size).
+#
+# The pod units already have CPUAccounting/MemoryAccounting on and systemd
+# tracks MemoryCurrent / CPUUsageNSec / TasksCurrent per unit, plus the
+# unit's own MemoryMax ceiling. We PLUMB that through; we do not collect it.
+# Everything here is best-effort and Linux-only: on macOS (launchd, which
+# emits no MemoryMax/CPUQuota) or any host where the probe fails, the fields
+# are ABSENT (None), never fabricated zeros — the UI hides the readout when a
+# field is absent so a blank pod never reads as "0 B used / 0%".
+# --------------------------------------------------------------------------- #
+
+# Properties fetched in the single batched ``systemctl --user show`` call.
+_POD_RES_PROPS = (
+    # Id first: it is what matches each emitted block back to the unit it
+    # describes. Without it the only pairing available is positional, and a unit
+    # systemd does not know emits no block -- shifting every later record onto
+    # the wrong pod.
+    "Id",
+    "MemoryCurrent",
+    "MemoryMax",
+    "CPUUsageNSec",
+    "TasksCurrent",
+    "MemoryAccounting",
+    "CPUAccounting",
+    # Changes on every unit start, so a CPU sample can be tied to the exact
+    # invocation it was taken from -- see _cpu_percent.
+    "InvocationID",
+)
+
+# CPU% needs two samples: CPUUsageNSec is a monotonic counter, so a percentage
+# is (Δcpu_ns / Δwall_ns) * 100. We keep the PREVIOUS (wall_ns, cpu_ns) per pod
+# unit and report null on the first observation rather than a fake 0% — a
+# fabricated 0 on a busy pod is worse than a blank. Keyed by unit name so a
+# pod that stops and a new pod that reuses the name do not cross samples
+# (the unit name carries the worktree name, which is the pod identity).
+_POD_CPU_SAMPLES: dict[str, tuple[float, int, str]] = {}
+
+# ``du`` over a multi-GB pod HOME is far too expensive to run on every poll,
+# and the fleet payload is polled repeatedly by an open dashboard. Cache the
+# size behind a TTL keyed by unit name: (measured_at_monotonic, size_bytes).
+_POD_HOME_SIZE_CACHE: dict[str, tuple[float, int]] = {}
+_POD_HOME_SIZE_TTL = 60.0  # seconds
+
+
+def _parse_systemctl_records(text: str) -> list[dict[str, str]]:
+    """Split a batched ``systemctl show`` dump into one dict per unit.
+
+    ``systemctl show a b c -p ...`` emits the property block for each unit in
+    argument order, separated by a blank line. Records are returned in that
+    same order so the caller can zip them back to the unit list it asked for.
+    Lines without ``=`` (there should be none) are ignored.
+    """
+    records: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            if current:
+                records.append(current)
+                current = {}
+            continue
+        key, sep, val = line.partition("=")
+        if sep:
+            current[key.strip()] = val.strip()
+    if current:
+        records.append(current)
+    return records
+
+
+def _coerce_uint(raw: str | None) -> int | None:
+    """A non-negative int from a systemd property value, else None.
+
+    systemd reports an unset/unknown numeric property as the sentinel
+    ``[not set]`` or the max-uint ``18446744073709551615`` (``infinity`` for
+    MemoryMax). Those are NOT measurements, so they collapse to None — the
+    caller renders "no ceiling" / absent rather than an absurd byte count.
+    """
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw or not raw.lstrip("-").isdigit():
+        return None
+    val = int(raw)
+    if val < 0 or val >= 0xFFFFFFFFFFFFFFFF:
+        return None
+    return val
+
+
+def _pod_resources_sync(cfg: Any, running_names: list[str]) -> dict[str, dict]:
+    """Batched per-pod resource probe for the RUNNING pods only.
+
+    ONE ``systemctl --user show`` invocation covering every running pod unit,
+    not one subprocess per row. Returns ``{worktree_name: {mem_current,
+    mem_max, cpu_pct, tasks, home_bytes}}`` where any field the host cannot
+    measure is ``None``.
+
+    Linux-only: ``rt.systemctl`` calls ``require_systemd`` which raises off
+    Linux, so the whole probe degrades to ``{}`` (all rows absent) there. Any
+    other failure degrades the same way — never partial fabricated data.
+    """
+    if not running_names:
+        # No pods running is still liveness information: every cached sample now
+        # belongs to a pod that is gone. Returning early WITHOUT pruning left
+        # both caches holding every entry forever -- the CPU samples would then
+        # be compared against a restarted pod's counter, and a stale home size
+        # would keep feeding the fleet total. Prune first, then answer.
+        _POD_CPU_SAMPLES.clear()
+        _POD_HOME_SIZE_CACHE.clear()
+        return {}
+    units = [rt.pod_unit(cfg, n) for n in running_names]
+    prop_args: list[str] = []
+    for prop in _POD_RES_PROPS:
+        prop_args.extend(["-p", prop])
+    try:
+        cp = rt.systemctl("show", *units, *prop_args, timeout=10)
+    except Exception:  # noqa: BLE001 — off-Linux (require_systemd) or probe error
+        return {}
+    records = _parse_systemctl_records(cp.stdout or "")
+    now = time.monotonic()
+    out: dict[str, dict] = {}
+    # Match each record to its unit by the Id systemd echoes back, NOT by
+    # position. `systemctl show` emits blocks in argument order, but a unit it
+    # does not know contributes no block -- so a positional zip would shift every
+    # later record onto the wrong pod and publish one pod's memory and CPU under
+    # another pod's name. Misattributed resource figures are worse than absent
+    # ones: they read as measured. A record whose Id is missing or unknown is
+    # dropped, leaving that pod's fields absent.
+    by_unit = {rec["Id"]: rec for rec in records if rec.get("Id")}
+    for name, unit in zip(running_names, units):
+        rec = by_unit.get(unit)
+        if rec is None:
+            continue
+        mem_current = (
+            _coerce_uint(rec.get("MemoryCurrent")) if rec.get("MemoryAccounting") == "yes" else None
+        )
+        mem_max = _coerce_uint(rec.get("MemoryMax"))
+        tasks = _coerce_uint(rec.get("TasksCurrent"))
+        cpu_pct = _cpu_percent(unit, rec, now)
+        out[name] = {
+            "mem_current": mem_current,
+            "mem_max": mem_max,
+            "cpu_pct": cpu_pct,
+            "tasks": tasks,
+            # Filled in by the caller: the pod-HOME `du` goes through the async
+            # routed chokepoint (`_run_cmd`), which cannot be awaited from this
+            # sync probe. Absent until then, never a fabricated 0.
+            "home_bytes": None,
+        }
+    # Drop CPU samples for pods no longer running so a stopped-then-restarted
+    # pod starts fresh (null on its first new observation) and the dict cannot
+    # grow without bound across a long-lived gateway.
+    for stale in set(_POD_CPU_SAMPLES) - set(units):
+        _POD_CPU_SAMPLES.pop(stale, None)
+    # Same for the home-size cache, which was previously left to expire on its
+    # TTL. A worktree evicted mid-TTL kept a cached size that went on being
+    # summed into the fleet total, so the header reported disk for a pod that no
+    # longer existed -- and the dict grew unbounded besides. Dropping it here
+    # ties both to the same liveness signal.
+    for stale in set(_POD_HOME_SIZE_CACHE) - set(units):
+        _POD_HOME_SIZE_CACHE.pop(stale, None)
+    return out
+
+
+def _cpu_percent(unit: str, rec: dict[str, str], now: float) -> float | None:
+    """CPU% from two CPUUsageNSec samples; None on the first observation.
+
+    Reports None (not 0) the first time a pod is seen and whenever accounting
+    is off or the counter is unreadable, so the UI shows a blank rather than a
+    fabricated 0% on a busy pod.
+
+    Each sample is tied to the unit's ``InvocationID``, which systemd changes on
+    every start. Keying on the unit NAME alone is not enough: a pod that stops
+    and restarts between two polls keeps its name while ``CPUUsageNSec`` restarts
+    from zero, and the backwards-counter guard below only catches that when the
+    new invocation has not yet burned past the old total. A fast restart with
+    heavy startup work passes that guard and yields a positive delta spanning two
+    different processes -- a number that looks like a measurement and is not. A
+    changed invocation discards the previous sample instead.
+    """
+    invocation = rec.get("InvocationID") or ""
+    if rec.get("CPUAccounting") != "yes":
+        _POD_CPU_SAMPLES.pop(unit, None)
+        return None
+    cpu_ns = _coerce_uint(rec.get("CPUUsageNSec"))
+    if cpu_ns is None:
+        _POD_CPU_SAMPLES.pop(unit, None)
+        return None
+    prev = _POD_CPU_SAMPLES.get(unit)
+    _POD_CPU_SAMPLES[unit] = (now, cpu_ns, invocation)
+    if prev is None:
+        return None
+    prev_wall, prev_cpu, prev_invocation = prev
+    # A different (or newly unknown) invocation means the counter belongs to a
+    # different process than the one we sampled. Not comparable.
+    if prev_invocation != invocation:
+        return None
+    wall_delta_ns = (now - prev_wall) * 1e9
+    cpu_delta_ns = cpu_ns - prev_cpu
+    # A non-positive wall delta (clock jump / same instant) or a counter that
+    # went backwards (restart the invocation check somehow missed) is not a
+    # measurement.
+    if wall_delta_ns <= 0 or cpu_delta_ns < 0:
+        return None
+    return round(cpu_delta_ns / wall_delta_ns * 100.0, 1)
+
+
+async def _pod_home_size(cfg: Any, name: str, unit: str, now: float) -> int | None:
+    """Pod HOME size in bytes, cached behind a TTL.
+
+    ``du`` over a multi-GB tree is too expensive to run every poll, so the
+    result is cached per pod for ``_POD_HOME_SIZE_TTL`` seconds. The HOME path
+    is resolved through the existing ``rt.pod_home`` — never hardcoded. Any
+    failure (missing tree, du error) yields None, not 0.
+
+    The ``du`` itself goes through ``_run_cmd``, the same routed chokepoint the
+    module's two other ``du`` calls use. That is deliberately not a bare
+    ``subprocess.run``: routing is what vets the binary instead of trusting the
+    service PATH (which leads with agent-writable directories), pins the child's
+    PATH and encoding, and keeps the spawn inside the sandbox chokepoint the
+    repo's spawn audit requires. Doing it by hand needed three separate
+    exceptions and still would not have been the module's own pattern.
+    """
+    cached = _POD_HOME_SIZE_CACHE.get(unit)
+    if cached is not None and (now - cached[0]) < _POD_HOME_SIZE_TTL:
+        return cached[1]
+    try:
+        home = rt.pod_home(cfg, name)
+    except Exception:  # noqa: BLE001
+        return cached[1] if cached is not None else None
+    rc, stdout, _ = await _run_cmd(["du", "-sb", str(home)], timeout=20)
+    if rc != 0:
+        return cached[1] if cached is not None else None
+    try:
+        size = int(stdout.split()[0])
+    except (ValueError, IndexError):
+        return cached[1] if cached is not None else None
+    _POD_HOME_SIZE_CACHE[unit] = (now, size)
+    return size
+
+
+# Fleet-level totals for the page header ("this needs cleaning" legibility).
+#
+# Worktree disk is deliberately NOT computed here. The dashboard already shows
+# it, sourced from the pre-existing ``/disk`` endpoint, and that endpoint is
+# async out-of-band on purpose: a ``du`` over every worktree is slow (tens of
+# GB across tens of trees), so it runs as a background task behind an
+# idle/computing/done handshake rather than inside a request. Measuring it a
+# second time in ``_build_fleet`` would put that same ``du`` on the POLLED
+# payload path -- paid again on every TTL expiry, for a figure the page is
+# already displaying from another source. Two independently-computed values
+# under one label is also a number an operator cannot trust. So this leaves
+# worktree disk to its existing owner and carries only what is genuinely new
+# and cheap: pod-home disk (already measured per running pod for the row
+# readout, so summing it is free) and the orphan count (a directory scan).
+
+
+def _orphan_count_sync(cfg: Any) -> int | None:
+    """Count of pod HOMEs left on disk with no live pod. None on failure.
+
+    Reuses ``rt.orphan_homes`` (a cheap directory scan, no ``du``) — the same
+    predicate the prune flow uses — so the header's "N to clean" agrees with
+    what a prune would actually reclaim.
+    """
+    try:
+        return len(rt.orphan_homes(cfg))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def _build_fleet() -> dict:
     live_path = await _live_worktree_path()
     staged_path = _staged_target()
@@ -2767,7 +3035,97 @@ async def _build_fleet() -> dict:
             "legacy": bool(legacy_prefixes) and not is_main
             and name.lower().startswith(legacy_prefixes),
             "last_updated_at": g["last_updated_at"],
+            # Per-pod system resources (memory/CPU/tasks/home size). Filled in
+            # by one batched probe after the loop for running pods on Linux;
+            # stays None for stopped pods, the main row, and off Linux — the
+            # UI hides the readout entirely when it is absent.
+            "pod_resources": None,
         })
+    # ONE batched resource probe for every running pod, off the row loop so the
+    # payload never spawns a subprocess per row per poll. Best-effort and
+    # Linux-only (the probe itself degrades to {} off Linux / on failure), so a
+    # miss simply leaves ``pod_resources`` None and the UI hides the readout.
+    if _POD_AVAILABLE and cfg:
+        # Rows are keyed by the worktree's BASENAME, and a pod is identified by
+        # that same name -- so two worktrees under different parents that share a
+        # basename resolve to ONE pod unit. Probing under that name would then
+        # publish that single pod's memory, CPU and disk on BOTH rows, as though
+        # each had its own. We cannot tell which row owns the pod (this module
+        # already treats a basename collision as unattributable -- see
+        # `_reclaim_pod_locked`), so a collided name is withheld from the probe
+        # entirely and both rows keep `pod_resources` absent. Duplicated figures
+        # would read as measured; absent ones are honest.
+        live_row_names = [w["name"] for w in wts if w.get("running") and not w.get("is_main")]
+        collided = {nm for nm in live_row_names if live_row_names.count(nm) > 1}
+        running_names = [nm for nm in live_row_names if nm not in collided]
+        if collided:
+            logger.warning(
+                "dev-fleet: withholding pod resources for %d ambiguous worktree "
+                "basename(s) -- a shared basename cannot be attributed to one pod",
+                len(collided),
+            )
+        if running_names:
+            try:
+                res = await asyncio.get_running_loop().run_in_executor(
+                    subprocess_executor(),
+                    functools.partial(_pod_resources_sync, cfg, running_names),
+                )
+            except Exception:  # noqa: BLE001
+                res = {}
+            # Pod-HOME size is the one figure the sync probe cannot take: its
+            # `du` goes through the async routed chokepoint. TTL-cached, so this
+            # is a no-op on most polls.
+            now = time.monotonic()
+            for nm in running_names:
+                if nm not in res:
+                    continue
+                try:
+                    res[nm]["home_bytes"] = await _pod_home_size(
+                        cfg, nm, rt.pod_unit(cfg, nm), now
+                    )
+                except Exception:  # noqa: BLE001
+                    res[nm]["home_bytes"] = None
+            for w in wts:
+                if w["name"] in res:
+                    w["pod_resources"] = res[w["name"]]
+    # Fleet-level totals for the header: worktree disk (batched du, TTL-cached),
+    # pod-home disk (summed from the resource probe above), and orphan count.
+    # All best-effort — a field stays None and the header omits it rather than
+    # rendering a fabricated 0.
+    fleet_totals: dict[str, Any] = {
+        "pod_home_bytes": None,
+        "orphan_pods": None,
+    }
+    if _POD_AVAILABLE and cfg:
+        # A TOTAL has to cover everything it claims to. Summing only the pods
+        # that reported would publish a partial figure under a total's label --
+        # the operator reads "Pod-home disk: 2.1GB" and cannot tell that a pod
+        # whose `du` failed is missing from it. That is the same fabrication the
+        # per-row fields are careful to avoid, one level up. So the total is
+        # published only when EVERY running pod measured; otherwise it is absent
+        # and the header omits it.
+        measured = [
+            w["pod_resources"]["home_bytes"]
+            for w in wts
+            if w.get("pod_resources") and w["pod_resources"].get("home_bytes") is not None
+        ]
+        # `expected` is the number of pods actually RUNNING -- not the number that
+        # happened to come back with a record. Counting only rows that already
+        # have `pod_resources` made the check self-consistent instead of true: a
+        # pod dropped by the record matching, or withheld for an ambiguous
+        # basename, has no `pod_resources` and so vanished from both sides of the
+        # comparison, letting a total publish while a running pod was missing
+        # from it.
+        expected = sum(1 for w in wts if w.get("running") and not w.get("is_main"))
+        if measured and len(measured) == expected:
+            fleet_totals["pod_home_bytes"] = sum(measured)
+        try:
+            fleet_totals["orphan_pods"] = await asyncio.get_running_loop().run_in_executor(
+                subprocess_executor(),
+                functools.partial(_orphan_count_sync, cfg),
+            )
+        except Exception:  # noqa: BLE001
+            pass
     # The run pointers a reloaded page reattaches to -- `sync_run_id` and each
     # row's `provision_run_id` -- are deliberately NOT set here. This snapshot is
     # cached and served stale-while-revalidate, so a pointer written at build
@@ -2809,6 +3167,7 @@ async def _build_fleet() -> dict:
         # non-Linux user saw pod controls that silently failed with no
         # explanation. The UI uses these to disable those controls and say why.
         "pods_available": _POD_AVAILABLE,
+        "fleet_totals": fleet_totals,
         "pods_unavailable_reason": _POD_ERROR or None,
     }
 

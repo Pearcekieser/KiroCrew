@@ -9472,7 +9472,19 @@
       "cutover_staged_run_cmd_to_finish_or_cancel": "切换已暂存：网关下次启动时此工作树将成为运行版本。运行 `{{cmd}}` 完成切换，或使用此行菜单 → 取消已暂存的切换来撤销。在此之前网关仍运行之前的检出。",
       "keeps_the_live_checkout_the_live_target_and_disc": "运行中的检出仍为运行版本，切换到 {{staged}} 的暂存操作将被丢弃（不会重启）",
       "restarting_completes_the_pending_cutover_boots": "重启将完成待定的切换：网关将在“{{staged}}”上启动，而不是当前检出。仪表板会短暂断开并自动重连。如需撤销，请使用“取消已暂存的切换”。",
-      "no_checkout_found_action": "请设置下方环境变量，或在 {{productName}} 数据目录（默认为 ~/.kiro/crew）的 config.json 中添加 dev_fleet.repo_path 以长期生效，然后重启网关。"
+      "no_checkout_found_action": "请设置下方环境变量，或在 {{productName}} 数据目录（默认为 ~/.kiro/crew）的 config.json 中添加 dev_fleet.repo_path 以长期生效，然后重启网关。",
+      "pod_memory_of_ceiling": "Pod 已用内存与其 cgroup 上限对比",
+      "pod_cpu_usage": "Pod CPU 使用率",
+      "pod_task_count": "Pod cgroup 中的任务数",
+      "pod_tasks_label": "个任务",
+      "pod_memory": "内存：{{value}}",
+      "pod_cpu": "CPU：{{value}}",
+      "pod_tasks": "任务：{{value}}",
+      "pod_home_size": "Pod 主目录：{{value}}",
+      "pod_home_disk": "Pod 主目录磁盘：{{value}}",
+      "orphan_pods_label": "孤立 Pod 主目录：{{value}}",
+      "total_disk_used_by_running_pod_homes": "运行中 Pod 主目录占用的磁盘总量",
+      "pod_homes_left_on_disk_with_no_live_pod": "磁盘上没有对应运行 Pod 的遗留主目录"
     },
     "developer": {
       "agentBackendTab": {
