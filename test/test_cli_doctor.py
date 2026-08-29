@@ -1500,11 +1500,13 @@ class TestEffectiveModelSection:
         monkeypatch.setattr(cli_doctor, "project_agent_files", lambda d: [hostile])
         monkeypatch.setattr(cli_doctor, "project_agent_name", lambda p: "kirocrew")
         # Only the injected path is faked; the user-level spec still goes through
-        # the real reader so the report's own self-check is not disturbed.
+        # the real reader so the report's own self-check is not disturbed. The
+        # stub forwards **kw because the reader takes keyword-only SEL
+        # attribution labels (#6722) that this test does not care about.
         monkeypatch.setattr(
             cli_doctor,
             "_read_agent_spec",
-            lambda p: {"model": "m"} if p == hostile else real_reader(p),
+            lambda p, **kw: {"model": "m"} if p == hostile else real_reader(p, **kw),
         )
         issues: list[str] = []
 

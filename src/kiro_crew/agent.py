@@ -2657,7 +2657,7 @@ def migrate_agent_specs() -> int:
         # non-object refusal). This site also WRITES below: a spec the reader
         # refuses is now never rewritten at all, whereas the old read_text
         # path read -- and then rewrote -- whatever the file or link named.
-        data = _read_agent_spec(spec_path)
+        data = _read_agent_spec(spec_path, operation="migrate_agent_specs")
         if data is None:
             continue
         if "model_managed" not in data and "cc_model" not in data:
@@ -2712,7 +2712,7 @@ def _read_spec_capped(path: Path) -> dict | None:
     A thin wrapper rather than a direct call at each site, so the reason the
     capped reader is used lives in one place.
     """
-    return _read_agent_spec(path)
+    return _read_agent_spec(path, operation="agent_spec_lookup")
 
 
 def _spec_path_is_safe(path: Path, agents_dir: Path) -> bool:

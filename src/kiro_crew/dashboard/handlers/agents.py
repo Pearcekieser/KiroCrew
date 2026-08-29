@@ -96,7 +96,7 @@ def _namespaced_agent_file_exists(agent_name: str) -> bool:
     # glob the real ~/.kiro from an isolated run.
     try:
         for path in kiro_agents_dir_path().glob(f"*--{agent_name}.json"):
-            data = _read_agent_spec(path)
+            data = _read_agent_spec(path, operation="api_agents_sync")
             if data is None:
                 continue
             if data.get("name") == agent_name:
@@ -1565,7 +1565,7 @@ async def api_agent_detail(request: web.Request) -> web.Response:
 
     state: DashboardState = request.app["state"]
     for f in kiro_agents_dir_path().glob("*.json"):
-        spec = _read_agent_spec(f)
+        spec = _read_agent_spec(f, operation="api_agent_detail")
         if spec is None:
             continue
         # Two-step so ``data`` stays typed ``dict`` for the PATCH branch's

@@ -291,3 +291,203 @@ class TestSensitiveSymlinkGuard:
         out = _build_kiro_model_map()
 
         assert "linked" not in out
+
+
+class TestDenialAttribution:
+    """The SEL denial names the calling surface, not always ``list_agents`` (#6722).
+
+    ``_read_agent_spec`` is the one reader for every surface, so its
+    sensitive-target denial event used to hardcode ``operation``/``source`` to
+    ``"list_agents"`` — a denial served for e.g. a chat restore was recorded in
+    the security trail as an agent-listing cache warm. The refusal itself is
+    unchanged; only the attribution is threaded through. Events are captured
+    with a spy SEL (the shape ``test_agent_discovery.py`` already uses), never
+    read from a real log file.
+    """
+
+    @staticmethod
+    def _denial_events(tmp_path, monkeypatch):
+        """A planted sensitive symlink plus a spy SEL capturing denial kwargs."""
+        from types import SimpleNamespace
+
+        from kiro_crew import agent_discovery
+
+        target = tmp_path / "protected.json"
+        target.write_text(json.dumps({"name": "linked"}))
+        link = tmp_path / "linked.json"
+        link.symlink_to(target)
+        monkeypatch.setattr(agent_discovery, "is_sensitive_path", lambda p: str(target) in str(p))
+        events: list[dict] = []
+        monkeypatch.setattr(
+            agent_discovery,
+            "_sel",
+            lambda: SimpleNamespace(log_api_access=lambda **kw: events.append(kw)),
+        )
+        return link, events
+
+    def test_default_call_shape_emits_exactly_the_historical_event(self, tmp_path, monkeypatch):
+        """An unlabelled call reproduces today's event byte-for-byte.
+
+        This pins the backwards-compatible default rather than assuming it: an
+        unmigrated (or future, forgotten) call site must keep writing the exact
+        record the trail carried before #6722.
+        """
+        from kiro_crew.agent_discovery import _read_agent_spec
+
+        link, events = self._denial_events(tmp_path, monkeypatch)
+
+        assert _read_agent_spec(link) is None
+        assert events == [
+            {
+                "caller": "agent_discovery",
+                "operation": "list_agents",
+                "outcome": "denied",
+                "source": "list_agents",
+                "resources": str(link.resolve()),
+                "error": "sensitive path rejected",
+            }
+        ]
+
+    def test_labelled_call_attributes_the_denial_to_that_surface(self, tmp_path, monkeypatch):
+        """``operation`` carries the surface, and ``source`` tracks it.
+
+        Red before the fix: the event recorded ``list_agents`` regardless of
+        who asked. The ``source`` half also guards against the parameter being
+        dropped from the threaded call, where ``log_api_access``'s own default
+        would silently relabel every denial ``"dashboard"``.
+        """
+        from kiro_crew.agent_discovery import _read_agent_spec
+
+        link, events = self._denial_events(tmp_path, monkeypatch)
+
+        assert _read_agent_spec(link, operation="chat_persistence") is None
+        assert len(events) == 1
+        assert events[0]["operation"] == "chat_persistence"
+        assert events[0]["source"] == "chat_persistence"
+        assert events[0]["caller"] == "agent_discovery"
+        assert events[0]["outcome"] == "denied"
+
+    def test_explicit_source_overrides_the_operation_fallback(self, tmp_path, monkeypatch):
+        from kiro_crew.agent_discovery import _read_agent_spec
+
+        link, events = self._denial_events(tmp_path, monkeypatch)
+
+        assert _read_agent_spec(link, operation="doctor", source="cli") is None
+        assert events[0]["operation"] == "doctor"
+        assert events[0]["source"] == "cli"
+
+    def test_migrated_surface_emits_its_own_label_end_to_end(self, tmp_path, monkeypatch):
+        """A real surface (chat restore) writes its own label into the trail.
+
+        Red before the fix: ``_build_kiro_model_map``'s denial recorded
+        ``list_agents``. This is the per-surface guard the parametrised ratchet
+        below cannot give — proof the keyword actually reaches SEL through a
+        migrated caller, not just that the source text names it.
+        """
+        from types import SimpleNamespace
+
+        from kiro_crew import agent_discovery
+
+        target = tmp_path / "protected.json"
+        target.write_text(json.dumps({"name": "linked", "model": "leaked"}))
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        (agents / "linked.json").symlink_to(target)
+        monkeypatch.setattr(agent_discovery, "is_sensitive_path", lambda p: str(target) in str(p))
+        monkeypatch.setattr("kiro_crew.agent.KIRO_AGENTS_DIR", agents)
+        events: list[dict] = []
+        monkeypatch.setattr(
+            agent_discovery,
+            "_sel",
+            lambda: SimpleNamespace(log_api_access=lambda **kw: events.append(kw)),
+        )
+
+        out = _build_kiro_model_map()
+
+        assert "linked" not in out
+        assert [e["operation"] for e in events] == ["chat_persistence"]
+        assert [e["source"] for e in events] == ["chat_persistence"]
+
+
+# Every call site and the label it must carry. A new call site (or a reverted
+# label) fails the ratchet below, so an unlabelled site cannot silently write
+# ``list_agents`` denials for a surface that is not the agent listing. Per-file
+# lists are SORTED (matching the scan; an unlabelled site, recorded as
+# ``None``, sorts first) — the ratchet pins the multiset of labels per file,
+# not their source order.
+_EXPECTED_CALL_SITE_LABELS: dict[str, list[str]] = {
+    "kiro_crew/agent_discovery.py": [
+        "list_agents",  # global-dir scan
+        "list_agents",  # project-files scan
+        "resolve_project_agent_name",  # _declared_project_agent_name probe
+    ],
+    "kiro_crew/config/loader.py": ["load_config"],
+    "kiro_crew/agent.py": ["agent_spec_lookup", "migrate_agent_specs"],
+    "kiro_crew/session.py": ["resolve_agent_model"],
+    "kiro_crew/cli_doctor.py": ["doctor", "doctor"],
+    "kiro_crew/dashboard/chat_persistence.py": ["chat_persistence"],
+    "kiro_crew/dashboard/handlers/agents.py": ["api_agent_detail", "api_agents_sync"],
+    "kiro_crew/dashboard/handlers/mcp.py": [
+        "api_mcp_active",
+        "mcp_server_rows",
+        "mcp_stub_eligibility",
+    ],
+}
+
+
+def _read_agent_spec_call_sites() -> dict[str, list[str | None]]:
+    """Every ``_read_agent_spec(...)`` call under src/, with its operation label.
+
+    AST-based rather than a substring scan (the shape of the #4210 spawn-audit
+    ratchet in ``test_spawn_audit.py``): it matches any call whose callee name
+    is ``_read_agent_spec`` regardless of import alias or wrapping, and records
+    the literal ``operation=`` keyword, or ``None`` when the call omits it.
+    """
+    import ast
+
+    src = Path(__file__).resolve().parent.parent / "src"
+    sites: dict[str, list[str | None]] = {}
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr if isinstance(func, ast.Attribute) else ""
+            )
+            if name != "_read_agent_spec":
+                continue
+            label: str | None = None
+            for kw in node.keywords:
+                if kw.arg == "operation" and isinstance(kw.value, ast.Constant):
+                    label = kw.value.value
+            sites.setdefault(str(path.relative_to(src)), []).append(label)
+    # Per-file label lists are SORTED (None first): ast.walk is breadth-first,
+    # so raw order tracks nesting depth, not line numbers — an irrelevant
+    # detail the ratchet must not be sensitive to.
+    return {k: sorted(v, key=lambda x: (x is not None, x or "")) for k, v in sites.items()}
+
+
+class TestCallSiteLabelRatchet:
+    """Static sweep: every call site is enumerated and explicitly labelled."""
+
+    def test_every_call_site_carries_the_expected_label(self):
+        sites = _read_agent_spec_call_sites()
+        assert sites == _EXPECTED_CALL_SITE_LABELS, (
+            "The _read_agent_spec call-site inventory moved. A NEW site must "
+            "pass an explicit operation= naming its surface (add it to the "
+            "expected table); a site genuinely without a surface identity may "
+            "stay on the default only with a comment saying why, and must be "
+            "recorded here as None so the omission is deliberate. See #6722."
+        )
+
+    def test_no_call_site_is_silently_unlabelled(self):
+        for path, labels in _read_agent_spec_call_sites().items():
+            assert None not in labels, (
+                f"{path} calls _read_agent_spec without an explicit operation "
+                "label; its sensitive-path denials would be attributed to "
+                "'list_agents' (#6722)"
+            )

@@ -144,7 +144,12 @@ SKILL_URI_PREFIX = "skill://"
 AGENT_SPEC_SUFFIX = ".agent-spec.json"
 
 
-def _read_agent_spec(path: Path) -> dict[str, Any] | None:
+def _read_agent_spec(
+    path: Path,
+    *,
+    operation: str = "list_agents",
+    source: str | None = None,
+) -> dict[str, Any] | None:
     """Parse an agent config file, or ``None`` when it is not usable.
 
     The one reader for both scopes, so every guard applies uniformly: AppleDouble
@@ -156,6 +161,17 @@ def _read_agent_spec(path: Path) -> dict[str, Any] | None:
     the size cap instead of being slurped into memory during a cache warm. The
     agents directories are user-writable and shared with other tools, so none of
     these are hypothetical.
+
+    *operation*/*source* label the SEL denial event emitted on a sensitive
+    resolved target. Precisely BECAUSE this is the one reader for every surface,
+    a fixed label would record a denial served for an unrelated request as an
+    agent-listing cache warm (#6722): the calling surface names itself here so
+    the security trail attributes the refusal to the request that triggered it.
+    ``source`` falls back to ``operation`` when omitted — today every denial
+    carries the same string in both fields. The defaults reproduce the
+    historical event exactly, so an unlabelled call is behaviourally identical.
+    ``caller`` stays fixed at ``"agent_discovery"``: the reader genuinely is the
+    caller into SEL, and a fixed value keeps the trail greppable by module.
     """
     if path.name.startswith("._"):
         return None
@@ -172,9 +188,9 @@ def _read_agent_spec(path: Path) -> dict[str, Any] | None:
         logger.debug("Skipping sensitive agent config: %s", path)
         _sel().log_api_access(
             caller="agent_discovery",
-            operation="list_agents",
+            operation=operation,
             outcome="denied",
-            source="list_agents",
+            source=source if source is not None else operation,
             resources=str(real),
             error="sensitive path rejected",
         )
@@ -259,7 +275,7 @@ def _declared_project_agent_name(spec: Path) -> str | None:
     allowlist: offering the filename of a broken spec has the session accept the
     agent and then fail at ``session/set_mode``.
     """
-    data = _read_agent_spec(spec)
+    data = _read_agent_spec(spec, operation="resolve_project_agent_name")
     if data is None:
         return None
     return spec_str(data, "name", _project_agent_fallback_name(spec))
@@ -770,7 +786,7 @@ def list_agents(
     if d.is_dir():
         for f in sorted(d.glob("*.json")):
             try:
-                data = _read_agent_spec(f)
+                data = _read_agent_spec(f, operation="list_agents")
                 if data is None:
                     continue
                 agents.append(_global_agent_info(f, data))
@@ -820,7 +836,7 @@ def list_agents(
     # shadowing is not, because the two configs can differ in tools and permissions.
     for pf in project_files:
         try:
-            data = _read_agent_spec(pf)
+            data = _read_agent_spec(pf, operation="list_agents")
             if data is None:
                 continue
             info = _project_agent_info(pf, data)
