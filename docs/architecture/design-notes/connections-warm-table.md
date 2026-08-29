@@ -8,16 +8,17 @@ process, and every rule below answers an observed failure.
 adds only endpoint wiring and a function-local `expire_dead_mints` import on the status path,
 keeping the mint engine off the gateway's boot path.
 
-**Scope boundary: slice N2a ships the TABLE half; the LIFECYCLE is DEFERRED to slice N2b.**
+**Scope boundary: the TABLE and the SPECS have landed; the PROCESS LIFECYCLE has not.**
 Shipped now: the shared row shape (`shared`/`generation`/`activation`), the liveness registry
-those stamps are read against, and `expire_dead_mints()` on the status path. Deferred to N2b:
-everything that spawns, activates, parks or kills a process -- spec planning, the spawn/respawn
-rules, tool-alias key shape, the reaper, `warm_mint_all`, and the filesystem-drift guard that
-covers their synchronous helpers. Every section below except *Measured facts* therefore
-describes N2b's half, and N2b lands those tests together with the code. With no activation
-live no row is ever `shared`, so the shipped `expire_dead_mints()` call is a no-op scan whose
-predicate is nonetheless complete for the parked case, because a reader blind to a parked
-process withdraws a URL that process can still redeem.
+those stamps are read against, `expire_dead_mints()` on the status path, and the spec side --
+the registry-derived universe, the plan and its servability test, the tool-alias key shape, the
+spec files the plan writes, and the filesystem-drift guard covering their synchronous helpers.
+Still deferred: everything that spawns, activates, parks or kills a process -- the spawn/respawn
+rules, the reaper, and `warm_mint_all`, which is the only thing that would give the spec planner
+a caller. The lifecycle slice lands those tests together with the code. Until it does, nothing
+calls the planner and no row is ever `shared`, so the shipped `expire_dead_mints()` call is a
+no-op scan whose predicate is nonetheless complete for the parked case, because a reader blind
+to a parked process withdraws a URL that process can still redeem.
 
 ## Measured facts
 
@@ -55,7 +56,7 @@ so respawn frequency is the dominant design pressure:
 
 `mint.py` (PR #3154) is the reviewed engine and owns the row table, the row identity token,
 grant detection, spec emission and the manifest sweep; warm imports all of it and adds only
-what is genuinely per-process. Two adaptations:
+what is genuinely per-process. Three adaptations:
 
 - `_mint_holder_alive` is deliberately **not** reused -- it reads the row's own `client`, which
   a shared row does not own, so it answers False for every warm row. `_warm_row_alive` asks the
@@ -66,6 +67,25 @@ what is genuinely per-process. Two adaptations:
   refuses anything matching the cold name shape, and both patterns must share one **character
   class**: while warm accepted `[A-Za-z]` and cold only `[a-z]`, a mixed-case alias produced a
   live cold spec the warm sweep read as its own and unlinked.
+- **A name is not ownership.** Those fixed names are predictable and they live in the user's own
+  agents directory, next to the agents they hand-write, so a name says where a spec of ours
+  would *go* and never that the file already there is one. Trusting the name shape alone was a
+  defect in both directions: the write-time sweep unlinked a user's own agent spec sitting at
+  such a path, and the write then clobbered one at a path the current plan wanted.
+  `_warm_spec_is_foreign` proves ownership from the file's CONTENTS, and it takes two halves.
+  The fields the spec body fixes (`model`, `includeMcpJson`, `prompt`, `allowedTools`) are read
+  off `_mint_spec_body` so a change to the body cannot leave the module unable to recognise its
+  own files -- but they are also **stock defaults** a hand-written or scaffolded agent plausibly
+  carries, so on their own they still read a wholly user-authored spec as ours. The
+  discriminating half is `_WARM_SPEC_SENTINEL`, stamped as the description prefix of every spec
+  written here. `description` is the only field free enough to carry a marker while staying
+  schema-legal: kiro-cli rejects an unknown spec key, and the agent-spec migration sweep strips
+  bookkeeping keys. Requiring it orphans nothing, since no warm-spec writer has ever shipped --
+  and a hypothetical unsentinelled file of ours would read as foreign, which means refused and
+  left in place. It fails closed, because the mistakes are not symmetric: reading our own file
+  as foreign leaves one stale spec as clutter, while reading a user's file as ours destroys it.
+  A refusal is audited and skipped -- never raised -- so an occupied path costs one unwarmed
+  provider, not a failed spawn.
 
 ## Tool-alias key shape
 
@@ -81,22 +101,29 @@ the pre-#3260 rule and those assertions were not carried forward.
 ## Filesystem work never runs on the loop
 
 Every flow reads the user's config, the shared agents directory, or kiro-cli's OAuth cache, any
-of which can sit on a network mount where a stat is unbounded, so the synchronous helpers are
-reached through `asyncio.to_thread` -- enforced by a fixed-point drift guard in
-`test/test_connections_warm.py` that reuses the mint engine's own primitive sets so the two
-cannot drift apart.
+of which can sit on a network mount where a stat is unbounded, so all of that work lives in
+SYNCHRONOUS helpers and a coroutine reaches them through `asyncio.to_thread` -- enforced by a
+fixed-point drift guard in `test/test_connections_warm.py` that reuses the mint engine's own
+primitive sets so the two cannot drift apart. What the guard pins today is the exact set of
+helpers doing filesystem work, so the lifecycle slice can neither call one from a coroutine nor
+quietly drop the filesystem work the guard's coverage rests on without failing it.
 
 ## Seams and residuals
 
-**Revocation** is PR #5899's, through `_expire_shared_mints`; **proactive refresh** attaches in
-`_warm_mint_reaper`; **a supervisor/watchdog** is absent, as are the accessors it would need.
-Two residuals:
+**Shared-mint expiry** is the lifecycle slice's, keyed on the fact that a minting process is
+gone rather than on a cause, which is what covers a process that went away by a route no expiry
+path anticipated. PR #5899 is a different cause and a different table: it owns
+**Disconnect-driven grant revocation**, and the two meet only where a revoke should re-warm.
+**Proactive refresh** attaches to the reaper the lifecycle slice introduces; **a
+supervisor/watchdog** is absent, as are the accessors it would need. Two residuals:
 
-- **A cancel between the claim and the activation leaks the claim.** `warm_mint_all` takes its
-  claim outside any `try`/`finally` and `_warm_activate` catches `Exception`, not
+- **A cancel between the claim and the activation leaks the claim.** The lifecycle entry point
+  takes its claim outside any `try`/`finally` and the activation catches `Exception`, not
   `BaseException`, so a `CancelledError` in that window leaves rows `minting` with no watcher:
-  nothing expires them, `_shared_mints_pending` stays true, and the process is never retired.
-  Unreachable while `warm_mint_all` has no caller, and **must be closed before N2b wires it up.**
+  nothing expires them, the pending check stays true, and the process is never retired.
+  Unreachable while that entry point does not exist, and **must be closed before the lifecycle
+  slice wires it up** -- along with replacing a shared row's state-string fence with a unique row
+  token (issue #6110), and screening an approval URL for a credential *before* it is stored.
 - **A hard gateway kill strands warm spec files.** They carry no manifest row, so the cold
   engine's aged-row sweep cannot see them. The next spawn's write-time sweep removes them, so
   the exposure is bounded, but it is not a clean teardown.
