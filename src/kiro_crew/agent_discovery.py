@@ -148,7 +148,7 @@ def _read_agent_spec(
     path: Path,
     *,
     operation: str = "list_agents",
-    source: str | None = None,
+    source: str = "list_agents",
 ) -> dict[str, Any] | None:
     """Parse an agent config file, or ``None`` when it is not usable.
 
@@ -167,9 +167,12 @@ def _read_agent_spec(
     a fixed label would record a denial served for an unrelated request as an
     agent-listing cache warm (#6722): the calling surface names itself here so
     the security trail attributes the refusal to the request that triggered it.
-    ``source`` falls back to ``operation`` when omitted — today every denial
-    carries the same string in both fields. The defaults reproduce the
-    historical event exactly, so an unlabelled call is behaviourally identical.
+    ``source`` is the interface channel (``SecurityEvent.source`` vocabulary:
+    dashboard, cli, slack, cron, ...; ``"unknown"`` when the caller serves
+    multiple channels) — every call site passes it explicitly, enforced by the
+    call-site ratchet test. Both defaults exist ONLY so a bare call reproduces
+    the historical event byte-for-byte (a forgotten future call site degrades
+    to exactly today's trail); they are not for new call sites.
     ``caller`` stays fixed at ``"agent_discovery"``: the reader genuinely is the
     caller into SEL, and a fixed value keeps the trail greppable by module.
     """
@@ -190,7 +193,7 @@ def _read_agent_spec(
             caller="agent_discovery",
             operation=operation,
             outcome="denied",
-            source=source if source is not None else operation,
+            source=source,
             resources=str(real),
             error="sensitive path rejected",
         )
@@ -275,7 +278,7 @@ def _declared_project_agent_name(spec: Path) -> str | None:
     allowlist: offering the filename of a broken spec has the session accept the
     agent and then fail at ``session/set_mode``.
     """
-    data = _read_agent_spec(spec, operation="resolve_project_agent_name")
+    data = _read_agent_spec(spec, operation="resolve_project_agent_name", source="unknown")
     if data is None:
         return None
     return spec_str(data, "name", _project_agent_fallback_name(spec))
@@ -786,7 +789,7 @@ def list_agents(
     if d.is_dir():
         for f in sorted(d.glob("*.json")):
             try:
-                data = _read_agent_spec(f, operation="list_agents")
+                data = _read_agent_spec(f, operation="list_agents", source="unknown")
                 if data is None:
                     continue
                 agents.append(_global_agent_info(f, data))
@@ -836,7 +839,7 @@ def list_agents(
     # shadowing is not, because the two configs can differ in tools and permissions.
     for pf in project_files:
         try:
-            data = _read_agent_spec(pf, operation="list_agents")
+            data = _read_agent_spec(pf, operation="list_agents", source="unknown")
             if data is None:
                 continue
             info = _project_agent_info(pf, data)

@@ -349,32 +349,41 @@ class TestDenialAttribution:
         ]
 
     def test_labelled_call_attributes_the_denial_to_that_surface(self, tmp_path, monkeypatch):
-        """``operation`` carries the surface, and ``source`` tracks it.
+        """``operation`` names the surface and ``source`` the interface channel.
 
         Red before the fix: the event recorded ``list_agents`` regardless of
-        who asked. The ``source`` half also guards against the parameter being
-        dropped from the threaded call, where ``log_api_access``'s own default
-        would silently relabel every denial ``"dashboard"``.
+        who asked. The explicit ``source`` also guards against the parameter
+        being dropped from the threaded call, where ``log_api_access``'s own
+        default would silently relabel every denial ``"dashboard"``.
         """
         from kiro_crew.agent_discovery import _read_agent_spec
 
         link, events = self._denial_events(tmp_path, monkeypatch)
 
-        assert _read_agent_spec(link, operation="chat_persistence") is None
+        assert _read_agent_spec(link, operation="doctor", source="cli") is None
         assert len(events) == 1
-        assert events[0]["operation"] == "chat_persistence"
-        assert events[0]["source"] == "chat_persistence"
+        assert events[0]["operation"] == "doctor"
+        assert events[0]["source"] == "cli"
         assert events[0]["caller"] == "agent_discovery"
         assert events[0]["outcome"] == "denied"
 
-    def test_explicit_source_overrides_the_operation_fallback(self, tmp_path, monkeypatch):
+    def test_source_defaults_independently_of_operation(self, tmp_path, monkeypatch):
+        """The two defaults are independent — no echo semantics.
+
+        Round 4 (First Principles): an ``operation``-given / ``source``-omitted
+        call must NOT echo the operation into ``source`` (round 1 established
+        the echo corrupts the interface-channel vocabulary); it keeps the
+        historical byte-compat ``list_agents`` source instead. The ratchet
+        forbids this call shape in src/, so this pins the reader's own
+        semantics, not a shipped consumer.
+        """
         from kiro_crew.agent_discovery import _read_agent_spec
 
         link, events = self._denial_events(tmp_path, monkeypatch)
 
-        assert _read_agent_spec(link, operation="doctor", source="cli") is None
+        assert _read_agent_spec(link, operation="doctor") is None
         assert events[0]["operation"] == "doctor"
-        assert events[0]["source"] == "cli"
+        assert events[0]["source"] == "list_agents"
 
     def test_migrated_surface_emits_its_own_label_end_to_end(self, tmp_path, monkeypatch):
         """A real surface (chat restore) writes its own label into the trail.
@@ -406,47 +415,67 @@ class TestDenialAttribution:
 
         assert "linked" not in out
         assert [e["operation"] for e in events] == ["chat_persistence"]
-        assert [e["source"] for e in events] == ["chat_persistence"]
+        # ``source`` is the interface channel, NOT the operation echo (round 1
+        # finding), and for THIS helper it is ``unknown``, not ``dashboard``
+        # (round 2 finding): the Slack gateway restores evicted slots through
+        # the same _rehydrate_slot_from_history path, so a pinned interface
+        # would record a Slack/background restore as dashboard-originated.
+        assert [e["source"] for e in events] == ["unknown"]
 
 
-# Every call site and the label it must carry. A new call site (or a reverted
-# label) fails the ratchet below, so an unlabelled site cannot silently write
-# ``list_agents`` denials for a surface that is not the agent listing. Per-file
-# lists are SORTED (matching the scan; an unlabelled site, recorded as
-# ``None``, sorts first) — the ratchet pins the multiset of labels per file,
+# Every call site and the (operation, source) pair it must carry. A new call
+# site (or a reverted label) fails the ratchet below, so an unlabelled site
+# cannot silently write ``list_agents`` denials for a surface that is not the
+# agent listing, and no site can let ``source`` fall back to mirroring the
+# operation (``source`` is the interface channel: dashboard/cli/startup/...,
+# or ``"unknown"`` for shared helpers serving multiple channels). Per-file
+# lists are SORTED (matching the scan; an unlabelled half, recorded as
+# ``None``, sorts first) — the ratchet pins the multiset of pairs per file,
 # not their source order.
-_EXPECTED_CALL_SITE_LABELS: dict[str, list[str]] = {
+_EXPECTED_CALL_SITE_LABELS: dict[str, list[tuple[str, str]]] = {
     "kiro_crew/agent_discovery.py": [
-        "list_agents",  # global-dir scan
-        "list_agents",  # project-files scan
-        "resolve_project_agent_name",  # _declared_project_agent_name probe
+        ("list_agents", "unknown"),  # global-dir scan
+        ("list_agents", "unknown"),  # project-files scan
+        ("resolve_project_agent_name", "unknown"),  # single-spec probe
     ],
-    "kiro_crew/config/loader.py": ["load_config"],
-    "kiro_crew/agent.py": ["agent_spec_lookup", "migrate_agent_specs"],
-    "kiro_crew/session.py": ["resolve_agent_model"],
-    "kiro_crew/cli_doctor.py": ["doctor", "doctor"],
-    "kiro_crew/dashboard/chat_persistence.py": ["chat_persistence"],
-    "kiro_crew/dashboard/handlers/agents.py": ["api_agent_detail", "api_agents_sync"],
+    "kiro_crew/config/loader.py": [("load_config", "unknown")],
+    "kiro_crew/agent.py": [
+        ("agent_spec_lookup", "unknown"),
+        ("migrate_agent_specs", "unknown"),
+    ],
+    "kiro_crew/session.py": [("resolve_agent_model", "unknown")],
+    "kiro_crew/cli_doctor.py": [("doctor", "cli"), ("doctor", "cli")],
+    # ``unknown``, not ``dashboard``: the slot-rehydration path is shared —
+    # the Slack gateway restores evicted slots through the same helper
+    # (slack/gateway.py -> _rehydrate_slot_from_history), so pinning an
+    # interface here would misattribute background/Slack restores (review
+    # round 2 finding).
+    "kiro_crew/dashboard/chat_persistence.py": [("chat_persistence", "unknown")],
+    "kiro_crew/dashboard/handlers/agents.py": [
+        ("api_agent_detail", "dashboard"),
+        ("api_agents_sync", "dashboard"),
+    ],
     "kiro_crew/dashboard/handlers/mcp.py": [
-        "api_mcp_active",
-        "mcp_server_rows",
-        "mcp_stub_eligibility",
+        ("api_mcp_active", "dashboard"),
+        ("mcp_server_rows", "dashboard"),
+        ("mcp_stub_eligibility", "dashboard"),
     ],
 }
 
 
-def _read_agent_spec_call_sites() -> dict[str, list[str | None]]:
-    """Every ``_read_agent_spec(...)`` call under src/, with its operation label.
+def _read_agent_spec_call_sites() -> dict[str, list[tuple[str | None, str | None]]]:
+    """Every ``_read_agent_spec(...)`` call under src/, with its label pair.
 
     AST-based rather than a substring scan (the shape of the #4210 spawn-audit
     ratchet in ``test_spawn_audit.py``): it matches any call whose callee name
     is ``_read_agent_spec`` regardless of import alias or wrapping, and records
-    the literal ``operation=`` keyword, or ``None`` when the call omits it.
+    the literal ``operation=``/``source=`` keywords, ``None`` for an omitted
+    half.
     """
     import ast
 
     src = Path(__file__).resolve().parent.parent / "src"
-    sites: dict[str, list[str | None]] = {}
+    sites: dict[str, list[tuple[str | None, str | None]]] = {}
     for path in sorted(src.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
         for node in ast.walk(tree):
@@ -460,15 +489,22 @@ def _read_agent_spec_call_sites() -> dict[str, list[str | None]]:
             )
             if name != "_read_agent_spec":
                 continue
-            label: str | None = None
+            labels: dict[str, str | None] = {"operation": None, "source": None}
             for kw in node.keywords:
-                if kw.arg == "operation" and isinstance(kw.value, ast.Constant):
-                    label = kw.value.value
-            sites.setdefault(str(path.relative_to(src)), []).append(label)
-    # Per-file label lists are SORTED (None first): ast.walk is breadth-first,
+                if kw.arg in labels and isinstance(kw.value, ast.Constant):
+                    labels[kw.arg] = kw.value.value
+            sites.setdefault(path.relative_to(src).as_posix(), []).append(
+                (labels["operation"], labels["source"])
+            )
+    # Keys are as_posix() so the table matches on Windows (relative_to gives
+    # backslash paths there — caught by the Windows CI shard).
+    # Per-file pair lists are SORTED (None first): ast.walk is breadth-first,
     # so raw order tracks nesting depth, not line numbers — an irrelevant
     # detail the ratchet must not be sensitive to.
-    return {k: sorted(v, key=lambda x: (x is not None, x or "")) for k, v in sites.items()}
+    return {
+        k: sorted(v, key=lambda p: tuple((x is not None, x or "") for x in p))
+        for k, v in sites.items()
+    }
 
 
 class TestCallSiteLabelRatchet:
@@ -478,16 +514,24 @@ class TestCallSiteLabelRatchet:
         sites = _read_agent_spec_call_sites()
         assert sites == _EXPECTED_CALL_SITE_LABELS, (
             "The _read_agent_spec call-site inventory moved. A NEW site must "
-            "pass an explicit operation= naming its surface (add it to the "
-            "expected table); a site genuinely without a surface identity may "
-            "stay on the default only with a comment saying why, and must be "
-            "recorded here as None so the omission is deliberate. See #6722."
+            "pass explicit operation= (naming its surface) and source= (its "
+            "interface channel, or 'unknown' for a shared helper) and be added "
+            "to the expected table — test_no_call_site_is_silently_unlabelled "
+            "forbids omitting either. See #6722."
         )
 
     def test_no_call_site_is_silently_unlabelled(self):
-        for path, labels in _read_agent_spec_call_sites().items():
-            assert None not in labels, (
-                f"{path} calls _read_agent_spec without an explicit operation "
-                "label; its sensitive-path denials would be attributed to "
-                "'list_agents' (#6722)"
-            )
+        for path, pairs in _read_agent_spec_call_sites().items():
+            for operation, source in pairs:
+                assert operation is not None, (
+                    f"{path} calls _read_agent_spec without an explicit "
+                    "operation label; its sensitive-path denials would be "
+                    "attributed to 'list_agents' (#6722)"
+                )
+                assert source is not None, (
+                    f"{path} calls _read_agent_spec without an explicit "
+                    "source; the byte-compat default would label the denial "
+                    "'list_agents' instead of the interface channel "
+                    "(dashboard/cli/...) — pass the channel, or 'unknown' "
+                    "for a shared helper (#6722 review rounds 1-4)"
+                )

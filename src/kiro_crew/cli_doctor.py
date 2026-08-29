@@ -169,7 +169,7 @@ def _doctor_effective_model(cfg: KiroCrewConfig, project_dir: str, issues: list[
         checks here would be a second, weaker copy of a reader that already
         exists.
         """
-        data = _read_agent_spec(path, operation="doctor")
+        data = _read_agent_spec(path, operation="doctor", source="cli")
         if data is None:
             # An ABSENT spec is not a fault -- a clean install has none, and the
             # resolver simply falls through to the bundled default. Only a file
@@ -444,7 +444,7 @@ def _agent_spec_model_problems(
             *((path, False) for path in global_specs),
             *((path, True) for path in project_specs),
         ):
-            data = _read_agent_spec(path, operation="doctor")
+            data = _read_agent_spec(path, operation="doctor", source="cli")
             if data is None:
                 return None
             model = normalize_agent_model(data.get("model"))

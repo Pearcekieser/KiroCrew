@@ -9286,7 +9286,7 @@ def _read_hardened_agent_spec(path: Path) -> dict | None:
     try:
         from kiro_crew.agent_discovery import _read_agent_spec
 
-        return _read_agent_spec(path, operation="load_config")
+        return _read_agent_spec(path, operation="load_config", source="unknown")
     except Exception:
         return None
 

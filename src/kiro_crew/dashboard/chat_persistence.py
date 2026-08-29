@@ -255,7 +255,7 @@ def _build_kiro_model_map() -> dict[str, str]:
             # Hardened reader: a refused spec (oversized, sensitive symlink,
             # non-object JSON, ...) is skipped like an absent one instead of
             # aborting the whole scan through the outer except.
-            data = _read_agent_spec(f, operation="chat_persistence")
+            data = _read_agent_spec(f, operation="chat_persistence", source="unknown")
             if data is None:
                 continue
             model = data.get("model", "")

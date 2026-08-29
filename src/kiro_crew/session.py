@@ -2729,7 +2729,7 @@ class SessionManager:
                 # other tools, and this result is cached and served to
                 # ``/api/sessions/context``. It also supplies the malformed- and
                 # non-object-JSON skip this loop needs.
-                ad = _read_agent_spec(af, operation="resolve_agent_model")
+                ad = _read_agent_spec(af, operation="resolve_agent_model", source="unknown")
                 if ad is None:
                     continue
                 if ad.get("name") == agent or af.stem == agent:
