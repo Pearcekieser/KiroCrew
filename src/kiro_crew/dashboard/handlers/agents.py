@@ -20,6 +20,7 @@ from kiro_crew.acp.client import advertised_model_ids, model_is_unusable
 from kiro_crew.acp_backends import selectable_backend_values
 from kiro_crew.agent import (
     AGENT_FILENAME,
+    _spec_path_is_safe,
     clear_model_pin,
     get_shipped_tools,
     install_agent,
@@ -1574,8 +1575,9 @@ async def api_agent_detail(request: web.Request) -> web.Response:
             # Read through the one hardened gate: an oversized, non-UTF-8,
             # AppleDouble or non-object spec in this tool-shared directory returns
             # None and is skipped exactly like an absent file, and a symlink whose
-            # resolved target is sensitive is refused rather than read. The later
-            # under-lock re-read stays a plain json.loads on purpose -- see below.
+            # resolved target is sensitive is refused rather than read. The PATCH
+            # branch's re-read under the config lock goes through the same gate
+            # (plus the stricter _spec_path_is_safe fence, since it writes back).
             data = _read_agent_spec(f)
             if data is None:
                 continue
@@ -1676,8 +1678,58 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                     loop = asyncio.get_running_loop()
                     async with _get_config_lock():
                         # Re-read under the lock: the copy above was read before
-                        # the lock and a concurrent PATCH may have superseded it.
-                        data = json.loads(f.read_text(encoding="utf-8"))
+                        # the lock and a concurrent PATCH may have superseded it,
+                        # so the pre-lock `data` is stale and this fetches the
+                        # authoritative copy to modify. That intent stays; the
+                        # bare `json.loads(f.read_text())` this replaced did NOT.
+                        #
+                        # `f` names a file in the user-writable, tool-shared
+                        # ~/.kiro/agents dir, and a concurrent writer can swap it
+                        # between the hardened outer scan and this re-read. So it
+                        # gets the SAME gate as the outer read -- and, because the
+                        # branch WRITES `data` back through `f.write_text` (a
+                        # write-through, not the os.replace `_atomic_json_write`
+                        # uses), the stricter `_spec_path_is_safe` no-symlink /
+                        # no-escape / no-sensitive fence too, exactly like
+                        # migrate_agent_specs: following a swapped-in symlink here
+                        # would launder its target's contents back into the freely
+                        # readable agents dir. Both are offloaded because we hold
+                        # the config lock -- a synchronous fence+read on the loop
+                        # thread would stall it AND queue every other config
+                        # writer behind a disk read, the same reason the skill
+                        # mapping / KiroCrewConfig.load calls around here offload.
+                        # `spec_file`/`agents_dir` bind the loop variable and dir
+                        # at definition time (the thread runs before the loop
+                        # advances anyway, but binding keeps the closure correct
+                        # and lint-clean).
+                        _agents_dir = kiro_agents_dir_path()
+
+                        def _reread_under_lock(
+                            spec_file: Path = f, agents_dir: Path = _agents_dir
+                        ) -> dict | None:
+                            if not _spec_path_is_safe(spec_file, agents_dir):
+                                return None
+                            return _read_agent_spec(spec_file)
+
+                        data = await asyncio.to_thread(_reread_under_lock)
+                        # A refused/absent/non-object re-read means the file we
+                        # matched pre-lock is no longer a spec we may safely read
+                        # AND rewrite (swapped to a symlink, oversized, non-UTF-8,
+                        # or now a top-level array/scalar). `_read_agent_spec`
+                        # already guarantees a dict on a non-None return, so this
+                        # is the swap/refusal case: return the handler's 409
+                        # (concurrent-change) response rather than proceeding --
+                        # a bare re-read would instead let a non-dict reach
+                        # `data["model"] = ...` and raise TypeError, escaping the
+                        # `except (JSONDecodeError, OSError)` below as an HTTP 500.
+                        if data is None:
+                            return web.json_response(
+                                {
+                                    "error": f"'{name}' changed on disk during update; retry.",
+                                    "code": "agent_changed",
+                                },
+                                status=409,
+                            )
                         # `spec_str` for the same reason as `declared` above: a
                         # hand-edited spec can carry a structured (non-string)
                         # "name", which would crash the sidecar helper's dict

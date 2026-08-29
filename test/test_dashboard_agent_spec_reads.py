@@ -14,12 +14,18 @@ the sync helpers directly and redirect the agents dir with the documented
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock, patch
 
 import pytest
+from aiohttp import web
 
 import kiro_crew.agent as agent_mod
+import kiro_crew.dashboard.handlers.agents as agents_mod
 from conftest import requires_symlinks
-from kiro_crew.dashboard.handlers.agents import _namespaced_agent_file_exists
+from kiro_crew.dashboard.handlers.agents import (
+    _namespaced_agent_file_exists,
+    api_agent_detail,
+)
 from kiro_crew.dashboard.handlers.mcp import _collect_server_rows, _launch_specs_for
 
 
@@ -137,3 +143,115 @@ class TestLaunchSpecsFor:
         assert "good" in specs
         assert len(specs["good"]) == 1
         assert specs["good"][0].command == "run"
+
+
+@pytest.fixture
+def _owner_caller(monkeypatch):
+    """Run PAST the owner boundary so these tests reach the PATCH file loop.
+
+    Mirrors test_agent_detail_model_managed.py: the owner-auth invariant has its
+    own coverage; here we exercise handler behaviour on the mutating path.
+    """
+    monkeypatch.setattr(
+        "kiro_crew.dashboard.handlers.source_providers.is_owner_dashboard_request",
+        lambda request: True,
+    )
+
+
+def _patch_request(name: str, body: dict):
+    """A minimal PATCH request MagicMock, per test_agent_detail_model_managed.py."""
+    request = MagicMock(spec=web.Request)
+    request.method = "PATCH"
+    request.match_info = {"name": name}
+    request.app = {"state": MagicMock()}
+
+    async def _json():
+        return body
+
+    request.json = _json
+    return request
+
+
+class TestPatchUnderLockRereadIsHardened:
+    """The PATCH branch of ``api_agent_detail`` re-reads the matched spec UNDER
+    the config lock to pick up a concurrent PATCH's write. That authoritative
+    re-read is now routed through ``_spec_path_is_safe`` + ``_read_agent_spec``
+    (offloaded), so a spec that was swapped for a refused/non-object file between
+    the hardened outer scan and this re-read yields the handler's 409
+    concurrent-change response -- NOT an HTTP 500 from a ``TypeError`` on
+    ``data["model"] = ...`` (a top-level array/scalar) escaping the branch's
+    ``except (JSONDecodeError, OSError)``, and NOT a size-cap/symlink bypass.
+    """
+
+    @pytest.mark.asyncio
+    async def test_refused_reread_returns_409_not_500(
+        self, tmp_path, monkeypatch, _owner_caller
+    ):
+        """Simulate the concurrent swap: the outer scan matches a valid spec, but
+        the under-lock re-read is refused (``_read_agent_spec`` returns ``None``,
+        as it would for a file swapped to oversized/non-UTF-8/sensitive-symlink).
+        The handler must answer 409, not raise/500."""
+        cfg = tmp_path / "kirocrew.json"
+        cfg.write_text(
+            json.dumps({"name": "kirocrew", "model": "claude-old"}), encoding="utf-8"
+        )
+
+        real_reader = agents_mod._read_agent_spec
+        calls = {"n": 0}
+
+        def _swap_after_outer_scan(path):
+            # First call is the hardened OUTER scan -> return the real spec so the
+            # file matches and the PATCH branch is entered. The under-lock re-read
+            # is the second call -> refuse it, exactly as a concurrent swap to an
+            # unreadable file would.
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_reader(path)
+            return None
+
+        monkeypatch.setattr(agents_mod, "_read_agent_spec", _swap_after_outer_scan)
+
+        request = _patch_request("kirocrew", {"model": "claude-new"})
+        with patch("kiro_crew.agent.KIRO_AGENTS_DIR", tmp_path):
+            resp = await api_agent_detail(request)
+
+        assert resp.status == 409
+        # The spec on disk was NOT rewritten -- the branch bailed before the
+        # write-through, so the pre-existing value is intact.
+        assert json.loads(cfg.read_text(encoding="utf-8"))["model"] == "claude-old"
+
+    @pytest.mark.asyncio
+    async def test_non_object_reread_returns_409_not_typeerror(
+        self, tmp_path, monkeypatch, _owner_caller
+    ):
+        """A re-read that surfaces a top-level array (the shape the bare
+        ``json.loads`` had no ``isinstance`` guard for) is refused by
+        ``_read_agent_spec`` (non-object -> ``None``), so ``data["model"] = ...``
+        is never reached and no ``TypeError`` escapes as a 500."""
+        cfg = tmp_path / "kirocrew.json"
+        cfg.write_text(
+            json.dumps({"name": "kirocrew", "model": "claude-old"}), encoding="utf-8"
+        )
+
+        real_reader = agents_mod._read_agent_spec
+        calls = {"n": 0}
+
+        def _swap_to_array_after_outer_scan(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_reader(path)
+            # Overwrite the file with a non-object between the two reads, then let
+            # the real hardened reader reject it -- proving the 409 comes from the
+            # hardened gate, not a hand-rolled isinstance check.
+            path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+            return real_reader(path)
+
+        monkeypatch.setattr(
+            agents_mod, "_read_agent_spec", _swap_to_array_after_outer_scan
+        )
+
+        request = _patch_request("kirocrew", {"model": "claude-new"})
+        with patch("kiro_crew.agent.KIRO_AGENTS_DIR", tmp_path):
+            resp = await api_agent_detail(request)
+
+        assert resp.status == 409
