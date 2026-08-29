@@ -7898,7 +7898,6 @@
     "agent_capabilities": "Возможности агента",
     "artifacts": "Артефакты",
     "discover": "Обзор",
-    "knowledge": "Знания",
     "library": "Библиотека",
     "notifications": "Уведомления",
     "schedule": "Расписание",
@@ -8614,7 +8613,12 @@
       "steering_description": "Всегда активные markdown-соглашения из ~/.kiro/steering и .kiro/steering вашего проекта",
       "steering_label": "Направляющие правила",
       "templates_description": "Управляйте тем, с чего начинает каждый агент: модель, навыки, инструменты, MCP-серверы и правила безопасности",
-      "templates_label": "Шаблоны агентов"
+      "templates_label": "Шаблоны агентов",
+      "knowledge_label": "Знания",
+      "knowledge_description": "Документы и источники, которые агент может искать при ответе",
+      "group_agent": "Агент",
+      "group_automation": "Автоматизация",
+      "group_knowledge_instructions": "Знания и инструкции"
     },
     "channelPage": {
       "active": "активных",

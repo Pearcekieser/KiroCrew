@@ -7,7 +7,7 @@
  * Order in this file = order in the rail (within each group). Add new
  * built-in surfaces here; do not add hardcoded badge logic to `App.tsx`.
  */
-import { MessageSquare, Bell, BookOpen, Component, CalendarDays, Settings, ClipboardCheck, Compass, Webhook, Users } from 'lucide-react'
+import { MessageSquare, Bell, Component, CalendarDays, Settings, ClipboardCheck, Compass, Webhook, Users } from 'lucide-react'
 import { createSelector } from '@reduxjs/toolkit'
 import { KiroGhostMark } from '../components/KiroGhostMark'
 import { registerBuiltinSurface, surfaceMachineValue } from './registry'
@@ -164,17 +164,10 @@ registerBuiltinSurface({
   group: 'Main',
 })
 
-// Knowledge sits in the Main group directly below Artifacts (order in this file
-// = order in the rail within a group), keeping the two content surfaces
-// adjacent and always-visible rather than tucked into the collapsible Apps group.
-registerBuiltinSurface({
-  navId: 'knowledge',
-  route: '/knowledge',
-  label: 'Knowledge',
-  labelKey: 'nav.knowledge',
-  icon: <BookOpen size={16} />,
-  group: 'Main',
-})
+// Knowledge is NOT a main-rail surface: it lives as a tab inside Agent
+// Capabilities (CapabilitiesPage), grouped with Prompts and Steering — the
+// other feed-the-agent assets. The old /knowledge route redirects there
+// (App.tsx), so bookmarks and deep links keep resolving.
 
 // ── Bottom ─────────────────────────────────────────────────────────────────
 // Agents + Capabilities merged into one bottom-pinned "Agent Capabilities"

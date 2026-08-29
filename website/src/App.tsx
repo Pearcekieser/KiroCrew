@@ -73,7 +73,6 @@ import LogsPage from './pages/LogsPage'
 import HooksPage from './pages/HooksPage'
 import WebhooksPage from './pages/WebhooksPage'
 import CapabilitiesPage from './pages/CapabilitiesPage'
-import KnowledgePage from './pages/KnowledgePage'
 // Lazy: /members is a standalone surface not needed at startup, and the main
 // chunk sits at its size budget — the import() boundary keeps the page (and
 // its drawer/roster tree) out of the initial bundle.
@@ -3520,7 +3519,8 @@ export default function App() {
             <Route path="/chat/:slug?" element={<ErrorBoundary><ChatPage /></ErrorBoundary>} />
             <Route path="/orchestrated/:slug?" element={<OrchestratedRedirect />} />
             <Route path="/notifications" element={<ErrorBoundary><NotificationsPage /></ErrorBoundary>} />
-            <Route path="/knowledge" element={<ErrorBoundary><KnowledgePage /></ErrorBoundary>} />
+            {/* Knowledge moved into Agent Capabilities; old bookmarks land on its tab. */}
+            <Route path="/knowledge" element={<Navigate to="/capabilities?tab=knowledge" replace />} />
             <Route path="/members" element={<ErrorBoundary><Suspense fallback={null}><MembersPage /></Suspense></ErrorBoundary>} />
             <Route path="/overview" element={<Navigate to="/settings/overview" replace />} />
             <Route path="/schedule" element={<SchedulePage />} />

@@ -7678,7 +7678,6 @@
     "agent_capabilities": "এজেন্ট সক্ষমতা",
     "artifacts": "আর্টিফ্যাক্ট",
     "discover": "আবিষ্কার",
-    "knowledge": "জ্ঞানভান্ডার",
     "library": "লাইব্রেরি",
     "notifications": "নোটিফিকেশন",
     "schedule": "সময়সূচি",
@@ -8368,7 +8367,12 @@
       "steering_description": "~/.kiro/steering এবং আপনার প্রকল্পের .kiro/steering থেকে সর্বদা-সক্রিয় markdown কনভেনশন",
       "steering_label": "স্টিয়ারিং",
       "templates_description": "প্রতিটি এজেন্ট কী থেকে শুরু করে তা পরিচালনা করুন — তার মডেল, স্কিল, টুল, MCP সার্বার আর সুরক্ষা নিয়ম",
-      "templates_label": "এজেন্ট টেমপ্লেট"
+      "templates_label": "এজেন্ট টেমপ্লেট",
+      "knowledge_label": "নলেজ",
+      "knowledge_description": "ডকুমেন্ট ও সোর্স যা এজেন্ট উত্তর দেওয়ার সময় খুঁজতে পারে",
+      "group_agent": "এজেন্ট",
+      "group_automation": "অটোমেশন",
+      "group_knowledge_instructions": "নলেজ ও নির্দেশাবলী"
     },
     "channelPage": {
       "active": "সক্রিয়",

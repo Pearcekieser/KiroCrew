@@ -7788,7 +7788,6 @@
     "agent_capabilities": "Capacità dell'agente",
     "artifacts": "Artefatti",
     "discover": "Scopri",
-    "knowledge": "Conoscenze",
     "library": "Libreria",
     "notifications": "Notifiche",
     "schedule": "Pianificazione",
@@ -8491,7 +8490,12 @@
       "steering_description": "Convenzioni markdown sempre attive da ~/.kiro/steering e dal .kiro/steering del tuo progetto",
       "steering_label": "Direttive",
       "templates_description": "Gestisci da cosa parte ogni agente: il suo modello, le sue skill, i suoi strumenti, i suoi server MCP e le sue regole di sicurezza",
-      "templates_label": "Modelli di agente"
+      "templates_label": "Modelli di agente",
+      "knowledge_label": "Conoscenza",
+      "knowledge_description": "Documenti e fonti che l'agente può consultare quando risponde",
+      "group_agent": "Agente",
+      "group_automation": "Automazione",
+      "group_knowledge_instructions": "Conoscenza e istruzioni"
     },
     "channelPage": {
       "active": "attivo",

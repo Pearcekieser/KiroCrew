@@ -7568,7 +7568,6 @@
     "agent_capabilities": "エージェント機能",
     "artifacts": "アーティファクト",
     "discover": "発見",
-    "knowledge": "ナレッジ",
     "library": "ライブラリ",
     "notifications": "通知",
     "schedule": "スケジュール",
@@ -8245,7 +8244,12 @@
       "steering_description": "~/.kiro/steeringおよびプロジェクトの.kiro/steeringからの常時有効なMarkdownコンベンション",
       "steering_label": "ステアリング",
       "templates_description": "各エージェントの出発点を管理。モデル、スキル、ツール、MCP サーバー、ガードレール",
-      "templates_label": "エージェントテンプレート"
+      "templates_label": "エージェントテンプレート",
+      "knowledge_label": "ナレッジ",
+      "knowledge_description": "回答時にエージェントが検索できるドキュメントとソース",
+      "group_agent": "エージェント",
+      "group_automation": "自動化",
+      "group_knowledge_instructions": "ナレッジと指示"
     },
     "channelPage": {
       "active": "アクティブ",

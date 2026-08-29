@@ -7568,7 +7568,6 @@
     "agent_capabilities": "代理能力",
     "artifacts": "工件",
     "discover": "发现",
-    "knowledge": "知识库",
     "library": "库",
     "notifications": "通知",
     "schedule": "日程",
@@ -8245,7 +8244,12 @@
       "steering_description": "来自 ~/.kiro/steering 和你项目 .kiro/steering 的常驻 markdown 约定",
       "steering_label": "引导规则",
       "templates_description": "管理每个代理启动时用的东西：模型、技能、工具、MCP 服务器和防护规则",
-      "templates_label": "Agent 模板"
+      "templates_label": "Agent 模板",
+      "knowledge_label": "知识库",
+      "knowledge_description": "智能体回答时能检索到的文档与来源",
+      "group_agent": "智能体",
+      "group_automation": "自动化",
+      "group_knowledge_instructions": "知识与指令"
     },
     "channelPage": {
       "active": "活跃",

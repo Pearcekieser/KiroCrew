@@ -7568,7 +7568,6 @@
     "agent_capabilities": "에이전트 기능",
     "artifacts": "아티팩트",
     "discover": "탐색",
-    "knowledge": "지식",
     "library": "라이브러리",
     "notifications": "알림",
     "schedule": "스케줄",
@@ -8245,7 +8244,12 @@
       "steering_description": "~/.kiro/steering과 프로젝트의 .kiro/steering에서 항상 적용되는 Markdown 컨벤션",
       "steering_label": "스티어링",
       "templates_description": "각 에이전트가 시작하는 지점을 관리합니다: 모델, 스킬, 도구, MCP 서버, 가드레일",
-      "templates_label": "에이전트 템플릿"
+      "templates_label": "에이전트 템플릿",
+      "knowledge_label": "지식",
+      "knowledge_description": "에이전트가 답변할 때 검색할 수 있는 문서와 소스",
+      "group_agent": "에이전트",
+      "group_automation": "자동화",
+      "group_knowledge_instructions": "지식 및 지침"
     },
     "channelPage": {
       "active": "활성",

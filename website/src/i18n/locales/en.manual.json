@@ -2643,7 +2643,6 @@
     "agent_capabilities": "Agent Capabilities",
     "artifacts": "Artifacts",
     "discover": "Discover",
-    "knowledge": "Knowledge",
     "library": "Library",
     "notifications": "Notifications",
     "schedule": "Schedule",
@@ -2887,7 +2886,12 @@
       "prompts_label": "Prompts",
       "prompts_description": "Reusable prompt templates from {{registry}}",
       "workflows_label": "Workflows",
-      "workflows_description": "Create, edit, and run reusable agent workflows"
+      "workflows_description": "Create, edit, and run reusable agent workflows",
+      "knowledge_label": "Knowledge",
+      "knowledge_description": "Documents and sources your agent can search when answering",
+      "group_agent": "Agent",
+      "group_knowledge_instructions": "Knowledge & instructions",
+      "group_automation": "Automation"
     },
     "channelPage": {
       "agent_joining_one": "{{count}} agent joining",

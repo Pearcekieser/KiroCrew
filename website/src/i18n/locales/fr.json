@@ -7788,7 +7788,6 @@
     "agent_capabilities": "Capacités de l'agent",
     "artifacts": "Artefacts",
     "discover": "Découvrir",
-    "knowledge": "Connaissances",
     "library": "Bibliothèque",
     "notifications": "Notifications",
     "schedule": "Planification",
@@ -8491,7 +8490,12 @@
       "steering_description": "Conventions markdown toujours actives depuis ~/.kiro/steering et le .kiro/steering de votre projet",
       "steering_label": "Directives",
       "templates_description": "Gère ce dont part chaque agent : son modèle, ses skills, ses outils, ses serveurs MCP et ses garde-fous",
-      "templates_label": "Modèles d'agent"
+      "templates_label": "Modèles d'agent",
+      "knowledge_label": "Connaissances",
+      "knowledge_description": "Documents et sources que l'agent peut consulter pour répondre",
+      "group_agent": "Agent",
+      "group_automation": "Automatisation",
+      "group_knowledge_instructions": "Connaissances et instructions"
     },
     "channelPage": {
       "active": "en activité",
