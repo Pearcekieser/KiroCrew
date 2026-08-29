@@ -11152,6 +11152,18 @@
       "busy_emptying": "ゴミ箱を空にしています。完了するまで一部の操作は停止します。",
       "empty_failed_next_step": "「完全に削除」をもう一度お試しください。詳細はゲートウェイのログにあります。"
     },
+    "sessionsPage": {
+      "page_title": "セッション",
+      "search_placeholder": "セッションを検索…",
+      "new_session": "新しいセッション",
+      "filter_all": "すべて",
+      "filter_unread": "未読",
+      "group_today": "今日",
+      "group_yesterday": "昨日",
+      "group_earlier": "それ以前",
+      "empty_title": "セッションはありません",
+      "empty_subtitle": "作成して始めましょう。"
+    },
     "sessionsTab": {
       "agent": "エージェント",
       "channel": "チャネル",

@@ -11484,6 +11484,18 @@
       "busy_emptying": "Svuotamento del cestino. Alcune azioni sono in pausa fino al termine.",
       "empty_failed_next_step": "Riprova Elimina definitivamente. I dettagli sono nel log del gateway."
     },
+    "sessionsPage": {
+      "page_title": "Sessioni",
+      "search_placeholder": "Cerca sessioni…",
+      "new_session": "Nuova sessione",
+      "filter_all": "Tutte",
+      "filter_unread": "Non lette",
+      "group_today": "Oggi",
+      "group_yesterday": "Ieri",
+      "group_earlier": "Precedenti",
+      "empty_title": "Nessuna sessione",
+      "empty_subtitle": "Creane una per iniziare."
+    },
     "sessionsTab": {
       "agent": "Agente",
       "channel": "Canale",

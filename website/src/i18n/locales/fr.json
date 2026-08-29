@@ -11485,6 +11485,18 @@
       "busy_emptying": "Vidage de la corbeille. Certaines actions sont suspendues jusqu'à la fin.",
       "empty_failed_next_step": "Réessayez Supprimer définitivement. Les détails sont dans le journal du gateway."
     },
+    "sessionsPage": {
+      "page_title": "Sessions",
+      "search_placeholder": "Rechercher des sessions…",
+      "new_session": "Nouvelle session",
+      "filter_all": "Toutes",
+      "filter_unread": "Non lues",
+      "group_today": "Aujourd'hui",
+      "group_yesterday": "Hier",
+      "group_earlier": "Plus ancien",
+      "empty_title": "Aucune session",
+      "empty_subtitle": "Créez-en une pour commencer."
+    },
     "sessionsTab": {
       "agent": "Agent",
       "channel": "Canal",

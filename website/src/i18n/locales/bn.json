@@ -11319,6 +11319,18 @@
       "busy_emptying": "ট্র্যাশ খালি করা হচ্ছে। শেষ হওয়া পর্যন্ত কিছু কাজ থামানো থাকবে।",
       "empty_failed_next_step": "«স্থায়ীভাবে মুছুন» আবার চেষ্টা করুন। বিবরণ গেটওয়ে লগে আছে।"
     },
+    "sessionsPage": {
+      "page_title": "সেশন",
+      "search_placeholder": "সেশন খুঁজুন…",
+      "new_session": "নতুন সেশন",
+      "filter_all": "সব",
+      "filter_unread": "অপঠিত",
+      "group_today": "আজ",
+      "group_yesterday": "গতকাল",
+      "group_earlier": "আগের",
+      "empty_title": "কোনো সেশন নেই",
+      "empty_subtitle": "শুরু করতে একটি তৈরি করো।"
+    },
     "sessionsTab": {
       "agent": "এজেন্ট",
       "channel": "চ্যানেল",
