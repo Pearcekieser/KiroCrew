@@ -2649,15 +2649,26 @@ def migrate_agent_specs() -> int:
     agent loads. Idempotent and cheap (a handful of small JSON files); safe to
     run on every gateway start. Returns the number of spec files cleaned.
     """
-    if not kiro_agents_dir_path().is_dir():
+    agents_dir = kiro_agents_dir_path()
+    if not agents_dir.is_dir():
         return 0
     cleaned = 0
-    for spec_path in sorted(kiro_agents_dir_path().glob("*.json")):
-        try:
-            data = json.loads(spec_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+    for spec_path in sorted(agents_dir.glob("*.json")):
+        # This site reads a spec AND writes a modified copy back, so it needs the
+        # stricter no-symlink-at-all fence, not just the reader's refusal of a
+        # symlink whose RESOLVED target is sensitive. Following ANY symlink here
+        # would read the target and rewrite its contents into the freely readable
+        # agents directory -- the copy-out hazard _spec_path_is_safe documents --
+        # so gate the whole read/rewrite on it, exactly as the other rewrite paths
+        # (agent_spec_path, reset_agent_model) already do. Escaping or sensitive
+        # paths are refused for the same reason.
+        if not _spec_path_is_safe(spec_path, agents_dir):
             continue
-        if not isinstance(data, dict):
+        # Read through the hardened, size-capped gate so an oversized, non-UTF-8,
+        # AppleDouble or non-object spec in this tool-shared directory is refused
+        # (returns None) and skipped exactly like an absent file -- no new fatal path.
+        data = _read_spec_capped(spec_path)
+        if data is None:
             continue
         if "model_managed" not in data and "cc_model" not in data:
             continue

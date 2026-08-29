@@ -26,6 +26,7 @@ from kiro_crew.agent import (
     kiro_agents_dir_path,
 )
 from kiro_crew.agent_discovery import (
+    _read_agent_spec,
     clear_list_agents_cache,
     list_agents,
     project_agent_names,
@@ -95,11 +96,15 @@ def _namespaced_agent_file_exists(agent_name: str) -> bool:
     # glob the real ~/.kiro from an isolated run.
     try:
         for path in kiro_agents_dir_path().glob(f"*--{agent_name}.json"):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+            # Read through the one hardened gate: an oversized, non-UTF-8,
+            # AppleDouble or non-object namespaced file in this tool-shared
+            # directory returns None and is skipped exactly like an absent one,
+            # and a symlink whose resolved target is sensitive is refused rather
+            # than read. A refused spec must not make an app agent look present.
+            data = _read_agent_spec(path)
+            if data is None:
                 continue
-            if isinstance(data, dict) and data.get("name") == agent_name:
+            if data.get("name") == agent_name:
                 return True
     except OSError:
         return False
@@ -1566,7 +1571,14 @@ async def api_agent_detail(request: web.Request) -> web.Response:
     state: DashboardState = request.app["state"]
     for f in kiro_agents_dir_path().glob("*.json"):
         try:
-            data = json.loads(f.read_text(encoding="utf-8"))
+            # Read through the one hardened gate: an oversized, non-UTF-8,
+            # AppleDouble or non-object spec in this tool-shared directory returns
+            # None and is skipped exactly like an absent file, and a symlink whose
+            # resolved target is sensitive is refused rather than read. The later
+            # under-lock re-read stays a plain json.loads on purpose -- see below.
+            data = _read_agent_spec(f)
+            if data is None:
+                continue
             if data.get("name") == name or f.stem == name:
                 if request.method == "DELETE":
                     if f.name in (

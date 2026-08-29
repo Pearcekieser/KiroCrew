@@ -1,0 +1,7 @@
+{
+  "task_id": "task-migrate-agent-spec-reads",
+  "task_description": "Migrate the seven remaining hand-rolled agent-spec reads (plain `json.loads(path.read_text())` over the user-writable agents dir) onto agent_discovery._read_agent_spec, the one hardened reader (size cap, sensitive-symlink refusal, UTF-8/AppleDouble screening, non-object-JSON rejection). Introduce a single shared name->model helper (agent_model_map) to collapse the three divergent name->model scan spellings (_resolve_agent_model, _build_kiro_model_map, list_agents) at the root. Preserve each caller's existing failure semantics: a refused spec degrades exactly like an absent one, with no new fatal paths. Follow-up to PR #5423 (First Principles review CONCERNS, accepted-and-deferred).",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002"],
+  "blocked_reason": null
+}
