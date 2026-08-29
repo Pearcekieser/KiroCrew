@@ -438,6 +438,54 @@ def spec_model(data: dict[str, Any]) -> str:
     return spec_str(data, "model", _DEFER_MODEL)
 
 
+def agent_model_map(agents_dir: Path | None = None) -> dict[str, str]:
+    """Map every agent's name AND file stem -> its coerced model, hardened.
+
+    The ONE name->model scan. It exists to collapse the three spellings this
+    same job had grown — ``_build_kiro_model_map`` (chat_persistence), the inline
+    loop in ``SessionManager._resolve_agent_model`` (session), and the model
+    field ``list_agents``/``AgentInfo`` derives — into a single reader so they
+    cannot drift on either the read guards or the model coercion.
+
+    Two properties come from routing through the shared helpers rather than
+    hand-rolling the loop:
+
+    - **Every read is hardened.** ``_read_agent_spec`` is the one reader for the
+      user-writable, tool-shared agents dir: it screens AppleDouble ``._*``
+      sidecars, refuses a symlink whose RESOLVED target is sensitive
+      (``evil.json`` -> ``~/.aws/credentials``), caps the read size, and rejects
+      non-UTF-8 / non-object JSON — returning ``None`` for anything unusable. A
+      refused spec is therefore skipped exactly like an absent one; no new fatal
+      path is introduced for any consumer.
+    - **Every value is a real ``str``.** ``spec_model`` folds a non-string model
+      (the observed ``{"id": ...}`` and bare ``null`` foreign specs) to
+      ``_DEFER_MODEL`` (``"auto"``), the same rule the execution path applies, so
+      the map never hands a caller a structure where it annotated ``str``.
+
+    Both the spec's declared ``name`` (when present and truthy) and the file stem
+    are keyed to the model, matching how the former scans resolved an agent by
+    either spelling. The default *agents_dir* is resolved the way ``list_agents``
+    resolves its own — via :func:`_kiro_agents_dir` — so the two agree exactly on
+    which directory is the user scope. A missing/non-directory path yields ``{}``.
+    """
+    d = agents_dir or _kiro_agents_dir()
+    out: dict[str, str] = {}
+    if not d.is_dir():
+        return out
+    for f in sorted(d.glob("*.json")):
+        # `_read_agent_spec` already swallows OSError/oversize/symlink/non-utf8/
+        # non-object and returns None; a refused spec degrades like an absent one.
+        data = _read_agent_spec(f)
+        if data is None:
+            continue
+        model = spec_model(data)
+        name = data.get("name")
+        if name:
+            out[name] = model
+        out[f.stem] = model
+    return out
+
+
 def _builder_mcp_skills(data: dict[str, Any]) -> list[str]:
     """Extract skill names from builder-mcp args (--skill-name-filter)."""
     mcp = data.get("mcpServers") or {}

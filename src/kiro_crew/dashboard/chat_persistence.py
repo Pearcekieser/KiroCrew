@@ -16,7 +16,7 @@ from collections.abc import Iterator, Mapping
 from itertools import islice
 
 from kiro_crew import model_registry
-from kiro_crew.agent import kiro_agents_dir_path
+from kiro_crew.agent_discovery import agent_model_map
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.loader import KiroCrewConfig, config_dir
 from kiro_crew.dashboard.channel_slots import slot_closed_since
@@ -248,20 +248,18 @@ def _build_kiro_model_map() -> dict[str, str]:
     produce a byte-identical dict. Callers restoring many slots should build it
     once and pass it down (see ``kiro_model_map`` params below).
     """
-    out: dict[str, str] = {}
+    # One hardened scan: ``agent_model_map`` reads every spec through
+    # ``_read_agent_spec`` (size cap, sensitive-symlink refusal, UTF-8 /
+    # non-object screening) and coerces the model via ``spec_model``, keying
+    # both the spec name and the file stem — the identical name/stem job this
+    # function used to hand-roll, now shared with ``_resolve_agent_model`` so the
+    # two cannot diverge. A refused spec is skipped like an absent one; the outer
+    # guard keeps the degrade-to-empty contract for any unexpected failure.
     try:
-        for f in kiro_agents_dir_path().glob("*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                model = data.get("model", "")
-                if data.get("name"):
-                    out[data["name"]] = model
-                out[f.stem] = model
-            except (json.JSONDecodeError, OSError):
-                continue
+        return agent_model_map()
     except Exception:
         logger.debug("Failed to build kiro model map", exc_info=True)
-    return out
+        return {}
 
 
 def _load_restore_cfg() -> "KiroCrewConfig | None":
