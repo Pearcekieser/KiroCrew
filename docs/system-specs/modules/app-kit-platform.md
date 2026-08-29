@@ -1032,8 +1032,113 @@ screenshot gallery independently. Registry manifests project `useCases` and
 `configuration` as display metadata and rewrite repo-relative screenshot and
 hero paths through the same-origin blob proxy.
 
+**An INSTALLED app's art is served from its own install directory, not the blob
+proxy.** `GET /apps/{name}/art/{path}` (`handle_app_art_file`) reads the bytes
+the install itself wrote, and the four surfaces that render an installed app's
+art — the left rail and command palette (`appNav`), the Library card, the Updates
+worklist, and the detail page — resolve through `installedArt` /
+`installedArtList`.
+
+The proxy reaches those same bytes by a **git clone gated by an SSRF allowlist**,
+which is the wrong mechanism for a file already on local disk and had a visible
+failure mode: the allowlist is warmed by a network fetch a page render can
+outrun — the Library card list gates only on the installed-apps query while the
+catalog fetch rides the separate store listing — and an `<img>` does not retry a
+403, so a catalog-listed app's art vanished for that paint. Reading the file has
+no ordering, needs no network, survives a CDN outage, and names no host. It also
+takes the repo identifier off the art path: an app with no registry row, no
+manifest `repo` and no recorded `sourceUrl` now renders its real icon where
+before it fell back to the generic box.
+
+Two narrowings against `handle_app_ui_file`, whose shape this follows:
+
+- **Images only** — `_ART_IMAGE_EXTENSIONS`, which is deliberately NOT
+  `_ALLOWED_EXTENSIONS`: that set (the UI-bundle route's) admits `.json`, so
+  reusing it on a route rooted at the install directory would also serve
+  `installed.json` and `app.json`, a widening paid to show an icon. The blob
+  proxy screens on the same set, and that parity is load-bearing rather than
+  incidental — this route REPLACES the proxy per surface, so a file one serves
+  and the other refuses would make the same app's art render or 403 depending
+  only on whether it happens to be installed. One set, pinned by
+  `test_both_art_paths_screen_on_the_SAME_extension_set`, which asserts on
+  MEMBERS so a duplicate under any new name fails.
+- **Declared paths only** — the path must equal one the manifest names
+  (`iconPath`, `heroImage`, `heroImageDetail`, `screenshots`, and their `Dark`
+  variants, with a leading `./` normalized off). The manifest, not the request,
+  chooses the file, which is what lets the route carry no traversal reasoning of
+  its own. Containment is still checked, because a manifest is the app's own
+  untrusted content and a declared value is not evidence the file lands inside
+  the directory. Undeclared, escaping and missing all answer one 404, so a probe
+  cannot map a manifest's declarations by status.
+
+The containment check catches `OSError`, `RuntimeError` and `ValueError`, not
+`ValueError` alone. `Path.resolve()` raises `RuntimeError` — not an `OSError` —
+on a symlink loop, so a declared self-referential link (or a mutual pair) would
+otherwise leave the handler as a 500 on a route whose every other refusal is a
+clean status; the app that plants the link is the one whose art this serves, so
+that input is exactly what the endpoint reads. None of the three is a different
+ANSWER: all mean the path is not servable, which is the same 404 as undeclared
+and missing. The publisher's `EditorialAssets.add` in KiroCrewApps documents the
+same `RuntimeError` trap from the other side of the same operation.
+
+**The route serves BYTES read under a pinned descriptor, not a path.** Validating
+a path and handing it to `web.FileResponse` opens it a SECOND time, so the app that
+owns the install directory can swap a declared name for a symlink between the check
+and that open and have the gateway read the target instead — and the gateway is not
+sandboxed, so that launders a read the app's own code can be refused. Checking a
+path and then acting on a re-resolution of it is worse than not checking, because
+it reports success.
+
+So `_read_declared_art` does one open through `pinned_fs.open_in_pinned_parent`
+(one `openat` per component, each carrying `O_NOFOLLOW`), validates the
+**descriptor** with `fstat`, reads from it, and the handler serves those bytes.
+Three consequences worth stating:
+
+- A symlink at the declared final name is refused **even when its target is a
+  legitimate file inside the root**. It is the indirection that is refused, not the
+  destination, because only the indirection is swappable.
+- Containment on the resolved parent is still required and is not redundant with the
+  pinned walk. `pin_parent`'s contract is explicit that a component swapped BEFORE
+  the parent was resolved is followed by that resolution, so an ANCESTOR that is
+  already a link is refused by the containment check alone.
+- The bytes are held rather than streamed, so `_ART_MAX_BYTES` caps what one
+  declared file can make the gateway buffer, and the `ETag` is derived from the
+  descriptor that was read rather than from a second stat of the path. `no-cache`
+  means the browser revalidates on every load and the rail renders on every load, so
+  without that validator each load would be a full 200 instead of a 304.
+
+On Windows the pinned walk is unavailable (no `O_NOFOLLOW`, no descriptor-relative
+open), so the route refuses any reparse point between the root and the target and
+then opens by path. That narrows the window rather than closing it, and it narrows
+it against what the platform actually permits: creating a FILE symlink there needs
+elevation (the reason `platform_compat.symlink_or_junction` exists), so the
+reachable swap is a junction on an ancestor, which the reparse-point probe covers.
+
+The handler's own `..` guard is load-bearing rather than belt-and-braces:
+measured against the real router, `../x` and `%2e%2e/x` are normalized away
+before matching, but `assets/..%2fx.webp` reaches the handler with
+`match_info['path'] == 'assets/../x.webp'` because the encoded slash stops that
+normalization. The whole decision runs in one `asyncio.to_thread` hop — manifest
+read, declaration check and containment are each a blocking syscall, and the
+gateway runs everything on one loop (`no-blocking-call-on-event-loop`).
+
+The route's verb must also appear in `token_auth._APPS_SPA_EXCLUDED_RE`, which
+enumerates the `/apps/` sub-namespaces that have real handlers. A verb missing
+from it is classified as a React Router navigation, so the middleware answers the
+SPA shell and an `<img>` receives HTML with a 200 and renders nothing — silent,
+because the handler is never the thing that fails. The pre-existing drift guard
+cannot catch this (it scans `server.py` only, and its `"{" in p` escape hatch
+treats any pattern route as a real handler without consulting the regex), so
+`test_apps_routes_get_paths_are_matched_by_the_apps_spa_regex` instantiates each
+`/apps/` route literal in `apps/routes.py` and matches the concrete path.
+
+The blob proxy keeps serving a **not-installed** external-registry row, which
+genuinely has no local copy; that half of `known_registry_repos` is untouched.
+
 Writers: builtin `app.json` manifests, `apps/registry.py` (`_merge_manifest`),
+`apps/routes.py` (`handle_app_art_file`),
 `website/src/components/appstore/appManifest.ts`,
+`website/src/components/appstore/useHeroArt.ts`,
 `website/src/pages/AppDetailPage.tsx`, and
 `website/scripts/check-app-manifest-sync.mjs`.
 

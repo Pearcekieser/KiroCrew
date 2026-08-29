@@ -128,6 +128,40 @@ describe('appNavTarget — icon inputs', () => {
     expect(bare?.iconName).toBe('')
     expect(bare?.pageIconUrl).toBe('')
   })
+
+  it('resolves the repo-relative iconPath an EXTERNAL app actually declares', () => {
+    // The manifest contract gives a fetched app `iconPath` and reserves `iconUrl`
+    // for a builtin's absolute client-local path. Reading only `iconUrl` here left
+    // every external app's rail and command-palette icon as the generic box — on
+    // the one surface that renders for every enabled app on every load.
+    const t = appNavTarget(
+      app({
+        name: 'endless-worlds',
+        manifest: {
+          iconPath: 'assets/icon.webp',
+          iconPathDark: './assets/icon-dark.webp',
+          ui: { pages: [{ route: '/x' }] },
+        },
+      }),
+    )
+    expect(t?.iconUrl).toBe('/apps/endless-worlds/art/assets/icon.webp')
+    // The leading `./` is stripped, so a manifest may declare either spelling.
+    expect(t?.iconUrlDark).toBe('/apps/endless-worlds/art/assets/icon-dark.webp')
+  })
+
+  it('prefers iconPath over iconUrl when a manifest declares both', () => {
+    const t = appNavTarget(
+      app({
+        name: 'both',
+        manifest: {
+          iconPath: 'assets/from-path.webp',
+          iconUrl: 'assets/from-url.webp',
+          ui: { pages: [{ route: '/x' }] },
+        },
+      }),
+    )
+    expect(t?.iconUrl).toBe('/apps/both/art/assets/from-path.webp')
+  })
 })
 
 describe('appNavTargets', () => {
@@ -160,13 +194,19 @@ describe('appNavTarget icon resolution', () => {
     expect(t?.iconUrl).toBe('/app-assets/demo/icon.svg')
   })
 
-  it('proxies a repo-relative manifest icon against the recorded install URL', () => {
+  it('serves a repo-relative manifest icon from the app own install directory', () => {
+    // The rail renders for EVERY enabled app on every dashboard load, so this is
+    // the surface that most needs an icon URL with no network behind it: the
+    // blob proxy this replaced answers from a git clone gated by an SSRF
+    // allowlist, and a cold start could 403 every external app's rail icon at
+    // once. `sourceUrl` is now irrelevant here — the app's own name locates the
+    // bytes.
     const t = appNavTarget(app({
       sourceUrl: 'https://example.invalid/octocat/demo',
       manifest: { iconUrl: 'assets/icon.webp', ui: { pages: [{ route: '/demo' }] } },
     }))
-    expect(t?.iconUrl)
-      .toBe('/api/apps/blob?repo=https%3A%2F%2Fexample.invalid%2Foctocat%2Fdemo&path=assets%2Ficon.webp')
+    expect(t?.iconUrl).toBe('/apps/demo/art/assets/icon.webp')
+    expect(t?.iconUrl).not.toContain('/api/apps/blob')
   })
 
   it('renders no icon for a manifest naming an external host', () => {

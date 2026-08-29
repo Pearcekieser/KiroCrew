@@ -155,6 +155,50 @@ export function manifestArtList(paths: unknown, repo: string | undefined): strin
 }
 
 /**
+ * Resolve ONE art path for an app that is INSTALLED, against its own files.
+ *
+ * The bytes of an installed app's icon, hero and screenshots are already on
+ * local disk, inside the directory the install created. ``manifestArt`` routes
+ * them through ``/api/apps/blob``, which is a git clone gated by an SSRF
+ * allowlist — so a catalog-listed app's art could 403 on a cold load, because
+ * that allowlist is warmed by a network fetch the Library render can outrun
+ * (its card list gates on the installed-apps query alone) and an ``<img>`` does
+ * not retry. ``/apps/{name}/art/…`` reads the file the gateway itself wrote:
+ * no network, no ordering, no host in the request.
+ *
+ * Same refusal rules as ``manifestArt`` — a manifest is untrusted content, so a
+ * cross-origin value is refused rather than handed to ``<img>`` — and the same
+ * ``''`` answer for anything unusable, so a caller keeps degrading to the
+ * gradient. The leading ``./`` is stripped to match the backend, which compares
+ * the request against the manifest's declared paths in that normalized form.
+ *
+ * Segments are encoded individually: the path is a manifest-declared value and
+ * may contain a space, which must not arrive as a raw space in the URL, while
+ * the ``/`` separators must survive.
+ */
+export function installedArt(path: unknown, appName: string | undefined): string {
+  const kind = classifyManifestArt(path)
+  if (kind === 'refused') return ''
+  const value = asParserSees(path as string)
+  if (kind === 'same-origin') return value
+  if (!appName) return ''
+  const rel = value.startsWith('./') ? value.slice(2) : value
+  const encoded = rel.split('/').map(encodeURIComponent).join('/')
+  return `/apps/${encodeURIComponent(appName)}/art/${encoded}`
+}
+
+/**
+ * Resolve a LIST of an installed app's art paths, dropping every refused entry.
+ *
+ * ``unknown`` for the same reason :func:`manifestArtList` takes it: the
+ * installed-app normalizer coerces ``screenshots`` but not ``screenshotsDark``.
+ */
+export function installedArtList(paths: unknown, appName: string | undefined): string[] {
+  if (!Array.isArray(paths)) return []
+  return paths.map(p => installedArt(p, appName)).filter(Boolean)
+}
+
+/**
  * True when the app ships ANY art ``useHeroArt`` could render (either theme's
  * hero, or a screenshot). Featured ranking uses this so a dark-only or
  * screenshot-only app is not treated as art-less.
