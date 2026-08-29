@@ -189,6 +189,86 @@ export function groupDisplayItems(messages: ChatMessage[]): GroupedTurns {
   return { turns, trailingTurnIdx }
 }
 
+/** Two turn items describe the same rows: same kind, same underlying message
+ *  REFERENCES, same transcript indices. Reference equality on `msg` is the
+ *  load-bearing check — the store replaces a message object whenever its
+ *  content changes, so an unchanged reference means the row's input is
+ *  byte-identical. */
+// PURITY INVARIANT for the reconcile below: every field of a DisplayItem/
+// TurnItem must be a pure function of (its message references, their indices,
+// and `complete`). The equality helpers compare exactly those inputs, so a
+// future field derived from anything else will be silently frozen by the
+// substitution — such a field must be added to these comparisons.
+const sameTurnItem = (a: TurnItem, b: TurnItem): boolean => {
+  if (a.kind === 'single') return b.kind === 'single' && a.msg === b.msg && a.idx === b.idx
+  if (b.kind !== 'group') return false
+  if (a.startIdx !== b.startIdx || a.msgs.length !== b.msgs.length) return false
+  for (let i = 0; i < a.msgs.length; i++) if (a.msgs[i] !== b.msgs[i]) return false
+  return true
+}
+
+const sameDisplayItem = (a: DisplayItem, b: DisplayItem): boolean => {
+  if (a.kind === 'turn') {
+    if (b.kind !== 'turn') return false
+    if (a.complete !== b.complete || a.items.length !== b.items.length) return false
+    for (let i = 0; i < a.items.length; i++) if (!sameTurnItem(a.items[i], b.items[i])) return false
+    return true
+  }
+  if (b.kind === 'turn') return false
+  return sameTurnItem(a, b)
+}
+
+/**
+ * Identity-preserving wrapper around {@link groupDisplayItems}.
+ *
+ * The grouping is memoized on `messages` alone, but every streaming rAF flush
+ * replaces the messages array, so the memo re-runs and mints FRESH turn objects
+ * for every turn in the transcript — handing each mounted TurnBlock a new
+ * `turn` prop per flush and defeating all downstream memoization
+ * (memo(TurnBlock), mergeTurnThinking's [turn.items] memo, the disclosure
+ * machinery). This factory reconciles each fresh result against the previous
+ * one and substitutes the PRIOR object wherever the new element describes the
+ * same underlying message references — so a flush that only grew the trailing
+ * message returns the identical settled-turn objects and only the trailing
+ * turn carries a new identity.
+ *
+ * Cache shape and why it cannot leak: the closure holds exactly ONE
+ * (messages, result) pair — the last call's — and both slots are overwritten
+ * on every call, so the previous messages array is released as soon as the
+ * next one arrives. Each caller creates its own grouper (one per mounted
+ * ChatPage via useMemo), so two transcripts never thrash a shared slot and the
+ * whole cache dies with the component. `applyRunningState` stays downstream
+ * and untouched: it already applies the running flag in O(1) on top of
+ * whatever this returns.
+ */
+export function createTurnGrouper(): (messages: ChatMessage[]) => GroupedTurns {
+  let prevMessages: ChatMessage[] | null = null
+  let prevResult: GroupedTurns | null = null
+  return (messages: ChatMessage[]): GroupedTurns => {
+    if (prevMessages === messages && prevResult) return prevResult
+    const next = groupDisplayItems(messages)
+    if (prevResult) {
+      const prevTurns = prevResult.turns
+      let allReused = next.turns.length === prevTurns.length &&
+        next.trailingTurnIdx === prevResult.trailingTurnIdx
+      for (let i = 0; i < next.turns.length; i++) {
+        const p = prevTurns[i]
+        if (p && sameDisplayItem(next.turns[i], p)) next.turns[i] = p
+        else allReused = false
+      }
+      // Every element (and the trailing index) survived: keep the previous
+      // top-level object too, so the [groupedTurns] memos downstream also hit.
+      if (allReused) {
+        prevMessages = messages
+        return prevResult
+      }
+    }
+    prevMessages = messages
+    prevResult = next
+    return next
+  }
+}
+
 /**
  * Apply the slot's running state to the grouped output. O(1): when the slot is
  * still running the trailing turn is not complete yet, so exactly one element is

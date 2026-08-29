@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect, useMemo, useCallback, type ReactNode } from 'react'
+import { memo, useState, useRef, useEffect, useMemo, useCallback, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ChevronRight } from 'lucide-react'
 import type { DisplayItem, TurnItem } from './types'
+import { useLanguageGeneration } from '../../i18n/useLanguageGeneration'
 import { useSearchHighlight } from '../../hooks/SearchHighlightContext'
 import { isWorkflowRunTool } from './WorkflowRunCard'
 import { isSpawnRunTool } from './SubagentRunCard'
@@ -236,7 +237,11 @@ function mergeTurnThinking(items: TurnItem[]): TurnItem[] {
  *  renders it for ChatEmbed with no Provider mounted, and a pane must scope the
  *  set to its OWN session key, not the globally-active slot.
  */
-export default function TurnBlock({ turn, renderItem, collapseAll = false, appToolCallIds = EMPTY_ID_SET, disclosure, onDisclosureChange }: { turn: Extract<DisplayItem, {kind:'turn'}>; renderItem: (item: TurnItem, i: number) => ReactNode; collapseAll?: boolean; appToolCallIds?: ReadonlySet<string>; disclosure?: boolean; onDisclosureChange?: (expanded: boolean) => void }) {
+function TurnBlock({ turn, renderItem, collapseAll = false, appToolCallIds = EMPTY_ID_SET, disclosure, disclosureKey, onDisclosureChange }: { turn: Extract<DisplayItem, {kind:'turn'}>; renderItem: (item: TurnItem, i: number) => ReactNode; collapseAll?: boolean; appToolCallIds?: ReadonlySet<string>; disclosure?: boolean; disclosureKey?: string; onDisclosureChange?: (key: string, expanded: boolean) => void }) {
+  // memo() bails out of the provider-level language repaint, so this component
+  // subscribes to language generation itself: its i18nT() strings must
+  // re-translate even when no prop moves.
+  useLanguageGeneration()
   const [localExpanded, setLocalExpanded] = useState(!turn.complete)
   // Disclosure is HOST-OWNED when `disclosure` is supplied, and that is what
   // makes an explicit choice durable: the transcript is virtualised, so this
@@ -255,9 +260,9 @@ export default function TurnBlock({ turn, renderItem, collapseAll = false, appTo
   const toggle = useCallback(() => {
     userToggled.current = true
     const next = !expanded
-    if (onDisclosureChange) onDisclosureChange(next)
+    if (onDisclosureChange && disclosureKey !== undefined) onDisclosureChange(disclosureKey, next)
     else setLocalExpanded(next)
-  }, [expanded, onDisclosureChange])
+  }, [expanded, onDisclosureChange, disclosureKey])
   const wasComplete = useRef(turn.complete)
   useEffect(() => {
     if (turn.complete && !wasComplete.current && !userToggled.current) setLocalExpanded(false)
@@ -299,10 +304,12 @@ export default function TurnBlock({ turn, renderItem, collapseAll = false, appTo
   // callback cannot re-fire this effect on every render.
   const onDisclosureChangeRef = useRef(onDisclosureChange)
   onDisclosureChangeRef.current = onDisclosureChange
+  const disclosureKeyRef = useRef(disclosureKey)
+  disclosureKeyRef.current = disclosureKey
   useEffect(() => {
     if (!matchInCollapsedSegment) return
     const notify = onDisclosureChangeRef.current
-    if (notify) notify(true)
+    if (notify && disclosureKeyRef.current !== undefined) notify(disclosureKeyRef.current, true)
     else setLocalExpanded(true)
   }, [matchInCollapsedSegment])
 
@@ -421,3 +428,9 @@ function CollapsibleSection({ expanded, children }: { expanded: boolean; childre
     </motion.div>
   )
 }
+
+// Memoized so settled turns bail out entirely when the grouping's structural
+// sharing (createTurnGrouper) hands back identical `turn` references across
+// streaming flushes. The bail-out only holds when the host also passes stable
+// renderItem/onDisclosureChange props — ChatPage hoists both for exactly this.
+export default memo(TurnBlock)
