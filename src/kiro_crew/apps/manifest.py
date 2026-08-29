@@ -636,6 +636,11 @@ class Permissions:
     #: Declared rather than implicit so "which apps can start an agent" is
     #: auditable from the manifest instead of from an app's import graph.
     spawn: bool = False
+    #: May run durable background jobs through the host's Job SDK, and gains the
+    #: shared ``_jobs/*`` HTTP surface under its own namespace. Declared for the
+    #: same reason as ``spawn``: "which apps can start work that outlives the
+    #: page that started it" must be answerable from the manifest.
+    jobs: bool = False
     # WS cross-app visibility opt-in: app names (or ["*"]) allowed to use
     # slots:app:<this-app> / subagent:app:<this-app> declarations to observe
     # this app's slots and subagents. Empty list = no cross-app visibility.
@@ -659,6 +664,8 @@ class Permissions:
             d["cron"] = True
         if self.spawn:
             d["spawn"] = True
+        if self.jobs:
+            d["jobs"] = True
         if self.exposeToApps:
             d["exposeToApps"] = self.exposeToApps
         return d
@@ -685,6 +692,7 @@ class Permissions:
             memory=str(data.get("memory", "")),
             cron=data.get("cron") is True,
             spawn=data.get("spawn") is True,
+            jobs=data.get("jobs") is True,
             exposeToApps=_granted_list(data.get("exposeToApps")),  # noqa: N815
         )
 
