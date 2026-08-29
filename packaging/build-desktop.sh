@@ -419,7 +419,18 @@ LAUNCH
 # python.exe directly -- see main.js).
 #   $1 = PBS interpreter dir   $2 = output dir
 build_backend_windows() {
-  local pbs_dir="$1" out="$2" sp
+  local pbs_dir="$1" out="$2" sp root_winspec
+
+  # pip's requirement parser gets the RAW argument on Windows when an extras
+  # suffix is attached: MSYS path conversion rewrites a bare `/d/...` argument
+  # to `D:\...` before python.exe sees it, but `[voice-aws]` makes the argument
+  # stop looking like a path, so pip receives the unconverted MSYS spelling and
+  # refuses it ("Expected package name at the start of dependency specifier").
+  # Convert explicitly so the extras install below parses on Windows pip.
+  root_winspec="$ROOT"
+  if command -v cygpath >/dev/null 2>&1; then
+    root_winspec="$(cygpath -m "$ROOT")"
+  fi
 
   log "Installing kiro_crew into the bundled interpreter ($(basename "$out"))…"
   mkdir -p "$(dirname "$out")"
@@ -451,7 +462,7 @@ build_backend_windows() {
   # as `stt_no_wheel_for_platform` rather than as a missing extra.
   env PYTHONNOUSERSITE=1 PYTHONPATH= KIROCREW_SKIP_FRONTEND=1 \
     "$out/python.exe" -m pip install --prefer-binary \
-    --no-warn-script-location --disable-pip-version-check "$ROOT[voice-aws]"
+    --no-warn-script-location --disable-pip-version-check "${root_winspec}[voice-aws]"
   if ! env PYTHONNOUSERSITE=1 PYTHONPATH= KIROCREW_SKIP_FRONTEND=1 \
       "$out/python.exe" -m pip install --prefer-binary \
       --only-binary pywhispercpp \
