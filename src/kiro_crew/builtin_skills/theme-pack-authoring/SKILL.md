@@ -37,6 +37,7 @@ a level-0 pack shipping a font is refused.
   "emoji": "🎨",
   "level": 1,
   "formatVersion": 1,
+  "loaderIcons": ["star", "sparkles", "moon", "cloud"],
   "fonts": [
     { "family": "My Sans", "file": "my-sans-400.woff2", "weight": 400, "role": "sans" },
     { "family": "My Sans", "file": "my-sans-500.woff2", "weight": 500, "role": "sans" },
@@ -45,6 +46,12 @@ a level-0 pack shipping a font is refused.
   ]
 }
 ```
+
+`loaderIcons` is optional and requires Level 1 or 2. Supply 4–8 distinct names
+from: `cloud`, `flower`, `heart`, `moon`, `sparkles`, `star`, `sun`, `zap`.
+Kiro Crew maps these names to bundled Lucide symbols and keeps the stock
+cross-fading carousel; packs cannot inject loader code or SVG through this field.
+Omit it to retain the default Kiro ghost poses.
 
 ## Fonts — the role system (the ONLY supported route)
 

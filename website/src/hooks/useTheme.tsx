@@ -27,6 +27,7 @@ import {
 } from './themeCss'
 
 import { i18nT } from '../i18n/t'
+import type { ThemeLoaderIconName } from '../themeLoaderIcons'
 
 export type ModePreference = 'dark' | 'light' | 'system'
 export type ResolvedMode = 'dark' | 'light'
@@ -126,6 +127,8 @@ export interface ThemeAssets {
   branding?: ThemeBranding
   fonts?: ThemeFontFace[]
   hasOverrides?: boolean
+  /** Stock symbol names for the chat loader's existing carousel. */
+  loaderIcons?: ThemeLoaderIconName[]
   // L2 assets: overlays, topbar, audio, persona.
   overlays?: ThemeOverlayDecl[]
   topbar?: ThemeTopbar
@@ -513,6 +516,11 @@ export function useTheme(): ThemeContextValue {
     throw new Error('useTheme must be used within <ThemeProvider>')
   }
   return ctx
+}
+
+/** Read theme state when available without requiring standalone consumers to mount the provider. */
+export function useOptionalTheme(): ThemeContextValue | null {
+  return useContext(ThemeContext)
 }
 
 /**

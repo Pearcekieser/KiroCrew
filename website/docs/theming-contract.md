@@ -203,19 +203,32 @@ refuses the pack with an explainable error, and the runtime scoper is the positi
 allowlist that is the actual enforced boundary. A rule that slips past the former
 still gets dropped by the latter.
 
-## Chat loader (compiled seam, not an installed pack)
+## Chat loader
 
-The loading indicator in the chat footer (shown while a turn is running) is
-theme-owned, but it is a **compiled seam, not a manifest capability**. It is
-declared in code through `registerThemeBranding()` (`src/themeBranding.tsx`),
-which runs at module load from the composition root (`src/extensions.ts`), so it
-is available to themes **bundled in the build**: the core's own themes and a
-downstream edition's. An *installed* `theme.json` pack cannot ship executable
-registration, so it cannot set a loader; a pack that needs one has to land as a
-compiled theme instead. (A pack can still restyle whatever loader is active via
-CSS; see the colour note below.)
+The loading indicator in the chat footer (shown while a turn is running) supports
+both installed packs and compiled themes.
 
-Two levels, pick one:
+### Installed packs: stock symbols
+
+A Level-1 or Level-2 pack may select 4–8 distinct bundled symbols in
+`theme.json`. The names are a closed allowlist; packs never ship executable
+components or inline SVG through this field.
+
+```json
+"loaderIcons": ["star", "sparkles", "moon", "cloud"]
+```
+
+Allowed names: `cloud`, `flower`, `heart`, `moon`, `sparkles`, `star`, `sun`,
+`zap`. The existing four-slot carousel supplies the cross-fade, cascade timing,
+and reduced-motion behavior. An absent declaration preserves the default Kiro
+ghost poses. Invalid names, duplicates, fewer than four entries, or declarations
+on a Level-0 pack are rejected during install.
+
+### Compiled themes: component seam
+
+Themes bundled into the build may still register arbitrary trusted artwork or a
+whole custom loader through `registerThemeBranding()` (`src/themeBranding.tsx`),
+which runs at module load from the composition root (`src/extensions.ts`):
 
 ```tsx
 import { registerThemeBranding } from '@/themeBranding'
