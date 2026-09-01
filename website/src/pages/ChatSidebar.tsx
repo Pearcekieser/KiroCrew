@@ -1402,7 +1402,7 @@ interface SessionRowProps {
   boost: PaletteBoost
   boostFor: (hex: string) => PaletteBoost
   renameInputRef: React.MutableRefObject<HTMLTextAreaElement | null>
-  onRenameStart: (key: string, scope: string, title: string) => void
+  onRenameStart: (key: string, scope: string, title: string, fromMenu: boolean) => void
   onRenameChange: (value: string) => void
   onRenameCommit: (key: string, value: string) => void
   onRenameCancel: () => void
@@ -1768,7 +1768,7 @@ const SessionRow = memo(function SessionRow({
     const rowMenuProps = {
       slotKey: s.key,
       mode,
-      onRename: () => onRenameStart(s.key, scope, s.title && s.title !== s.key ? s.title : ''),
+      onRename: () => onRenameStart(s.key, scope, s.title && s.title !== s.key ? s.title : '', true),
       onOpenInNewTab: onOpenSlotInNewTab ? () => onOpenSlotInNewTab(s.key) : undefined,
     }
     return (
@@ -1851,6 +1851,10 @@ const SessionRow = memo(function SessionRow({
             onOpenSlotInNewTab(s.key, { background: true })
           }) : undefined}
           onClick={e => {
+            // A browser emits two click events before dblclick. Let the first
+            // select an inactive session, but do not fetch it a second time
+            // before the title's double-click handler opens rename.
+            if (e.detail > 1 && (e.target as HTMLElement).closest?.('[data-session-title]')) return
             if ((e.target as HTMLElement).closest?.('[data-fork]')) { onDuplicate(s.key); return }
             if ((e.target as HTMLElement).closest?.('[data-close]')) { onCloseSession(s.key); return }
             // When the gateway is offline, switching sessions silently fails
@@ -1876,6 +1880,13 @@ const SessionRow = memo(function SessionRow({
             }
             dispatch(switchSlot(s.key))
             onSelectSlot?.(s.key)
+          }}
+          onDoubleClick={e => {
+            if (!(e.target as HTMLElement).closest?.('[data-session-title]')) return
+            if (renamingHere) return
+            e.preventDefault()
+            e.stopPropagation()
+            onRenameStart(s.key, scope, s.title && s.title !== s.key ? s.title : '', false)
           }}>
           {/* Held-modifier digit badge: while the chat-jump modifier is down,
            *  the first nine sessions in shortcut order show the digit that
@@ -2076,7 +2087,11 @@ const SessionRow = memo(function SessionRow({
                 made the list read as ragged. The full string stays reachable
                 through the `title` attribute, and the rename box below is the one
                 place it is shown in full. */}
-            <div className={`${ROW_TITLE_CLS} font-semibold text-text ${renamingHere ? '' : 'truncate'}`} title={s.title && s.title !== s.key ? s.title : s.key}>
+            <div
+              data-session-title
+              className={`${ROW_TITLE_CLS} font-semibold text-text ${renamingHere ? '' : 'truncate'}`}
+              title={s.title && s.title !== s.key ? s.title : s.key}
+            >
               {/* No separate fork glyph: forked titles already carry the
                   persisted "↳ " marker (chat_fork.py _FORK_TITLE_MARKER). Keeping
                   the arrow in the title text — rather than as a UI-only glyph —
@@ -2480,8 +2495,8 @@ function ChatSidebar({
   // draft VALUE from the row as an argument rather than closing over
   // `renameValue` — a closure over it would mint a new handler per keystroke
   // and re-render every row on each key.
-  const onRenameStart = useCallback((key: string, scope: string, title: string) => {
-    suppressMenuRestoreRef.current = true
+  const onRenameStart = useCallback((key: string, scope: string, title: string, fromMenu: boolean) => {
+    if (fromMenu) suppressMenuRestoreRef.current = true
     setRenamingSlot(key)
     setRenameScope(scope)
     setRenameValue(title)
