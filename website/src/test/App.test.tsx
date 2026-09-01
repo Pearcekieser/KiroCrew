@@ -76,6 +76,7 @@ vi.mock('../api/client', () => ({
     chatMode: vi.fn().mockResolvedValue({}),
     listInstances: vi.fn().mockResolvedValue({ instances: [], warm_set_cap: 5 }),
     themes: vi.fn().mockResolvedValue({ themes: [] }),
+    themeDetail: vi.fn().mockResolvedValue({}),
     themeBoot: vi.fn().mockResolvedValue({
       mode: '',
       color: '',
@@ -815,6 +816,54 @@ describe('App routing', () => {
     // The wordmark renders as two colored segments ('Kiro ' + 'Crew').
     expect(screen.getAllByText('Crew').length).toBeGreaterThan(0)
     localStorage.removeItem('mc-nav')
+  })
+
+  it('uses installed theme branding in the left rail and browser favicon', async () => {
+    const { api } = await import('../api/client')
+    localStorage.removeItem('mc-nav')
+    localStorage.setItem('mc-color-theme', 'custom-pearce')
+    vi.mocked(api.themes).mockResolvedValueOnce({
+      themes: [{ slug: 'pearce', name: 'Pearce CRT', emoji: 'PC', source: 'installed' }],
+    } as never)
+    vi.mocked(api.themeDetail).mockResolvedValueOnce({
+      slug: 'pearce',
+      name: 'Pearce CRT',
+      emoji: 'PC',
+      level: 1,
+      source: 'installed',
+      dark: { '--bg': '#000', '--text': '#fff', '--accent': '#fc0' },
+      light: { '--bg': '#fff', '--text': '#000', '--accent': '#840' },
+      assets: {
+        branding: {
+          botName: 'KIRO CREW',
+          logo: 'branding/logo.svg',
+          favicon: 'branding/favicon.svg',
+        },
+      },
+    } as never)
+
+    const view = renderWithProviders(<App />, { route: '/chat' })
+    try {
+      const nav = screen.getByRole('navigation', { name: 'Main navigation' })
+      const brand = within(nav).getByRole('button', { name: 'Collapse sidebar' })
+      await waitFor(() => expect(brand).toHaveTextContent('KIRO CREW'))
+      expect(brand.querySelector('img')).toHaveAttribute(
+        'src',
+        '/api/theme/pearce/assets/branding/logo.svg',
+      )
+      const favicon = document.getElementById('mc-theme-favicon') as HTMLLinkElement | null
+      expect(favicon).not.toBeNull()
+      expect(favicon).toHaveAttribute(
+        'href',
+        '/api/theme/pearce/assets/branding/favicon.svg',
+      )
+    } finally {
+      view.unmount()
+      document.getElementById('mc-theme-favicon')?.remove()
+      document.documentElement.style.removeProperty('--theme-logo')
+      localStorage.removeItem('mc-color-theme')
+      localStorage.removeItem('mc-nav')
+    }
   })
 
   it('opens Search Everywhere from the theme-aware shadowless header trigger', () => {

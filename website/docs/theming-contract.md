@@ -80,6 +80,32 @@ Out of contract: app structure/routing, functional-control behavior, security
 chrome, and anything outside the CSS-var set + the `overrides.css` selector
 allowlist.
 
+## Brand identity
+
+An installed L1/L2 theme can brand the main left command palette without CSS or
+executable code. Put the display label in `theme.json` and use the conventional
+packaged asset names:
+
+```json
+{
+  "level": 1,
+  "branding": { "botName": "KIRO CREW" }
+}
+```
+
+```text
+branding/logo.svg       # left command-palette mark
+branding/favicon.svg    # browser-tab icon
+branding/wordmark.svg   # reserved brand artwork for supporting surfaces
+```
+
+`logo` accepts `.svg` or `.png`; `favicon` accepts `.ico`, `.png`, or `.svg`.
+The backend serves only validated files from the installed pack, and the label is
+trimmed to 48 printable characters. When an asset or label is absent, the shell
+falls back independently to its configured Kiro Crew branding. Compiled edition
+branding registered through `registerThemeBranding()` has precedence over an
+installed pack.
+
 ## Fonts
 
 A pack ships faces in `theme.json`'s `fonts` list, tagging each with the **role**

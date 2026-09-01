@@ -1242,6 +1242,9 @@ export default function App() {
   const {
     colorTheme,
     theme: resolvedMode,
+    brandName,
+    brandLogo,
+    brandFavicon,
     onboarded,
     importOnboarded,
     privacyAcked,
@@ -1331,20 +1334,16 @@ export default function App() {
   useUpdateSubscription()
   const { botName: _botName, avatar: _avatar } = useBranding()
 
-  // Per-theme branding (bot name, logo, favicon, top-bar decoration, overlays,
-  // activation side-effect) comes from the theme-branding registry so the shell
-  // never hard-codes `colorTheme === 'x' ? …` chains. Falls back to the
-  // configured branding when the active theme registers none.
+  // Compiled edition branding wins when registered. Otherwise an active
+  // installed theme may supply the shell label, left-rail logo, and favicon;
+  // configured product branding remains the final fallback.
   const branding = getThemeBranding(colorTheme)
-  const botName = branding?.botName ?? _botName
-  const avatar = branding?.logo ?? _avatar
-  // Swap the browser favicon to the active theme's brand mark (falls back to
-  // the default /logo.png when the theme declares none). The core has no
-  // per-theme favicon of its own; this drives registered theme brandings.
+  const botName = branding?.botName ?? brandName ?? _botName
+  const avatar = branding?.logo ?? brandLogo ?? _avatar
   useEffect(() => {
     const link = document.querySelector<HTMLLinkElement>('link[rel~="icon"]')
-    if (link) link.href = branding?.favicon ?? '/logo.png'
-  }, [branding])
+    if (link) link.href = branding?.favicon ?? brandFavicon ?? '/logo.png'
+  }, [branding, brandFavicon])
   // Fire a theme's activation side-effect (e.g. a boot chime) on each off→on
   // switch to that theme. Generic via the branding registry; the effect itself
   // is owned by the theme's registration, so the core stays silent by default.
