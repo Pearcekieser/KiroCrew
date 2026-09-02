@@ -180,6 +180,24 @@ SIDE_QUEUE_EVENT = "chat.side_queue"
 SIDE_KIND = "side"
 
 
+def _subagent_replay_has_owner(frame: object) -> bool:
+    """Whether a replay frame names the chat that owns the subagent.
+
+    ``spawn_run`` can continue in degraded mode when caller identity cannot be
+    resolved, leaving ``parent_session_key == ""``. Such a run is visible in the
+    global spawn inventory, but it has no session-scoped destination. Sending an
+    empty ``slot`` to a chat client is unsafe: older reducers interpreted it as
+    the currently active slot, so a fresh popout adopted unrelated agents.
+    """
+    if not isinstance(frame, dict):
+        return False
+    data = frame.get("data")
+    if not isinstance(data, dict):
+        return False
+    slot = data.get("slot")
+    return isinstance(slot, str) and bool(slot.strip())
+
+
 def build_subagent_snapshot(a: Any, *, now: float | None = None) -> dict:
     """Build the ``subagent_snapshot`` replay frame's ``data`` for one agent.
 
@@ -965,10 +983,18 @@ async def api_ws(request: web.Request) -> web.WebSocketResponse:
                         # replay writes to the socket directly, so it must
                         # apply the same check. Dashboard users pass through
                         # ``_ws_client_allowed`` unconditionally.
+                        #
+                        # Ownership is a separate prerequisite: an unresolved
+                        # parent produces ``slot: ''``. That run remains visible
+                        # through the global spawn inventory, but there is no
+                        # chat authorized to adopt it. Filter before batching so
+                        # even an older client with an empty-slot fallback never
+                        # receives the orphan as session-scoped state.
                         _replay = [
                             _f
                             for _f in _replay
-                            if state._ws_client_allowed(
+                            if _subagent_replay_has_owner(_f)
+                            and state._ws_client_allowed(
                                 ws, str(_f.get("type", "")), _f.get("data", {})
                             )
                         ]

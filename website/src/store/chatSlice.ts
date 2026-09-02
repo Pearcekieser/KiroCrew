@@ -4237,8 +4237,14 @@ const chatSlice = createSlice({
     },
     sseSubagentSnapshot(state, action: PayloadAction<{ id: string; slot: string; task: string; agent: string; model?: string; requested_model?: string; child_session?: string; streaming: string; last_tool: string; started: number; tool_count?: number; stalled?: boolean; idle_secs?: number }>) {
       const d = action.payload
-      if (isUnsafeKey(d.slot) || isUnsafeKey(d.id)) return
-      const subs = d.slot && d.slot !== state.activeSlot
+      // A snapshot without an owning slot is an orphan, not evidence that it
+      // belongs to whichever chat this browser happens to show. Popout windows
+      // cold-subscribe to the complete replay after activating their own slot;
+      // treating `slot: ''` as the active map made every such window adopt all
+      // unresolved-parent agents. Fail closed: ownerless runs remain available
+      // through the global spawn inventory, but never appear inside a chat.
+      if (!d.slot || isUnsafeKey(d.slot) || isUnsafeKey(d.id)) return
+      const subs = d.slot !== state.activeSlot
         ? (state.slotActivity[safeKey(d.slot)] ??= { toolLog: [], subagents: {} }).subagents
         : state.subagents
       const existing = subs[d.id]
