@@ -200,6 +200,14 @@ no longer destroy older turns.
   writes sibling files. `tab_id` is 1:1 with a file (fork creates a fresh slot
   with its own file), so chaining is untouched and legacy no-tab_id sessions are
   never merged with unrelated sessions.
+- **Fork point identity**: response-level forks prefer the selected row's stable
+  `meta.mid` (`at_message_id`) and resolve its visible-message position against the
+  complete chained transcript inside `chat_fork.py`. The id takes precedence when a
+  request also carries the loaded window's `at_message_index`; a missing id is treated
+  as stale and a duplicate id as ambiguous, so the handler never guesses a cutoff.
+  Modern sessions therefore fork without loading earlier pages into the browser.
+  Pre-id transcript rows retain the index path, which the frontend enables only after
+  loading the full visible history.
 - **Tail-only fork** (`direction="tail"`): copies only `visible[at_index+1:]`
   into the new slot instead of the head `visible[:at_index+1]`. The head is
   always dropped -- there is no summarize option. Gated server-side by

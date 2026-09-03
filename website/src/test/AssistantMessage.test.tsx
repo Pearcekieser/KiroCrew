@@ -165,6 +165,22 @@ describe('AssistantMessage', () => {
     expect(onFork).toHaveBeenCalledWith(0)
   })
 
+  it('forwards the stable message id when the server can resolve the fork point', () => {
+    const onFork = vi.fn()
+    render(
+      <AssistantMessage
+        content="Hello world"
+        isStreaming={false}
+        slotRunning={false}
+        onFork={onFork}
+        forkIndex={7}
+        forkMessageId="row-42"
+      />,
+    )
+    fireEvent.click(screen.getByTitle('Fork conversation from here'))
+    expect(onFork).toHaveBeenCalledWith(7, 'row-42')
+  })
+
   it('does not render fork button when onFork is undefined', () => {
     render(<AssistantMessage content="Hello world" isStreaming={false} slotRunning={false} />)
     expect(screen.queryByTitle('Fork conversation from here')).not.toBeInTheDocument()

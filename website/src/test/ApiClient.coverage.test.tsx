@@ -830,6 +830,8 @@ describe('request bodies with conditionally-omitted keys', () => {
     // index 0 is a legitimate fork point and must not be dropped as falsy.
     await api.forkChatSlot('chat-1', 0, 'why', 'plan', 'down')
     expect(call(1).body).toEqual({ at_message_index: 0, prompt: 'why', mode: 'plan', direction: 'down' })
+    await api.forkChatSlot('chat-1', 7, undefined, undefined, 'head', 'row-42')
+    expect(call(2).body).toEqual({ at_message_index: 7, at_message_id: 'row-42', direction: 'head' })
   })
 
   it('slackLink sends no body at all when it is only asking for the existing link', async () => {

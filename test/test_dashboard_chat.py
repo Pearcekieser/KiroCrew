@@ -13316,6 +13316,52 @@ class TestForkSlot:
         assert len(visible) == 4
 
     @pytest.mark.asyncio
+    async def test_fork_at_message_id(self, tmp_path):
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("src")
+        slot.append("user", "msg1", "msg msg-u")
+        slot.append("assistant", "reply1", "msg msg-a")
+        slot.append("user", "msg2", "msg msg-u")
+        slot.append("assistant", "reply2", "msg msg-a")
+        slot.drain()
+        target_id = slot.messages[1]["meta"]["mid"]
+
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/slots/src/fork",
+                json={"at_message_id": target_id},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["messages"] == 2
+
+        new_slot = state._slots.get(data["key"])
+        visible = [m for m in new_slot.messages if m["role"] in ("user", "assistant")]
+        assert [m["content"] for m in visible] == ["msg1", "reply1"]
+
+    @pytest.mark.asyncio
+    async def test_fork_at_message_id_takes_precedence_over_window_index(self, tmp_path):
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("src")
+        slot.append("user", "msg1", "msg msg-u")
+        slot.append("assistant", "reply1", "msg msg-a")
+        slot.append("user", "msg2", "msg msg-u")
+        slot.append("assistant", "reply2", "msg msg-a")
+        slot.drain()
+        target_id = slot.messages[3]["meta"]["mid"]
+
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/slots/src/fork",
+                json={"at_message_id": target_id, "at_message_index": 0},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["messages"] == 4
+
+    @pytest.mark.asyncio
     async def test_fork_at_index(self, tmp_path):
         state = _make_state(tmp_path)
         slot = state.get_or_create_slot("src")
@@ -18978,6 +19024,28 @@ class TestForkSlotTail:
         mock_cfg = MagicMock()
         mock_cfg.dashboard.tail_fork_enabled = True
         monkeypatch.setattr("kiro_crew.dashboard.chat_fork.KiroCrewConfig.load", lambda: mock_cfg)
+
+    @pytest.mark.asyncio
+    async def test_tail_fork_keeps_messages_after_message_id(self, tmp_path):
+        state = _make_state(tmp_path)
+        slot = _make_tail_fork_slot(state)
+        target_id = slot.messages[1]["meta"]["mid"]
+
+        app = _make_app(state)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post(
+                "/api/chat/slots/src/fork",
+                json={"at_message_id": target_id, "direction": "tail"},
+            )
+
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["messages"] == 2
+            assert data["direction"] == "tail"
+
+        new_slot = state._slots.get(data["key"])
+        visible = [m for m in new_slot.messages if m["role"] in ("user", "assistant")]
+        assert [m["content"] for m in visible] == ["msg2", "reply2"]
 
     @pytest.mark.asyncio
     async def test_tail_fork_keeps_messages_after_index(self, tmp_path):
