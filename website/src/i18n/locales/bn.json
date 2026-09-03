@@ -8996,7 +8996,6 @@
         "s": "s",
         "stop": "থামান",
         "stop_all": "সব থামান",
-        "stop_all_running_subagents": "চলমান সব সাবএজেন্ট থামাও",
         "stop_running_subagent": "চলমান সাবএজেন্ট থামাও",
         "stop_subagent": "সাবএজেন্ট {{name}} থামাও",
         "stop_this_subagent": "এই সাবএজেন্টটি থামান",

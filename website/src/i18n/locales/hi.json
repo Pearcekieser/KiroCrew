@@ -8996,7 +8996,6 @@
         "s": "s",
         "stop": "रोकें",
         "stop_all": "सभी रोकें",
-        "stop_all_running_subagents": "सभी चल रहे सब-एजेंट रोकें",
         "stop_running_subagent": "चल रहा सब-एजेंट रोकें",
         "stop_subagent": "सबएजेंट {{name}} रोकें",
         "stop_this_subagent": "इस सबएजेंट को रोकें",

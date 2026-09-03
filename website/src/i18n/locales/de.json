@@ -8996,7 +8996,6 @@
         "s": "s",
         "stop": "Stoppen",
         "stop_all": "Alle stoppen",
-        "stop_all_running_subagents": "Alle laufenden Subagenten stoppen",
         "stop_running_subagent": "Laufenden Subagenten stoppen",
         "stop_subagent": "Subagent {{name}} stoppen",
         "stop_this_subagent": "Diesen Subagenten stoppen",

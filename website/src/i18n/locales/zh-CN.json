@@ -8871,7 +8871,6 @@
         "s": "s",
         "stop": "停止",
         "stop_all": "全部停止",
-        "stop_all_running_subagents": "停止所有运行中的子代理",
         "stop_running_subagent": "停止运行中的子代理",
         "stop_subagent": "停止子代理 {{name}}",
         "stop_this_subagent": "停止此子代理",

@@ -9246,7 +9246,6 @@
         "s": "s",
         "stop": "Остановить",
         "stop_all": "Остановить все",
-        "stop_all_running_subagents": "Остановить все запущенные субагенты",
         "stop_running_subagent": "Остановить запущенный субагент",
         "stop_subagent": "Остановить субагента {{name}}",
         "stop_this_subagent": "Остановить этот субагент",

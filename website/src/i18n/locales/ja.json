@@ -8871,7 +8871,6 @@
         "s": "秒",
         "stop": "停止",
         "stop_all": "すべて停止",
-        "stop_all_running_subagents": "実行中のすべてのサブエージェントを停止",
         "stop_running_subagent": "実行中のサブエージェントを停止",
         "stop_subagent": "サブエージェント {{name}} を停止",
         "stop_this_subagent": "このサブエージェントを停止",

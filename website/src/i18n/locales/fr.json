@@ -9121,7 +9121,6 @@
         "s": "s",
         "stop": "Arrêter",
         "stop_all": "Tout arrêter",
-        "stop_all_running_subagents": "Arrêter tous les sous-agents en cours",
         "stop_running_subagent": "Arrêter le sous-agent en cours",
         "stop_subagent": "Arrêter le sous-agent {{name}}",
         "stop_this_subagent": "Arrêter ce sous-agent",

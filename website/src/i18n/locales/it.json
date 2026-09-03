@@ -9121,7 +9121,6 @@
         "s": "s",
         "stop": "Arresta",
         "stop_all": "Arresta tutti",
-        "stop_all_running_subagents": "Arresta tutti i subagenti in esecuzione",
         "stop_running_subagent": "Arresta il subagente in esecuzione",
         "stop_subagent": "Arresta il subagente {{name}}",
         "stop_this_subagent": "Arresta questo subagente",

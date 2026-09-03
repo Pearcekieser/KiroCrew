@@ -8871,7 +8871,6 @@
         "s": "초",
         "stop": "중지",
         "stop_all": "모두 중지",
-        "stop_all_running_subagents": "실행 중인 모든 서브에이전트 중지",
         "stop_running_subagent": "실행 중인 서브에이전트 중지",
         "stop_subagent": "서브에이전트 {{name}} 중지",
         "stop_this_subagent": "이 서브에이전트 중지",

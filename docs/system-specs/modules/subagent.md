@@ -127,6 +127,26 @@ The `is_yolo()` read happens once, when `parent_policy` is resolved at
 `_run_inner` start — a YOLO toggle mid-execution takes effect on the next
 subagent run, not on the current run's remaining tools.
 
+### `cancel_for_parent(parent_session_key) -> (running, queued)`
+Stops every running agent and removes every not-yet-started stagger/concurrency
+queue entry owned by one parent session. Queue removal happens before the first
+suspending await, so a scheduled drain cannot start work after the stop request.
+Each removed queue entry emits a neutral stopped terminal record through the
+normal completion consumer, which closes batch accounting instead of stranding a
+wave. Those synthetic records remain marked as never started while their terminal
+reports are pending, so bulk cancellation cannot rediscover them as running work.
+Agents waiting on spawn approval are excluded; their approval card remains the
+authority for approve/reject.
+
+The dashboard exposes this through `POST /api/spawn/stop-all` with a validated
+slot name. App tokens are denied before slot lookup because ownership of an app
+slot does not imply ownership of its linked session; a request missing the
+authentication middleware's app claim is denied on the same fail-closed path.
+This bulk control remains a dashboard-only capability. The server resolves that
+slot's effective session key, including channel-linked chats, rather than
+accepting a client-supplied parent key. The in-chat Stop all control uses this
+endpoint and remains available for queued-only waves.
+
 ### `cancel_all() -> None`
 Cancels all running subagents, stops the reaper loop, and awaits their cleanup. Handles `CancelledError` gracefully — sessions released, count decremented.
 
