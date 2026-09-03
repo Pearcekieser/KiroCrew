@@ -232,4 +232,5 @@ def hydrate_slot_from_history(slot: Any, messages: list[dict[str, Any]]) -> None
             f"msg msg-{'a' if role == 'assistant' else 'u'}",
             broadcast=False,
             meta=(msg["meta"] if isinstance(msg.get("meta"), dict) else None),
+            mint_mid=False,
         )

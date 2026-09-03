@@ -151,8 +151,9 @@ describe('AssistantMessage', () => {
     expect(screen.getByTestId('md')).toHaveTextContent('v1')
   })
 
-  /* Only the UNAVAILABLE state sits behind the overflow trigger; a loaded window keeps
-   * fork/plan as row buttons. Radix opens on POINTERDOWN, not click. */
+  /* Unavailable legacy actions and immediately available stable-ID actions share
+   * the overflow trigger. Fully loaded index actions keep the existing row buttons.
+   * Radix opens on POINTERDOWN, not click. */
   const openOverflow = () => fireEvent.pointerDown(
     screen.getByTitle('More actions'), { button: 0, ctrlKey: false, pointerType: 'mouse' },
   )
@@ -163,6 +164,48 @@ describe('AssistantMessage', () => {
     fireEvent.click(screen.getByTitle('Fork conversation from here'))
     expect(onFork).toHaveBeenCalledTimes(1)
     expect(onFork).toHaveBeenCalledWith(0)
+  })
+
+  it('forwards stable message ids from active overflow items', () => {
+    const onFork = vi.fn()
+    const onPlanFromHere = vi.fn()
+    render(
+      <AssistantMessage
+        content="Hello world"
+        isStreaming={false}
+        slotRunning={false}
+        onFork={onFork}
+        onPlanFromHere={onPlanFromHere}
+        forkIndex={7}
+        forkMessageId="row-42"
+      />,
+    )
+    expect(screen.queryByTitle('Fork conversation from here')).not.toBeInTheDocument()
+    const more = screen.getByTestId('assistant-more-actions')
+    const row = screen.getByTitle('Copy').parentElement as HTMLElement
+    expect(row).not.toContainElement(more)
+
+    openOverflow()
+    const forkItem = screen.getByTestId('fork-from-here')
+    expect(forkItem).not.toHaveAttribute('aria-disabled')
+    expect(screen.queryByTestId('fork-unavailable-reason')).not.toBeInTheDocument()
+    fireEvent.click(forkItem)
+    expect(onFork).toHaveBeenCalledWith(7, 'row-42')
+
+    cleanup()
+    render(
+      <AssistantMessage
+        content="Hello world"
+        isStreaming={false}
+        slotRunning={false}
+        onPlanFromHere={onPlanFromHere}
+        forkIndex={7}
+        forkMessageId="row-42"
+      />,
+    )
+    openOverflow()
+    fireEvent.click(screen.getByTestId('plan-from-here'))
+    expect(onPlanFromHere).toHaveBeenCalledWith(7, 'row-42')
   })
 
   it('does not render fork button when onFork is undefined', () => {

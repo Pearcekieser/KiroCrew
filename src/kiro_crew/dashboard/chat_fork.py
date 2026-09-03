@@ -37,6 +37,7 @@ _SNAPSHOT_ATTEMPTS = 4
 _FORK_DIRECTION_HEAD = "head"
 _FORK_DIRECTION_TAIL = "tail"
 _FORK_DIRECTIONS = (_FORK_DIRECTION_HEAD, _FORK_DIRECTION_TAIL)
+_MAX_MESSAGE_ID_CHARS = 256
 
 
 async def api_chat_slot_fork(request: web.Request) -> web.Response:
@@ -47,8 +48,8 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     only the messages after ``at_message_index``; the head is dropped.
     An optional ``prompt`` is returned so the frontend can send it.
 
-    Body: ``{ at_message_index?: number, prompt?: string, mode?: string,
-    direction?: "head"|"tail" }``
+    Body: ``{ at_message_index?: number, at_message_id?: string, prompt?: string,
+    mode?: string, direction?: "head"|"tail" }``
     """
 
     state: DashboardState = request.app["state"]
@@ -137,6 +138,22 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     else:
         body = {}
     at_index = body.get("at_message_index")
+    at_message_id = body.get("at_message_id")
+    if at_message_id is not None and (
+        not isinstance(at_message_id, str)
+        or not at_message_id.strip()
+        or len(at_message_id) > _MAX_MESSAGE_ID_CHARS
+    ):
+        return web.json_response(
+            {
+                "error": (
+                    "at_message_id must be a non-empty string of at most "
+                    f"{_MAX_MESSAGE_ID_CHARS} characters"
+                ),
+                "code": "invalid_field_type",
+            },
+            status=400,
+        )
     prompt = body.get("prompt")
     mode_override = body.get("mode")
     if mode_override is not None and mode_override not in ("", "orchestrator", "crew"):
@@ -186,11 +203,11 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
             status=400,
         )
 
-    # Read disk FIRST (full history). Use chained read so the index space
-    # matches what the frontend renders against — slot detail (chat_handlers)
-    # also uses read_messages_chained, and visibleIndexMap is built off that.
-    # Without this, indices past the current session-file boundary error out
-    # with `out of range` even though the user clicked a visible message.
+    # Read disk FIRST (full history). Stable message IDs are resolved against this
+    # complete corpus; the legacy index fallback also has to use the same chained
+    # view the fully-loaded frontend renders. Without the chained read, an archived
+    # target is reported missing (ID path) or indices past the current file boundary
+    # fail out of range (legacy path).
     async with slot._fork_lock:
         all_messages: list[dict] = []
         new_msgs: list[dict] = []
@@ -629,7 +646,34 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
             {"error": "no messages to fork", "code": "no_messages_to_fork"},
             status=400,
         )
-    if at_index is not None:
+    if at_message_id is not None:
+        matches = []
+        for index, message in enumerate(visible):
+            meta = message.get("meta")
+            mid = meta.get("mid") if isinstance(meta, dict) else None
+            if mid == at_message_id:
+                matches.append(index)
+        if not matches:
+            return web.json_response(
+                {
+                    "error": "the selected message is no longer present in this session",
+                    "code": "fork_message_not_found",
+                },
+                status=409,
+            )
+        if len(matches) > 1:
+            # ``meta`` can originate with a caller. Never guess when a malformed
+            # transcript reuses an id: choosing either occurrence silently forks
+            # from a different point than the user selected.
+            return web.json_response(
+                {
+                    "error": "the selected message id is ambiguous in this session",
+                    "code": "fork_message_ambiguous",
+                },
+                status=409,
+            )
+        at_index = matches[0]
+    elif at_index is not None:
         if isinstance(at_index, bool) or not isinstance(at_index, int) or at_index < 0:
             return web.json_response(
                 {

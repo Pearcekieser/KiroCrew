@@ -1856,6 +1856,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
                                     if isinstance(msg.get("meta"), dict)
                                     else None
                                 ),
+                                mint_mid=False,
                             )
                             carry_provenance(slot.messages[-1], msg)
                             _attach_variants(slot, msg)
@@ -5762,6 +5763,7 @@ async def _reconcile_slot_window(state: DashboardState, slot: "_ChatSlot") -> No
                 if isinstance(msg.get("meta"), dict)
                 else None
             ),
+            mint_mid=False,
         )
         carry_provenance(slot.messages[-1], msg)
         _attach_variants(slot, msg)
@@ -6434,6 +6436,7 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
             meta=(
                 _redact_meta_for_role(role, m["meta"]) if isinstance(m.get("meta"), dict) else None
             ),
+            mint_mid=False,
         )
         # See the equivalent call in _rehydrate_slot_from_history: resume loads
         # the window that the next save re-serializes.

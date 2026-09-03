@@ -2647,10 +2647,12 @@ export const resumeFromHistory = createAsyncThunk(
 export const forkSlot = createAsyncThunk(
   'chat/forkSlot',
   async (
-    { slot, atIndex, prompt, mode, direction }: { slot: string; atIndex?: number; prompt?: string; mode?: string; direction?: 'head' | 'tail' },
+    { slot, atIndex, messageId, prompt, mode, direction }: { slot: string; atIndex?: number; messageId?: string; prompt?: string; mode?: string; direction?: 'head' | 'tail' },
     { dispatch },
   ) => {
-    const d = await api.forkChatSlot(slot, atIndex, prompt, mode, direction)
+    const d = messageId
+      ? await api.forkChatSlot(slot, atIndex, prompt, mode, direction, messageId)
+      : await api.forkChatSlot(slot, atIndex, prompt, mode, direction)
     if (d.ok) {
       dispatch(addSlotOptimistic({ key: d.key, title: d.title || d.key, messages: d.messages || 0, running: false, folder_id: d.folder_id }))
     }

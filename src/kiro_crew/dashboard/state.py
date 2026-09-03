@@ -3925,6 +3925,7 @@ class _ChatSlot:
         broadcast: bool = True,
         broadcast_user: bool = False,
         meta: dict | None = None,
+        mint_mid: bool = True,
     ) -> dict[str, Any]:
         # A LIVE turn-consuming row retires every unanswered STATELESS question:
         # the card's own submit path sends one, and anything else that starts the
@@ -4016,13 +4017,22 @@ class _ChatSlot:
         # id must survive the round trip or a post-restart redelivery of that row
         # would not be recognisable.
         #
+        # A restore caller passes ``mint_mid=False`` for a durable row whose disk
+        # representation has no id. Minting one only in the in-memory window would
+        # advertise an identity the full-history readers cannot resolve; features
+        # such as response-level Fork would then bypass their legacy pagination
+        # guard and fail against the still-id-less transcript. A supplied disk id
+        # remains in ``meta`` regardless of this flag.
+        #
         # Skipped for the wire-only roles: `chunk` is appended once per streamed
         # token and `done`/`streaming` are internal markers. None of them is ever
         # broadcast as a `chat_message` (the broadcast below excludes them) or
         # persisted (`_TRANSIENT_ROLES`), so an id would buy nothing and cost a
         # uuid4 plus a dict on the hottest path in the runner.
-        if role not in _WIRE_ONLY_ROLES and not (
-            isinstance(msg.get("meta"), dict) and msg["meta"].get("mid")
+        if (
+            mint_mid
+            and role not in _WIRE_ONLY_ROLES
+            and not (isinstance(msg.get("meta"), dict) and msg["meta"].get("mid"))
         ):
             existing = msg.get("meta")
             msg["meta"] = {

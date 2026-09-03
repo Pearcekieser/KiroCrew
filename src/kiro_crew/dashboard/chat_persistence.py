@@ -1138,6 +1138,7 @@ def _rehydrate_slot_from_history(
                 # (chat_utils._prepare_messages), which is the only path that returns
                 # meta to a client.
                 meta=(m["meta"] if isinstance(m.get("meta"), dict) else None),
+                mint_mid=False,
             )
             # Provenance is not a slot.append() argument, so carry it onto the
             # message the append just created. Without this the window loses where
@@ -1541,6 +1542,7 @@ def _apply_recent_session(
             ts=m.get("ts", ""),
             broadcast=False,
             meta=(m["meta"] if isinstance(m.get("meta"), dict) else None),
+            mint_mid=False,
         )
         # See the equivalent call in _rehydrate_slot_from_history.
         carry_provenance(slot.messages[-1], m)

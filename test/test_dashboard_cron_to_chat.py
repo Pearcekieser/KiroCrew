@@ -41,20 +41,20 @@ def _make_state(history_messages=None):
             slot.messages = []
             slot.title = ""
 
-            def append(role, content, cls, broadcast=True, meta=None):
+            def append(role, content, cls, broadcast=True, meta=None, mint_mid=True):
                 # Mirror the real ``_ChatSlot.append`` contract: preserve a
-                # supplied ``meta.mid``, mint one otherwise, and hand the
-                # appended row back — the injector reads the id off the return
-                # to stamp the durable transcript copy.
+                # supplied ``meta.mid`` and mint only when the caller allows it.
+                # Disk replay passes ``mint_mid=False`` so a legacy row cannot
+                # advertise an identity absent from its durable copy.
                 supplied = meta.get("mid") if isinstance(meta, dict) else None
+                stored_meta = dict(meta) if isinstance(meta, dict) else {}
+                if mint_mid and not supplied:
+                    stored_meta["mid"] = f"m-test-{len(slot.messages)}"
                 msg = {
                     "role": role,
                     "content": content,
                     "cls": cls,
-                    "meta": {
-                        **(meta if isinstance(meta, dict) else {}),
-                        "mid": supplied or f"m-test-{len(slot.messages)}",
-                    },
+                    **({"meta": stored_meta} if stored_meta else {}),
                 }
                 slot.messages.append(msg)
                 return msg
@@ -354,6 +354,9 @@ class TestHydrateSlotFromHistory:
             "m-disk-1",
             "m-disk-2",
         ], "hydration re-minted ids the disk rows already carry"
+        assert not (slot.messages[2].get("meta") or {}).get(
+            "mid"
+        ), "hydration invented an in-memory-only id for a legacy disk row"
 
 
 class TestHasSlot:
