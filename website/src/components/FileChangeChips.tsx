@@ -5,6 +5,7 @@ import { useRowDisclosure } from '../pages/chat/rowDisclosure'
 import { PierreFilePair } from '../pierre'
 import {
   ROW_ANIM_MS,
+  ROW_BODY_MAX_H,
   ROW_CSS_CLICKABLE_TITLE,
   ROW_CSS_CLOSING,
   ROW_CSS_OPEN,
@@ -26,6 +27,7 @@ export interface FileChangeEntry {
 export { countLines }
 
 const basename = (p: string) => p.split('/').pop() || p
+const FALLBACK_CONTENT_STYLE = { maxHeight: ROW_BODY_MAX_H, overflowY: 'auto' } as const
 
 /* Removals first, additions second — the order Pierre's own file headers use
  * (`createMetadataElement` pushes the deletions span before the additions one),
@@ -363,6 +365,7 @@ function ExpandedRow({ fc, added, removed, isArtifact, onFileOpen, disclosureKey
             ? `${fc.after.slice(0, ROW_WARM_FALLBACK_MAX_CHARS)}\n${ROW_WARM_FALLBACK_ELLIPSIS}`
             : fc.after}
           fallbackClassName="max-h-[376px] overflow-auto"
+          fallbackContentStyle={FALLBACK_CONTENT_STYLE}
           onVisible={completeOpenFocus}
           renderHeaderPrefix={prefix}
           renderHeaderFilenameSuffix={filenameSuffix}

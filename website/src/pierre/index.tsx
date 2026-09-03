@@ -12,11 +12,12 @@
  * user has turned off highlighted diffs (see `usePlainDiff`), which is why the
  * fallback component is a real surface here rather than a loading state.
  */
-import { Suspense, forwardRef, lazy, memo, useContext, useEffect, useRef, useState } from 'react'
+import { Suspense, forwardRef, lazy, memo, type CSSProperties, useContext, useEffect, useRef, useState } from 'react'
 import type { BaseCodeOptions, FileContents } from '@pierre/diffs'
 import type { PierreDiffOptions } from './config'
 import type { EditorMarker, PierreEditorHandle } from './PierreEditorImpl'
-import { PlainCodeFallback } from './PlainCodeFallback'
+import { PlainCodeFallback, PlainFilePairFallback } from './PlainCodeFallback'
+import { isPierreFilePairWithinBudget } from './renderBudget'
 import { PierreFarmHoldContext } from '../components/pierreStaging'
 import { usePlainDiff } from '../hooks/usePlainDiff'
 
@@ -251,7 +252,7 @@ export const PierrePatch = memo(function PierrePatch({ patch, options, className
   )
 })
 
-export const PierreFilePair = memo(function PierreFilePair({ oldFile, newFile, options, className, fallbackText, fallbackClassName, onVisible, renderHeaderMetadata, renderHeaderPrefix, renderHeaderFilenameSuffix }: {
+export const PierreFilePair = memo(function PierreFilePair({ oldFile, newFile, options, className, fallbackText, fallbackClassName, fallbackContentStyle, onVisible, renderHeaderMetadata, renderHeaderPrefix, renderHeaderFilenameSuffix }: {
   oldFile: FileContents | null
   newFile: FileContents | null
   options?: PierreDiffOptions
@@ -259,6 +260,9 @@ export const PierreFilePair = memo(function PierreFilePair({ oldFile, newFile, o
   /** Optional caller-specific warm/Suspense fallback text and bounds. */
   fallbackText?: string
   fallbackClassName?: string
+  /** Light-DOM sizing for the plain oversized fallback. Pierre's `unsafeCSS`
+   *  styles its shadow root and cannot reach that fallback. */
+  fallbackContentStyle?: CSSProperties
   /** Called after WarmSwap reveals the real implementation. */
   onVisible?: () => void
   /** Injected into the file header's metadata slot. Also rendered while
@@ -269,6 +273,20 @@ export const PierreFilePair = memo(function PierreFilePair({ oldFile, newFile, o
   /** Injected directly after the filename in the header. */
   renderHeaderFilenameSuffix?: () => React.ReactNode
 }) {
+  if (!isPierreFilePairWithinBudget(oldFile, newFile)) {
+    return (
+      <PlainFilePairFallback
+        oldFile={oldFile}
+        newFile={newFile}
+        options={options}
+        className={className}
+        contentStyle={fallbackContentStyle}
+        renderHeaderMetadata={renderHeaderMetadata}
+        renderHeaderPrefix={renderHeaderPrefix}
+        renderHeaderFilenameSuffix={renderHeaderFilenameSuffix}
+      />
+    )
+  }
   const fallbackNode = (
     <PlainCodeFallback
       text={fallbackText ?? (newFile ?? oldFile)?.contents ?? ''}
