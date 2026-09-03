@@ -442,6 +442,7 @@ from kiro_crew.dashboard.chat_utils import (  # noqa: E402
     RecoveryPayload,
     app_inject_row,
     classify_empty_turn,
+    contains_upstream_turn_failure_text,
     has_leaked_tool_call,
     has_unfinished_progress_claim,
     is_false_current_tool_blocker,
@@ -449,6 +450,7 @@ from kiro_crew.dashboard.chat_utils import (  # noqa: E402
     is_promise_only_terminal,
     is_synthetic_payload_item,
     is_synthetic_recovery_item,
+    is_upstream_turn_failure_text,
     mint_options_token,
     normalize_stop_reason,
     payload_for_replay,
@@ -2870,8 +2872,8 @@ def _turn_line_changes(changes: Any) -> int:
     return line_changes_from_file_changes(resolved)
 
 
-def _flush_file_changes(slot: "_ChatSlot") -> None:
-    """Attach accumulated file changes to the last assistant message.
+def _flush_file_changes(slot: "_ChatSlot", turn_boundary: int = 0) -> None:
+    """Attach accumulated file changes to this turn's last assistant message.
 
     Dedups by path (first before, last after), reads the AFTER content from
     disk, and writes the list to message meta as ``file_changes``. Files the
@@ -2879,6 +2881,10 @@ def _flush_file_changes(slot: "_ChatSlot") -> None:
     int present only when it is non-zero. Called on
     every exit path (success / cancel / error) so users always see what was
     modified, even on aborted turns.
+
+    ``turn_boundary`` is ``len(slot.messages)`` captured at turn start. Limiting
+    the reverse scan to that slice prevents an error-only write turn from
+    attaching its changes to the previous turn's assistant row.
     """
     # Defensive: only proceed when a real, non-empty list is present. Tests
     # using MagicMock slots leave _file_changes as a MagicMock attribute
@@ -2960,10 +2966,11 @@ def _flush_file_changes(slot: "_ChatSlot") -> None:
     file_meta: dict[str, Any] = {"file_changes": fc_list}
     if _dropped:
         file_meta["file_changes_omitted_files"] = _dropped
-    # Attach to the most recent assistant message; if none exists (turn
-    # aborted before any text), create a synthetic message so the chips
-    # still surface.
-    for m in reversed(slot.messages):
+    # Attach to the most recent assistant message created by this turn; if none
+    # exists (turn aborted before any text), create a synthetic message so the
+    # chips still surface without mutating an earlier turn.
+    boundary = max(0, turn_boundary)
+    for m in reversed(slot.messages[boundary:]):
         if m.get("role") == "assistant":
             meta = m.setdefault("meta", {})
             meta.update(file_meta)
@@ -8464,12 +8471,15 @@ async def _start_next_queued_turn(
         or _rebound_since_enqueue
         or _user_input
     ):
-        # Both auto-continuations carry the same hazard and the same fix: the
-        # post-compaction resume would re-drive a request the user has since
-        # stopped or replaced. Purge either one, and reset whichever one-shot
-        # budget was spent (both resets are idempotent, so no need to tell them
-        # apart per item).
-        _purgeable = (_PROMISE_ONLY_CONTINUE_MSG, _COMPACTION_CONTINUE_MSG)
+        # All three auto-continuations carry the same hazard and the same fix:
+        # each would re-drive a request the user has since stopped or replaced.
+        # Purge them, and reset whichever one-shot budget was spent (the resets
+        # are idempotent, so no need to tell them apart per item).
+        _purgeable = (
+            _PROMISE_ONLY_CONTINUE_MSG,
+            _COMPACTION_CONTINUE_MSG,
+            _POSTTOKEN_RECOVER_MSG,
+        )
         superseded = [
             q
             for q in slot._queue
@@ -8489,6 +8499,7 @@ async def _start_next_queued_turn(
             # value cannot re-trigger this block on a later drain.
             slot._promise_only_retries = 0
             slot._compaction_continue_retries = 0
+            slot._posttoken_retry_used = False
             slot._promise_only_stop_gen = _cur_stop_gen
             slot._promise_only_session_stop_gen = _cur_session_stop_gen
             slot._promise_only_session_key = _cur_session_key
@@ -8509,7 +8520,7 @@ async def _start_next_queued_turn(
                 _correction = "ℹ️ Auto-continue cancelled — the turn was stopped, nothing was run."
             slot.append("notice", _correction, "msg msg-info")
             logger.info(
-                "Purged %d superseded promise-only continuation(s) before dispatch "
+                "Purged %d superseded auto-continuation(s) before dispatch "
                 "for slot %s (user_input=%s stop_since_enqueue=%s rebound=%s)",
                 len(superseded),
                 slot.key,
@@ -9803,7 +9814,10 @@ async def _run_chat(
     # overwritten once known, and an empty session id or a zero turn already
     # makes every emitter call a no-op.
     _crew_log_sid = ""
-    _turn_msg_boundary = 0
+    # Fallback boundary for failures during asynchronous turn setup, so the
+    # finally-path file-change flush cannot attach to an earlier turn's row.
+    # Reset at provider dispatch below after setup-only rows have been appended.
+    _turn_msg_boundary = len(slot.messages)
     # The turn's ORDINAL for the crew log, kept separate from the message-slice
     # index above even though both start at the same value. The slice index is
     # reset when a mid-turn clear empties the message list, because the turn-stats
@@ -10704,6 +10718,11 @@ async def _run_chat(
     # Any empty-response verdict is unlanded for replay durability, including
     # the terminal give-up rung (which intentionally queues no recovery).
     _had_empty_response_verdict = False
+    # Kiro CLI can end a failed inner agent loop with an ordinary Ok/UserTurnEnd
+    # carrying one fixed assistant sentence. That is provider control output, not
+    # an answer; this flag keeps it out of success, consolidation and budget-reset
+    # paths whether the one-shot continuation is eligible or terminal.
+    _upstream_turn_failed = False
     # Set when the turn ended on a promise-only final message and we injected one
     # continuation (see the promise-only guard near turn completion). Like
     # _retrying_empty it suppresses success-recording for this non-landing turn.
@@ -17043,6 +17062,51 @@ async def _run_chat(
         # and the branch below is what decides whether one was given.
         _answer_text = _answer_text_only(assistant_text, _compaction_notice_chunks)
 
+        # Kiro CLI's inner agent loop can fail after tool execution yet close ACP
+        # as a normal Ok/UserTurnEnd with this fixed sentence. Without this
+        # intercept Kiro Crew persists the sentence, records a success and leaves
+        # the user to type the same request again. Treat the exact sentinel as
+        # control output only after real tool activity, and never when the current
+        # request itself quoted or asked for it. The continuation stays on the
+        # SAME live session, whose context contains the completed tool results,
+        # and explicitly forbids replaying them.
+        _upstream_turn_failed = (
+            _stop_reason == STOP_REASON_END_TURN
+            and bool(getattr(client, "is_kiro_backend", False))
+            and _turn_tool_calls > 0
+            and not contains_upstream_turn_failure_text(message)
+            and not _compaction_notice_chunks
+            and is_upstream_turn_failure_text(_answer_text)
+        )
+        if _upstream_turn_failed:
+            logger.warning(
+                "Kiro CLI synthetic turn failure for slot %s "
+                "(tool_calls=%d, posttoken_retry_used=%s)",
+                slot.key,
+                _turn_tool_calls,
+                slot._posttoken_retry_used,
+            )
+            # Remove only the trailing live chunks that rendered the sentinel;
+            # earlier finalized assistant segments and tool cards stay intact.
+            slot.purge_chunks()
+            # purge_chunks is server-only, but StreamRedactor may already have
+            # broadcast the sentinel's safe prefix as chat_chunk frames. Replace
+            # that live browser row with an empty assistant before the recovery
+            # notice arrives; chat_done's authoritative refresh then removes the
+            # blank row because it was deliberately never persisted.
+            state.broadcast_ws(
+                "chat_message",
+                {
+                    "slot": slot.key,
+                    "role": "assistant",
+                    "content": "",
+                    "cls": "msg msg-a",
+                },
+            )
+            _wsred.reset()
+            assistant_text = ""
+            _answer_text = ""
+
         # A turn whose ONLY assistant text was such a notice still has to reach
         # the wire and the transcript, but it must not take the answer branch:
         # the post-compaction continuation is an `elif` UNDER that branch, so
@@ -17159,6 +17223,38 @@ async def _run_chat(
                         _refusal_card,
                         "msg msg-err",
                     )
+        elif _upstream_turn_failed:
+            _will_recover = (
+                _prompt_depth == 0
+                and not slot._in_stage_execution
+                and not slot._posttoken_retry_used
+                and not _should_suppress_requeue(slot)
+                and getattr(slot, "_stop_generation", _stop_gen_turn_start) == _stop_gen_turn_start
+                and not _has_user_queued_followup(slot)
+                and not getattr(slot, "_pending_steers", None)
+            )
+            slot.append(
+                "error",
+                (
+                    "⟳ Backend turn failed — recovering…"
+                    if _will_recover
+                    else "⟳ Backend turn failed — please retry."
+                ),
+                "msg msg-err",
+                meta={"kind": TRANSIENT_RETRY_KIND} if _will_recover else None,
+            )
+            if _will_recover:
+                # Share the post-activity one-shot: both paths resume after model
+                # activity, and a sentinel on this synthetic continuation must
+                # terminate rather than enqueue itself forever.
+                slot._posttoken_retry_used = True
+                _queue_recovery(
+                    0,
+                    _POSTTOKEN_RECOVER_MSG,
+                    kind=SYNTHETIC_RECOVERY_KIND,
+                    payload=RecoveryPayload.CONTINUATION,
+                )
+                slot._promise_only_stop_gen = getattr(slot, "_stop_generation", 0)
         elif _stop_reason == STOP_REASON_REFUSAL:
             # Model-side content refusal with no accompanying text: Anthropic's
             # bare `refusal` stop reason (passed through by every harness), or
@@ -18054,8 +18150,8 @@ async def _run_chat(
                 turn_boundary=_turn_msg_boundary,
                 model=_turn_model,
             )
-            # Attach accumulated file changes to last assistant message before persist
-            _flush_file_changes(slot)
+            # Attach accumulated file changes to this turn's assistant anchor before persist.
+            _flush_file_changes(slot, turn_boundary=_turn_msg_boundary)
             # The reply is in the window, so this save is the durable clear of
             # the in-flight marker: retire it first and the omission rides the
             # same write instead of costing a second one in the finally. Not
@@ -18074,6 +18170,7 @@ async def _run_chat(
         # mask the transient-failure retry accounting).
         if (
             not _retrying_empty
+            and not _upstream_turn_failed
             and not _recovering_promise
             and not _recovering_compaction
             and not _noticed_leak
@@ -18186,6 +18283,7 @@ async def _run_chat(
             logger.info("Turn cancelled by user for slot %s", slot.key)
         elif (
             not _retrying_empty
+            and not _upstream_turn_failed
             and not _recovering_promise
             and not _recovering_compaction
             and not _noticed_leak
@@ -18199,6 +18297,7 @@ async def _run_chat(
         if (
             _stop_reason != STOP_REASON_CANCELLED
             and not _retrying_empty
+            and not _upstream_turn_failed
             and not _recovering_promise
             and not _recovering_compaction
             and not _noticed_leak
@@ -19908,7 +20007,7 @@ async def _run_chat(
         # a raise here cannot skip the re-arm below and re-introduce the orphan
         # bug this fix prevents.
         try:
-            _flush_file_changes(slot)
+            _flush_file_changes(slot, turn_boundary=_turn_msg_boundary)
         except Exception:
             logger.debug("_flush_file_changes failed", exc_info=True)
         # Replay settlement belongs on the one path every turn exit crosses.
