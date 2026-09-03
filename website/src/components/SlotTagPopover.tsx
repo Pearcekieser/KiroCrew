@@ -26,7 +26,6 @@ export default function SlotTagPopover() {
 
   const setSlotTagsMutation = useMutation({
     mutationFn: ({ slot, nextTags }: { slot: string; nextTags: string[] }) => api.setSlotTags(slot, nextTags),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['chat-slots'] }),
   })
   const createTagMutation = useMutation({
     mutationFn: (name: string) => api.createChatTag(name),
@@ -37,8 +36,29 @@ export default function SlotTagPopover() {
   // render; `pendingRef` mirrors it so `toggle` reads the latest value
   // synchronously (rapid-burst composition) without a state closure.
   const [pending, setPending] = useState<string[] | null>(null)
+  const [confirmation, setConfirmation] = useState<{
+    baseline: string[]
+    desired: string[]
+  } | null>(null)
   const pendingRef = useRef<string[] | null>(null)
-  useEffect(() => { pendingRef.current = null; setPending(null) }, [slotKey])
+  const slotTagsRef = useRef<string[]>(slot?.tags ?? [])
+  const writeQueueRef = useRef<Promise<void>>(Promise.resolve())
+  useEffect(() => { slotTagsRef.current = slot?.tags ?? [] }, [slot?.tags])
+  useEffect(() => {
+    pendingRef.current = null
+    setPending(null)
+    setConfirmation(null)
+  }, [slotKey])
+  useEffect(() => {
+    if (!confirmation || pendingRef.current !== confirmation.desired) return
+    const slotTags = slot?.tags ?? []
+    const stillBaseline = slotTags.length === confirmation.baseline.length
+      && slotTags.every((tag, i) => tag === confirmation.baseline[i])
+    if (stillBaseline) return
+    pendingRef.current = null
+    setPending(null)
+    setConfirmation(null)
+  }, [confirmation, slot?.tags])
 
   // Move focus into the tag list on open so keyboard users can operate it
   // (skip on touch to avoid hijacking focus). Deferred a tick so the list has
@@ -55,13 +75,48 @@ export default function SlotTagPopover() {
   const currentTags = new Set(pending ?? slot?.tags ?? [])
   const toggle = (tagId: string) => {
     const base = pendingRef.current ?? slot?.tags ?? []
+    const baselineTags = [...slotTagsRef.current]
+    const previousTags = [...base]
     const nextTags = base.includes(tagId) ? base.filter(t => t !== tagId) : [...base, tagId]
     pendingRef.current = nextTags
     setPending(nextTags)
-    setSlotTagsMutation.mutate({ slot: slotKey, nextTags }, {
-      // Clear the overlay once this mutation settles, unless a later toggle
-      // (rapid burst) has already replaced `pending` with a newer list.
-      onSettled: () => { if (pendingRef.current === nextTags) { pendingRef.current = null; setPending(null) } },
+    setConfirmation(null)
+    const targetSlot = slotKey
+    writeQueueRef.current = writeQueueRef.current.then(async () => {
+      try {
+        const result = await setSlotTagsMutation.mutateAsync({ slot: targetSlot, nextTags })
+        // A newer click owns the overlay and the slot now. The request still
+        // persisted in order, but only the newest desired list updates the UI.
+        if (pendingRef.current !== nextTags) return
+        const responseTags = (result as { tags?: unknown } | undefined)?.tags
+        const confirmedTags = Array.isArray(responseTags)
+          ? responseTags.filter((tag): tag is string => typeof tag === 'string')
+          : nextTags
+
+        const currentSlotTags = slotTagsRef.current
+        const matches = (left: string[], right: string[]) => left.length === right.length
+          && left.every((tag, i) => tag === right[i])
+        const isConfirmed = matches(currentSlotTags, confirmedTags)
+        const isExpectedPredecessor = matches(currentSlotTags, baselineTags)
+          || matches(currentSlotTags, previousTags)
+        if (isConfirmed || !isExpectedPredecessor) {
+          pendingRef.current = null
+          setPending(null)
+          setConfirmation(null)
+          return
+        }
+
+        // The store still carries the expected predecessor list. Keep the
+        // overlay until the next authoritative frame changes it; that frame is
+        // either this result or a newer concurrent update, and both must win.
+        setConfirmation({ baseline: [...currentSlotTags], desired: nextTags })
+      } catch {
+        // Only the latest request may roll back the latest optimistic view.
+        if (pendingRef.current !== nextTags) return
+        pendingRef.current = null
+        setPending(null)
+        setConfirmation(null)
+      }
     })
   }
 

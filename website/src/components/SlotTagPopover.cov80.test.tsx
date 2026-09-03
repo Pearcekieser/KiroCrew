@@ -117,6 +117,110 @@ describe('SlotTagPopover', () => {
     expect(setSlotTags.mock.calls[1][1]).toEqual(['t1', 't2'])
   })
 
+  it('keeps the checkmark when PUT settles before the slots frame', async () => {
+    let finish!: (value: unknown) => void
+    setSlotTags.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }) as never)
+    const { store } = mount()
+    await screen.findByText('zzq-alpha')
+
+    fireEvent.click(options()[0])
+    expect(options()[0].getAttribute('aria-checked')).toBe('true')
+    await waitFor(() => expect(setSlotTags).toHaveBeenCalledOnce())
+
+    await act(async () => { finish({ ok: true, tags: ['t1'] }) })
+    expect(options()[0].getAttribute('aria-checked')).toBe('true')
+    expect(store.getState().dashboard.slots[0].tags).toEqual([])
+
+    // A pre-PUT frame can arrive after the HTTP response. It must not expose
+    // the old Redux value while the authoritative confirmation is pending.
+    act(() => {
+      store.dispatch(sseSlots([
+        { key: 'zzq-slot', messages: 0, running: false, tags: [] } as ChatSlot,
+      ]))
+    })
+    expect(options()[0].getAttribute('aria-checked')).toBe('true')
+
+    act(() => {
+      store.dispatch(sseSlots([
+        { key: 'zzq-slot', messages: 0, running: false, tags: ['t1'] } as ChatSlot,
+      ]))
+    })
+    await waitFor(() => expect(store.getState().dashboard.slots[0].tags).toEqual(['t1']))
+    expect(options()[0].getAttribute('aria-checked')).toBe('true')
+
+    // Once confirmed, a later authoritative update is visible rather than
+    // being hidden forever behind the optimistic overlay.
+    await act(async () => {})
+    act(() => {
+      store.dispatch(sseSlots([
+        { key: 'zzq-slot', messages: 0, running: false, tags: [] } as ChatSlot,
+      ]))
+    })
+    await waitFor(() => expect(options()[0].getAttribute('aria-checked')).toBe('false'))
+  })
+
+  it('a newer authoritative frame retires the overlay and becomes the next toggle base', async () => {
+    let finish!: (value: unknown) => void
+    setSlotTags.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }) as never)
+    const { store } = mount()
+    await screen.findByText('zzq-alpha')
+
+    fireEvent.click(options()[0])
+    await waitFor(() => expect(setSlotTags).toHaveBeenCalledOnce())
+    await act(async () => { finish({ ok: true, tags: ['t1'] }) })
+
+    act(() => {
+      store.dispatch(sseSlots([
+        { key: 'zzq-slot', messages: 0, running: false, tags: ['t2'] } as ChatSlot,
+      ]))
+    })
+    await waitFor(() => {
+      expect(options().map(o => o.getAttribute('aria-checked'))).toEqual(['false', 'true'])
+    })
+
+    setSlotTags.mockResolvedValueOnce({ ok: true, tags: ['t2', 't1'] } as never)
+    fireEvent.click(options()[0])
+    await waitFor(() => expect(setSlotTags).toHaveBeenLastCalledWith('zzq-slot', ['t2', 't1']))
+  })
+
+  it('serializes rapid writes so the latest desired list reaches the server last', async () => {
+    const finish: Array<(value: unknown) => void> = []
+    setSlotTags.mockImplementation(() => new Promise(resolve => { finish.push(resolve) }) as never)
+    const { store } = mount()
+    await screen.findByText('zzq-alpha')
+
+    fireEvent.click(options()[0])
+    fireEvent.click(options()[1])
+    await waitFor(() => expect(finish).toHaveLength(1))
+    expect(setSlotTags).toHaveBeenCalledOnce()
+    expect(setSlotTags.mock.calls[0][1]).toEqual(['t1'])
+
+    await act(async () => { finish[0]({ ok: true, tags: ['t1'] }) })
+    await waitFor(() => expect(finish).toHaveLength(2))
+    expect(setSlotTags.mock.calls[1][1]).toEqual(['t1', 't2'])
+
+    await act(async () => { finish[1]({ ok: true, tags: ['t1', 't2'] }) })
+    expect(store.getState().dashboard.slots[0].tags).toEqual([])
+    expect(options().map(o => o.getAttribute('aria-checked'))).toEqual(['true', 'true'])
+
+    act(() => {
+      store.dispatch(sseSlots([
+        { key: 'zzq-slot', messages: 0, running: false, tags: ['t1', 't2'] } as ChatSlot,
+      ]))
+    })
+    await waitFor(() => expect(store.getState().dashboard.slots[0].tags).toEqual(['t1', 't2']))
+  })
+
+  it('restores authoritative slot tags when the latest write fails', async () => {
+    setSlotTags.mockRejectedValueOnce(new Error('write failed'))
+    mount()
+    await screen.findByText('zzq-alpha')
+
+    fireEvent.click(options()[0])
+    expect(options()[0].getAttribute('aria-checked')).toBe('true')
+    await waitFor(() => expect(options()[0].getAttribute('aria-checked')).toBe('false'))
+  })
+
   it('roving focus walks the option list and wraps at both ends', async () => {
     mount()
     await screen.findByText('zzq-alpha')
