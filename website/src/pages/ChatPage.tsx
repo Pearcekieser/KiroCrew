@@ -4106,15 +4106,34 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // host route happens to carry.
     if (noUrlSync) return
     // Our own drawer-entry consumption, not a Back/Forward the user asked for.
-    // Cleared and returned BEFORE the arming block below so the flag can never
-    // outlive its pop and swallow a later genuine one — the `!popReadyRef` and
-    // duplicate-key guards there return early, so a check placed after them
-    // would leave the flag set. `lastLocKeyRef` is still advanced, because this
-    // entry HAS been visited and must not be honored again if the effect re-runs
-    // on it while navigationType is still 'POP'.
+    // Correct the POP's stale outgoing `?sid=` HERE, in the effect that owns the
+    // POP, rather than relying on the separate activeSlot -> URL effect below.
+    // In a real mobile browser those two navigation effects can be committed in
+    // either order: a fast New Chat activates the newborn slot, closes the
+    // drawer, then this POP lands on the duplicate's predecessor naming the old
+    // slot. If the generic sync is still gated by a prior POP claim, the old URL
+    // wins and its reader switches Redux straight back, leaving an empty New
+    // Session row behind. MemoryRouter settles synchronously and hid that race.
+    //
+    // `activeSlotRef` is the render-current value even when the close originated
+    // from createSlot.fulfilled in this same commit. Replacing only this popped
+    // entry also preserves the one-entry drawer invariant: the duplicate is gone,
+    // and the surviving history entry names the session actually on screen.
     if (drawerPopRef.current) {
       drawerPopRef.current = false
       lastLocKeyRef.current = location.key
+      popInFlightRef.current = false
+      const target = activeSlotRef.current
+      const urlSlot = searchParams.get('sid') || searchParams.get('slot')
+      if (target && target !== urlSlot) {
+        const next = new URLSearchParams(searchParams)
+        next.set('sid', target)
+        next.delete('slot')
+        navigate(
+          { pathname: location.pathname, search: `?${next}`, hash: location.hash },
+          { replace: true },
+        )
+      }
       return
     }
     // Embed: host app drives the URL — react to any ?sid change.
@@ -4142,7 +4161,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       popInFlightRef.current = true
       dispatch(switchSlot(urlSid))
     }
-  }, [searchParams, filteredSlots, activeSlot, dispatch, embedMode, navigationType, location.key, connected, noUrlSync])
+  }, [searchParams, filteredSlots, activeSlot, dispatch, embedMode, navigationType, location.key, location.pathname, location.hash, connected, noUrlSync, navigate])
   // Timeout: if slot never appears after 5s, show error.
   // Gated on `connected` so the timer only runs while the gateway is reachable
   // — otherwise an offline tab would burn its 5s while the resolve effects

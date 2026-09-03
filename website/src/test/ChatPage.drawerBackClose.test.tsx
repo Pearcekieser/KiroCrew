@@ -36,7 +36,8 @@ import { MemoryRouter, Routes, Route, useLocation, useNavigate, useNavigationTyp
 import { createTestStore } from './helpers'
 import { ThemeProvider } from '../hooks/useTheme'
 import { sseSlots, sseConnected } from '../store/dashboardSlice'
-import { setActiveSlot } from '../store/chatSlice'
+import { createSlot, setActiveSlot } from '../store/chatSlice'
+import { api } from '../api/client'
 
 /** Completion callbacks handed to framer's `animate`, fired manually so a close
  *  can be run to completion (the panel unmounts on the settle, not on the
@@ -281,6 +282,27 @@ describe('ChatPage — mobile sessions drawer answers Back (#5795)', () => {
     expect(screen.getByTestId('off-chat')).toBeTruthy()
     expect(probe().dataset.sid).toBe('')
     expect(store.getState().chat.activeSlot).toBe('slot-1')
+  })
+
+  it('creating a session from the drawer consumes the entry without restoring the outgoing chat', async () => {
+    const store = renderChat()
+    openDrawer()
+    vi.mocked(api.createChatSlot).mockResolvedValueOnce({
+      key: 'slot-new', title: 'New Session', messages: 0, running: false,
+    })
+
+    await act(async () => {
+      await store.dispatch(createSlot({ mode: '' })).unwrap()
+    })
+    finishSlide()
+
+    expect(drawerMounted()).toBe(false)
+    expect(store.getState().chat.activeSlot).toBe('slot-new')
+    expect(probe().dataset.sid).toBe('slot-new')
+
+    platformBack()
+    expect(screen.getByTestId('off-chat')).toBeTruthy()
+    expect(store.getState().chat.activeSlot).toBe('slot-new')
   })
 
   it('a backdrop tap consumes the entry too, so the next Back is not an invisible no-op', () => {
