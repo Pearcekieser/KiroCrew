@@ -68,7 +68,7 @@ import { normalizeRunSessionKey } from '../apps/workflows/runModel'
 import { sanitizeLlmOutput } from '../utils/sanitize'
 import type { PaletteBoost } from '../utils/sessionColors'
 import type { ChatFolder, ChatTag, TagColumn, TagColumnMode, SessionLink, SourceProviderId } from '../types'
-import { SESSION_LANES, inferLane } from './chat/sessionLane'
+import { SESSION_LANES, hasLiveSessionWork, inferLane } from './chat/sessionLane'
 import { decideUnreadDrain } from './unreadDrain'
 import {
   type RecentUnit,
@@ -578,6 +578,13 @@ interface Slot {
   // button. Always false while a turn runs. Read by the goal-loop subtitle so a
   // stalled loop stops pulsing as if it were working.
   interrupted?: boolean
+  // The slot snapshot can report live child work before the detailed activity
+  // map hydrates after reconnect. Never present that gap as an idle interruption.
+  subagents_running?: boolean
+  // Autopilot orchestration and queued turns are also server-rejected Resume
+  // states, even when the slot's own turn is currently idle.
+  orchestrating?: boolean
+  queue_depth?: number
   mode?: string
   agent?: string
   // The agent that will actually answer, when it is NOT `agent`. The backend
@@ -1571,7 +1578,19 @@ const SessionRow = memo(function SessionRow({
     // warn dot with an explicit "interrupted" instead. Guarded on the raw turn
     // flag plus workflow/subagent activity: while any of those run, the loop IS
     // working and `s.interrupted` only describes a superseded turn.
-    const goalLoopStalled = !!goalLoop && !!s.interrupted && !s.running && !wfActive && subagentCount === 0
+    const snapshotOnlyLiveWork = !s.running && hasLiveSessionWork(s)
+    const snapshotLiveWorkLabel = i18nT('pages.chatSidebar.filter_running')
+    const liveWorkSupersedesInterruption = hasLiveSessionWork(s, {
+      workflowActive: !!wfActive,
+      detailedSubagentsRunning: subagentCount > 0,
+    })
+    const goalLoopStalled = !!goalLoop && !!s.interrupted && !liveWorkSupersedesInterruption
+    // Ordinary sessions need the same reboot/error visibility as goal loops,
+    // without claiming that an older interrupted parent turn has stopped live
+    // child work. A goal loop keeps its richer cycle-specific treatment below;
+    // active workflows, subagents, turns, orchestration, and queued work keep
+    // their progress indicators.
+    const turnNeedsAttention = !goalLoop && !!s.interrupted && !liveWorkSupersedesInterruption
     // Whatever this row would have said if no loop were running, reused as the
     // loop line's trailing detail. This is why the loop branch can outrank the
     // working signals below without swallowing them: live workflow/subagent/tool
@@ -1584,7 +1603,9 @@ const SessionRow = memo(function SessionRow({
         ? subagentLabel
         : s.running
           ? slotStatusText(statusDetail, simplifiedToolNames, uiLang)
-          : (s.last_message || '')
+          : snapshotOnlyLiveWork
+            ? snapshotLiveWorkLabel
+            : (s.last_message || '')
     const ci = s.color_index != null && s.color_index >= 0 && s.color_index < paletteColors.length ? s.color_index : null
     // The row's ONE status marker and the words beside it, resolved together: the
     // glyph is built INSIDE the branch's `subtitle`, immediately in front of the
@@ -1682,6 +1703,24 @@ const SessionRow = memo(function SessionRow({
         ),
       },
       {
+        // An ordinary session whose last turn ended without a reply needs a
+        // visible handoff after a gateway restart or terminal error. Static
+        // danger ink distinguishes "manual action required" from every pulsing
+        // or spinning progress state. Live child work suppresses this branch via
+        // `turnNeedsAttention`, and goal loops retain their cycle-specific row.
+        key: 'interrupted',
+        when: turnNeedsAttention,
+        build: () => {
+          const label = `${i18nT('pages.chat.recoveryCard.turn_interrupted')} · ${i18nT('components.chatInput.resume')}`
+          return (
+            <div className={ROW_STATUS_LINE_CLS} title={label}>
+              <TriangleAlert size={ROW_ICON_PX} className="shrink-0 text-danger" aria-hidden />
+              <span className="truncate font-medium text-danger">{label}</span>
+            </div>
+          )
+        },
+      },
+      {
         // A dynamic-workflow run launched from this session is still executing
         // — surface it even though the parent turn has ended (`s.running` is
         // false while the run executes in the background). Outranks the
@@ -1707,6 +1746,20 @@ const SessionRow = memo(function SessionRow({
           <div className={ROW_STATUS_LINE_ACCENT_CLS} title={subagentLabel}>
             <Bot size={ROW_ICON_PX} className="shrink-0 text-accent animate-pulse" aria-hidden />
             <span className="truncate">{subagentLabel}</span>
+          </div>
+        ),
+      },
+      {
+        // Reconnect snapshots can report orchestration, queued work, or running
+        // children before their detailed activity records arrive. The shared
+        // predicate suppresses stale Resume; this branch replaces the equally
+        // stale last-message fallback with an honest localized working state.
+        key: 'snapshot_live_work',
+        when: snapshotOnlyLiveWork,
+        build: () => (
+          <div className={ROW_STATUS_LINE_ACCENT_CLS} title={snapshotLiveWorkLabel}>
+            <Loader size={ROW_ICON_PX} className="shrink-0 text-accent animate-spin" aria-hidden />
+            <span className="truncate">{snapshotLiveWorkLabel}</span>
           </div>
         ),
       },
@@ -3505,8 +3558,9 @@ function ChatSidebar({
       // while sitting in Idle.
       return inferLane(slot, {
         subagentAwaiting: Math.min(subagentApprovalCounts[slot.key] || 0, running),
-        backgroundWork: workflowActiveSet.has(normalizeRunSessionKey(slot.key))
-          || goalLoopSet.has(slot.key),
+        workflowActive: workflowActiveSet.has(normalizeRunSessionKey(slot.key)),
+        goalLoopActive: goalLoopSet.has(slot.key),
+        detailedSubagentsRunning: running > 0,
       }) === col.state_key
     }
     const slotTags = slot.tags || []
