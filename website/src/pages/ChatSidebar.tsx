@@ -1571,6 +1571,11 @@ const SessionRow = memo(function SessionRow({
     // flag plus workflow/subagent activity: while any of those run, the loop IS
     // working and `s.interrupted` only describes a superseded turn.
     const goalLoopStalled = !!goalLoop && !!s.interrupted && !s.running && !wfActive && subagentCount === 0
+    // Ordinary sessions need the same reboot/error visibility as goal loops,
+    // without claiming that an older interrupted parent turn has stopped live
+    // child work. A goal loop keeps its richer cycle-specific treatment below;
+    // active workflows, subagents, and turns keep their progress indicators.
+    const turnNeedsAttention = !goalLoop && !!s.interrupted && !s.running && !wfActive && subagentCount === 0
     // Whatever this row would have said if no loop were running, reused as the
     // loop line's trailing detail. This is why the loop branch can outrank the
     // working signals below without swallowing them: live workflow/subagent/tool
@@ -1679,6 +1684,24 @@ const SessionRow = memo(function SessionRow({
             <span className="truncate"><span className={`font-medium ${goalLoopStalled ? 'text-danger' : 'text-accent'}`}>{goalLoopLabel}{goalLoopStalled ? ` — ${i18nT('pages.chatSidebar.loop_interrupted')}` : ''}</span>{goalLoopDetail ? <span className="text-muted"> · {goalLoopDetail}</span> : null}</span>
           </div>
         ),
+      },
+      {
+        // An ordinary session whose last turn ended without a reply needs a
+        // visible handoff after a gateway restart or terminal error. Static
+        // danger ink distinguishes "manual action required" from every pulsing
+        // or spinning progress state. Live child work suppresses this branch via
+        // `turnNeedsAttention`, and goal loops retain their cycle-specific row.
+        key: 'interrupted',
+        when: turnNeedsAttention,
+        build: () => {
+          const title = i18nT('components.chatInput.turn_interrupted_press_continue')
+          return (
+            <div className={ROW_STATUS_LINE_CLS} title={title}>
+              <TriangleAlert size={ROW_ICON_PX} className="shrink-0 text-danger" aria-hidden />
+              <span className="truncate font-medium text-danger">{i18nT('pages.chat.recoveryCard.turn_interrupted')} · {i18nT('components.chatInput.resume')}</span>
+            </div>
+          )
+        },
       },
       {
         // A dynamic-workflow run launched from this session is still executing
