@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import base64
+import bisect
 import fnmatch
 import ipaddress
 import json
@@ -3757,7 +3758,34 @@ def _resolve_param_defaults(token: str) -> str:
 # ``-c`` may arrive inside a COMBINED short-flag cluster: ``bash -xc '<script>'``
 # and ``sh -ec '<script>'`` both run the next token as a script.  Matching only
 # the exact spellings ``-c``/``-lc`` leaves every other cluster as a bypass.
+# LOWERCASE only, deliberately: widening this class to ``[A-Za-z]`` made an
+# uppercase-clustered decoy (``-Cc``) the FIRST flag stop, which ate the stop
+# through which a following ``--command``'s payload was found (Opus review lane
+# on #8197).  Uppercase-clustered spellings are covered instead by
+# ``_SHELL_COMMAND_GLUED_RE`` (glued) and the every-carrier sweep (spaced), so
+# the flag stop set stays byte-identical to what it always was.  The
+# protection is for the CASE-PRESERVING callers (the alt-traversal pass): the
+# deny tiers lowercase their input first, where ``-Cc`` folds to ``-cc`` and
+# eats the ``--command`` stop exactly as it always has -- a pre-existing
+# residual there, not one this pattern can close.
 _SHELL_COMMAND_FLAG_RE = re.compile(r"\A-[a-z]*c[a-z]*\Z")
+
+
+# ``-c`` takes a VALUE, so a getopt-convention shell (``ksh``, ``zsh``) ends
+# option parsing at the ``c`` and runs everything GLUED after it -- and the
+# reading is deliberately OVER-approximated for the shells whose own parsers
+# keep consuming cluster letters (bash's ``parse_shell_options``, dash's
+# ``options()``), because extraction must cover the strictest interpreter the
+# command could reach.  ``sh -c'rg . /path'`` reaches the token walk as
+# ``-crg . /path`` once ``shlex`` strips the quotes.  ``_SHELL_COMMAND_FLAG_RE``
+# anchors the WHOLE token as a bare flag cluster, so a token carrying the
+# payload's own characters was rejected and the payload never yielded (#8197).
+# This companion pattern CAPTURES the glued remainder instead of weakening the
+# flag pattern where it is used for pure flag detection.  Non-greedy, so the
+# split happens at the FIRST lowercase ``c`` (``-ec'x'`` runs ``x`` under the
+# getopt convention; the letters before the ``c`` are flags, either case:
+# ``-Cc'x'`` clusters noclobber before the ``c``).
+_SHELL_COMMAND_GLUED_RE = re.compile(r"\A-[A-Za-z]*?c(.+)\Z", re.DOTALL)
 
 
 # Variables that conventionally hold a shell (or the running script) path.  Piping
@@ -3870,14 +3898,152 @@ def _is_shell_command_flag(token: str) -> bool:
     return token == "--command" or bool(_SHELL_COMMAND_FLAG_RE.match(token))
 
 
-def _is_shell_command_flag_or_herestring(token: str) -> bool:
-    """True where the shell-program scan in :func:`_nested_shell_payloads` stops.
+def _glued_shell_command_payload(token: str) -> "str | None":
+    """The script glued onto a ``-c`` short-option cluster, or ``None``.
 
-    Exactly the three conditions that loop broke on, in one predicate: a command
-    flag, the spaced herestring operator, and the glued spelling.  Kept together so
-    the precomputed stop index and the handling at that index cannot drift apart.
+    The quoted spellings (``-c'x'``, ``-c"x"``) normally lose their quotes to
+    ``shlex`` before tokens reach here, but the fallback tokenizer keeps them, so
+    one surviving outer quote layer is removed -- the payload comes back exactly
+    as the spaced ``-c 'x'`` spelling would deliver it.  Only a layer that is
+    provably a WRAPPER is removed: when the quote character also occurs inside
+    the payload, the first and last characters may be two unrelated quotes
+    (``'a' 'b'``), and stripping them would corrupt the reading.
     """
-    return _is_shell_command_flag(token) or token == "<<<" or token.startswith("<<<")
+    match = _SHELL_COMMAND_GLUED_RE.match(token)
+    if match is None:
+        return None
+    payload = match.group(1)
+    if (
+        len(payload) >= 2
+        and payload[0] == payload[-1]
+        and payload[0] in "'\""
+        and payload[0] not in payload[1:-1]
+    ):
+        payload = payload[1:-1]
+    return payload or None
+
+
+def _is_glued_shell_command_token(token: str) -> bool:
+    """MIRROR of the inline glued stop table in :func:`_nested_shell_payloads`.
+
+    That table is built from the per-token payload cache
+    (``glued_payloads[i] is not None``) rather than through a predicate call,
+    so the payloads many shell tokens share are extracted once.  This mirror
+    exists so the stop condition can be pinned directly by the predicate test;
+    both spellings reduce to the same expression below, which is what keeps
+    them from drifting.
+    """
+    return _glued_shell_command_payload(token) is not None
+
+
+def _shell_c_carrier_glued(token: str) -> "str | None":
+    """The remainder after the first lowercase ``c`` of a short-option carrier.
+
+    The LOOSE recognition: ANY characters may precede the ``c`` (``-1c…``, a
+    long cluster like ``-onoclobber`` glued ahead of it), because a
+    getopt-convention parser consumes unknown letters rather than stopping, and
+    because extraction deliberately over-approximates -- a junk payload
+    re-tokenizes to text that matches no rule, while a missed one is a command
+    nothing examines.  Returns ``""`` for a bare carrier (the payload is the
+    NEXT token), or ``None`` when *token* is not a carrier at all.  This is the
+    recognition the alt-traversal pass's deleted local extractor used; both the
+    every-carrier sweep in :func:`_nested_shell_payloads` and the positional
+    binding in :func:`_alt_bound_shell_payloads` share it so they cannot drift.
+    """
+    if not token.startswith("-") or token.startswith("--") or len(token) < 2:
+        return None
+    position = token.find("c", 1)
+    if position == -1:
+        return None
+    return token[position + 1 :]
+
+
+# How far back from the end of a carrier's leading letter region the ambiguous
+# ``c``-split scan reaches.  The true split's distance to the region's end is
+# the payload's FIRST-WORD length -- a real program name -- so 64 covers any
+# rule-relevant program with room to spare, while keeping the per-token scan
+# O(window) and immune to cluster padding (padding only adds fake splits
+# farther from the end, whose program words are runs of flag letters).
+_CARRIER_SPLIT_WINDOW = 64
+
+
+def _shell_c_carrier_payloads(token: str) -> "list[str]":
+    """Every plausible split of a glued ``-c`` carrier, fold-ambiguity safe.
+
+    The deny tiers LOWERCASE input before the walk, so ``-Cc'<script>'`` (a real
+    zsh/ksh spelling: ``-C`` is noclobber, ``-c`` takes the script) folds to
+    ``-cc<script>`` and the first-``c`` split misreads the boundary -- the
+    payload comes back as ``c<script>``, whose program word matches no rule
+    (found by the GPT 5.6 CI lane on this change; the attacker can also write
+    the folded spelling directly).  Which ``c`` was the option letter is
+    unrecoverable after the fold, so the split is over-approximated: the FIRST
+    ``c`` (getopt-correct for the unfolded spelling), plus, for every maximal
+    run of consecutive ``c``\\ s, the split after the run's LAST and
+    SECOND-TO-LAST ``c``.  The last-``c`` split reads the run as all flags; the
+    second-to-last covers a payload whose own program name begins with one
+    ``c`` (``cat``, ``curl``, ``cp``, ``chmod``, ``crontab`` -- no rule-covered
+    program carries two).  Split positions are BOUNDED to the last
+    ``_CARRIER_SPLIT_WINDOW`` characters of the leading letter region, which
+    keeps the function linear WITHOUT opening a padding bypass: the true
+    split's distance to the region's end equals the payload's first-word
+    length -- a real program name, never longer than the window -- while
+    cluster padding only pushes FAKE splits farther from the end, and a fake
+    split's program word is a run of flag letters that matches no rule.
+    Without the bound, a ~3 KB ``-acac…`` token made the candidate set
+    quadratic and the synchronous deny scan outlived the loop watchdog (found
+    by the GPT 5.6 CI lane).  The first-``c`` split is always yielded
+    regardless of the window: it is the LONGEST suffix, so the unanchored
+    regex tier sees every shorter reading as a substring of it.
+    """
+    if not token.startswith("-") or token.startswith("--") or len(token) < 2:
+        return []
+    first = token.find("c", 1)
+    if first == -1:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(payload: str) -> None:
+        if payload and payload not in seen:
+            seen.add(payload)
+            out.append(payload)
+
+    _add(token[first + 1 :])
+    # Option letters are letters: the first non-letter character ends the
+    # region where a ``c`` could have been the option that takes the script.
+    # A ``c`` beyond it belongs to the payload's own text and splitting there
+    # would shred the payload.
+    region_end = 1
+    limit = len(token)
+    while region_end < limit:
+        ch = token[region_end]
+        if not ("a" <= ch <= "z" or "A" <= ch <= "Z"):
+            break
+        region_end += 1
+    index = max(1, region_end - _CARRIER_SPLIT_WINDOW)
+    while index < region_end:
+        if token[index] == "c":
+            run_start = index
+            while index + 1 < region_end and token[index + 1] == "c":
+                index += 1
+            _add(token[index + 1 :])
+            if index > run_start:
+                _add(token[index:])
+        index += 1
+    return out
+
+
+def _is_herestring_token(token: str) -> bool:
+    """True where the herestring scan in :func:`_nested_shell_payloads` stops.
+
+    Covers the spaced operator and the operator glued to its payload.  A
+    SEPARATE stop from the command flag (they used to share one predicate):
+    with one shared table a herestring token EATS the stop through which a
+    later ``-c``'s payload was found -- ``bash <<<'x' -c '<script>'`` yielded
+    only ``x`` while a real shell runs the script.  Independent tables scan
+    each spelling in its own right, which is purely additive.
+    """
+    return token == "<<<" or token.startswith("<<<")
 
 
 def _is_env_split_flag(token: str) -> bool:
@@ -3951,37 +4117,100 @@ def _nested_shell_payloads(
     # backward pass instead, which makes the whole function O(N) while returning the
     # identical payload list -- the loops' only exits were that first stop token or the
     # end of the list, so nothing else can change.
-    shell_stop = _next_stop_indexes(tokens, _is_shell_command_flag_or_herestring)
     env_stop = _next_stop_indexes(tokens, _is_env_split_flag)
+    # The herestring and the GLUED ``-c`` spelling each get their OWN stop table
+    # rather than sharing the flag's: with a shared table, whichever spelling
+    # comes first EATS the stop through which a later spelling's payload was
+    # found -- ``bash <<<'x' -c '<script>'`` yielded only ``x``.  Splitting the
+    # tables fixes the CROSS-spelling case; WITHIN one class each table still
+    # reads only its first stop per shell token, which for short-cluster ``-c``
+    # carriers is closed by the every-carrier sweep at the bottom of this
+    # function.  Two stated residuals: ``--command`` carriers stay
+    # first-stop-only (the sweep is scoped to short clusters), and herestrings
+    # keep a first-occurrence residual (``bash <<<'a' <<<'b'`` yields ``a``; a
+    # real shell applies the LAST redirect).
+    #
+    # The flag, herestring and glued stops are SPARSE (sorted index lists read
+    # through bisect, payloads cached in dicts keyed by stop position), built in
+    # one forward pass gated on a cheap prefix check.  Dense per-token tables
+    # (and a regex call per token to fill them) made this function's constant
+    # measurably heavier than the merge-base on interpreter-run shapes, and the
+    # pre-existing linearity tests bound ABSOLUTE seconds on CI runners, not
+    # growth rate.  A carrier-free command now allocates three empty lists and
+    # runs one `startswith` per token -- less than the merge-base's own
+    # per-token predicate regex.  Payloads are cached at their stop position
+    # because many shell tokens can share one stop -- re-extracting there copies
+    # the same length-M substring once per shell token, O(N*M) on
+    # ``["bash"]*N + ["-c<payload>"]`` (GPT 5.6 lane); the cached string is one
+    # object, so downstream dedup-set hashing stays linear too.
+    limit = len(tokens)
+    flag_stops: "list[int]" = []
+    herestring_stops: "list[int]" = []
+    glued_stops: "list[int]" = []
+    glued_at: "dict[int, str]" = {}
+    herestring_tail_at: "dict[int, str]" = {}
+    for index, token in enumerate(tokens):
+        if token.startswith("-"):
+            if _is_shell_command_flag(token):
+                flag_stops.append(index)
+            if not token.startswith("--"):
+                glued = _glued_shell_command_payload(token)
+                if glued is not None:
+                    glued_stops.append(index)
+                    glued_at[index] = glued
+        elif token.startswith("<<<"):
+            herestring_stops.append(index)
+            if token != "<<<":
+                herestring_tail_at[index] = token[3:]
+
+    def _first_stop_at_or_after(stops: "list[int]", start: int) -> int:
+        position = bisect.bisect_left(stops, start)
+        return stops[position] if position < len(stops) else limit
+
     # ``--`` runs are precomputed for the same reason: a long run of them after the
     # command flag is walked once per program token otherwise, which is quadratic even
     # though the two scans above are not.
     past_dashes = _next_stop_indexes(tokens, _is_not_double_dash)
     # ``eval``'s argument join is bounded to one per walk; see the verb branch.
     joined_eval = False
-    limit = len(tokens)
+    first_shell: "int | None" = None
     for i, token in enumerate(tokens):
         base = _program_basename(token)
         # A shell reached through a VARIABLE (``$SHELL -c '<payload>'``) runs the
         # payload exactly as a named shell does.  The recognizer already used for the
         # ``| $SHELL`` evaluator sink applies here too.
         if base in _NESTED_SHELL_PROGRAMS or _is_shell_variable_reference(token):
-            j = shell_stop[i + 1]
+            if first_shell is None:
+                # Recorded here, where the shell test has already been paid,
+                # so the every-carrier sweep below needs no second scan that
+                # re-derives program basenames token by token.
+                first_shell = i
+            j = _first_stop_at_or_after(flag_stops, i + 1)
             if j < limit:
-                if _is_shell_command_flag(tokens[j]):
-                    # ``bash -c -- '<script>'`` is legal: ``--`` ends option parsing
-                    # and the script is the token AFTER it.  Skip any run of them.
-                    k = past_dashes[j + 1]
-                    if k < limit:
-                        payloads.append(tokens[k])
-                # A HERESTRING feeds the script on stdin instead of as an argument
-                # (``bash <<< '<script>'``), so its text is a command just the same.
-                # Both the spaced and glued spellings arrive here.
-                elif tokens[j] == "<<<":
-                    if j + 1 < limit:
-                        payloads.append(tokens[j + 1])
-                elif tokens[j].startswith("<<<"):
-                    payloads.append(tokens[j][3:])
+                # ``bash -c -- '<script>'`` is legal: ``--`` ends option parsing
+                # and the script is the token AFTER it.  Skip any run of them.
+                k = past_dashes[j + 1]
+                if k < limit:
+                    payloads.append(tokens[k])
+            # A HERESTRING feeds the script on stdin instead of as an argument
+            # (``bash <<< '<script>'``), so its text is a command just the same.
+            # Both the spaced and glued spellings arrive here.
+            h = _first_stop_at_or_after(herestring_stops, i + 1)
+            if h < limit:
+                tail = herestring_tail_at.get(h)
+                if tail is not None:
+                    payloads.append(tail)
+                elif h + 1 < limit:
+                    payloads.append(tokens[h + 1])
+            # The glued ``-c`` spelling (``-c'<script>'``, one token once shlex
+            # strips the quotes) is looked up independently as well.  An
+            # all-alpha cluster like ``-ecfoo`` satisfies BOTH ``-c`` readings --
+            # it matches the bare-flag pattern (yielding the next token, as
+            # before) AND carries a glued remainder a real shell would run -- so
+            # both payloads are yielded rather than picking one interpretation.
+            g = _first_stop_at_or_after(glued_stops, i + 1)
+            if g < limit:
+                payloads.append(glued_at[g])
         elif base in _ENV_SPLIT_PROGRAMS:
             # ``env -S '<script>'`` / ``env --split-string '<script>'`` splits the
             # payload into a command and runs it, so its text is a command line.
@@ -4040,6 +4269,43 @@ def _nested_shell_payloads(
         head, _, tail = token.partition("<<<")
         if tail and _program_basename(head) in _NESTED_SHELL_PROGRAMS:
             payloads.append(tail)
+    # EVERY ``-c`` carrier past the first shell token is swept, not only the
+    # first-stop one.  The stop tables above read one token per spelling class,
+    # so a decoy that satisfies the same predicate EATS the stop through which a
+    # later carrier's payload was found (``ksh -onoclobber -c'<script>'`` stops
+    # the glued table at ``-onoclobber``; ``bash -c 'a' -c '<script>'`` stops the
+    # flag table at the first ``-c``).  The loose recognition here is the one the
+    # alt-traversal pass's deleted local extractor used -- any prefix before the
+    # first lowercase ``c`` (``-1c…``), payload glued or in the next token -- and
+    # the sweep is a single forward pass from the first shell token (recorded
+    # for free inside the main loop above), so the function stays O(N).
+    # Additive only: a payload already collected above is not re-appended, so
+    # consumers pinning exact payload lists are unchanged.
+    if first_shell is not None:
+        collected = set(payloads)
+        for index in range(first_shell + 1, limit):
+            token = tokens[index]
+            if not token.startswith("-") or token.startswith("--"):
+                continue
+            glued = _shell_c_carrier_glued(token)
+            if glued is None:
+                continue
+            if glued:
+                # Glued payload: yield EVERY plausible split, not just the
+                # first-``c`` one -- after the deny tiers' case fold, which
+                # ``c`` took the argument is unrecoverable, and the wrong
+                # split hid a protected payload behind one junk letter
+                # (``-Cc'<script>'`` folded to ``-cc<script>``).
+                for candidate in _shell_c_carrier_payloads(tokens[index]):
+                    if candidate not in collected:
+                        collected.add(candidate)
+                        payloads.append(candidate)
+            else:
+                k = past_dashes[index + 1]
+                bare_next = tokens[k] if k < limit else None
+                if bare_next and bare_next not in collected:
+                    collected.add(bare_next)
+                    payloads.append(bare_next)
     # ``a=(<name> <verb>); "${a[@]}"`` runs the array's elements AS a command line.  The
     # expansion is one token, so the argv checks have no adjacent operands to compare --
     # the joined elements are handed to the payload walk instead, which re-tokenizes them.
@@ -5874,6 +6140,189 @@ _PUSH_ALL_BRANCHES_OPTS = frozenset({"mirror", "all", "branches"})
 #: single-arg rule off published to ``main``.
 _PUSH_REPO_OPTS = frozenset({"repo"})
 
+#: The ARITY table (#7796): push options that take a REQUIRED value git also
+#: accepts as a SEPARATED token (``--push-option ci.skip``). The token scan
+#: must consume that value or it leaks into the positional list, where it is
+#: read as a remote/refspec — and because an option value like ``ci.skip``
+#: normalizes to a non-protected name, the tag set for an otherwise-bare
+#: publish came back EMPTY. An empty tag set IS the allow decision, so one
+#: extra flag switched the protected-branch floor off. Same shape as
+#: ``_PUSH_REPO_OPTS`` (which stays separate because its value being the
+#: REMOTE also shifts the positional split), resolved through
+#: ``_push_option_matches`` so abbreviations keep working (finding 2).
+#: Attached forms (``--push-option=x``) bind the value inside the token and
+#: never disturb the split, so they need no entry here. (``repo`` itself is
+#: deliberately NOT unioned in: the dedicated ``_PUSH_REPO_OPTS`` branch runs
+#: first and would make the member unreachable — First Principles review.)
+_PUSH_VALUE_OPTS = frozenset({"push-option", "receive-pack", "exec"})
+
+#: Long push options that never consume the NEXT token: booleans, plus the
+#: optional-value options (``--signed``, ``--force-with-lease``) whose value
+#: git binds in ATTACHED form only. ``--no-*`` negations are recognised
+#: structurally (git's negation never takes a separate value), so they are not
+#: enumerated. ``recurse-submodules`` is deliberately ABSENT: listing an
+#: option here vouches that its separated neighbour is a positional, and being
+#: wrong about that is exactly the #7796 erasure — so an option whose arity is
+#: not modelled with confidence falls to the protective fallback instead.
+_PUSH_NO_VALUE_OPTS = frozenset(
+    {
+        "atomic",
+        "delete",
+        "dry-run",
+        "follow-tags",
+        "force",
+        "force-if-includes",
+        "force-with-lease",
+        "ipv4",
+        "ipv6",
+        "porcelain",
+        "progress",
+        "prune",
+        "quiet",
+        "set-upstream",
+        "signed",
+        "tags",
+        "thin",
+        "verbose",
+        "verify",
+    }
+)
+
+#: Short-option arity, resolved the way git resolves a bundle: booleans may
+#: stack (``-fq``), and the first value-taking short consumes the REST of the
+#: token as its attached value (``-oci.skip``) or, when the rest is empty, the
+#: NEXT token (``-o ci.skip`` — or ``-fo ci.skip``, which is ``-f -o ci.skip``).
+_PUSH_VALUE_SHORTS = frozenset({"o"})
+_PUSH_NO_VALUE_SHORTS = frozenset({"f", "n", "q", "v", "u", "d", "4", "6"})
+
+
+def _push_token_shell_read(token: str) -> "tuple[list[str] | None, bool]":
+    """One quote/escape-state walk over a RAW (pre-dequote) token, returning
+    ``(operator_pieces, open_state)``.
+
+    ``operator_pieces`` — the token split at unquoted ``<`` ``>`` ``&``, or
+    None when it carries none (the common case). A mid-word operator means
+    the shell hands git a DIFFERENT word than this scan sees: ``main>log`` is
+    the argument ``main`` plus the redirection ``>log``, i.e. it pushes main.
+    The caller scans each piece as a refspec candidate so a protected name
+    cannot hide behind operator glue; quoted operators are data and produce
+    no split.
+
+    ``open_state`` — True when the shell's quote/escape state has not
+    RETURNED TO NORMAL by the token's end: an open quote or a trailing escape
+    means the whitespace that split this token was itself quoted or escaped —
+    the token is a FRAGMENT of a word fused across the split, the shape that
+    let ``--push-option='ci skip'`` erase the floor tag. The walk uses the
+    shell's own rules: a backslash escapes the next character outside quotes,
+    inside double quotes, and inside ``$'...'`` ANSI-C strings, but is
+    LITERAL inside plain single quotes; an ESCAPED quote is data, not a
+    delimiter. (Counting quote characters — an earlier shape here — was
+    bypassed by ``\\"``: the escaped quote flipped the parity even though it
+    closes nothing. Found by the GPT 5.6 review lane on #7808.) A complete
+    word with escaped quotes therefore keeps its precise reading, both
+    directions. The ``$``-lookback for ANSI-C can misread ``$$'`` (PID
+    expansion) as ANSI-C, but that direction only ever OVER-flags — a
+    plain-single reading closes at every quote the ANSI reading skips, so the
+    walk can end "still open" where bash split normally, never the reverse.
+
+    ONE walk serves both signals (a review subtraction: the identical state
+    machine briefly shipped twice); both consequences are protective-only —
+    a hit poisons the positional split, never widens an allow.
+    """
+    pieces: list[str] = []
+    buf: list[str] = []
+    found = False
+    trailing_escape = False
+    state = 0  # 0 = normal, 1 = single-quoted, 2 = double-quoted
+    ansi = False  # the open single quote was $'...' (ANSI-C): backslash escapes
+    i = 0
+    n = len(token)
+    while i < n:
+        ch = token[i]
+        if state == 0:
+            if ch == "\\":
+                if i + 1 >= n:
+                    trailing_escape = True  # the escaped char was the separator
+                    break
+                buf.append(token[i : i + 2])
+                i += 2
+                continue
+            if ch in "<>&()":
+                found = True
+                if buf:
+                    pieces.append("".join(buf))
+                    buf = []
+                i += 1
+                continue
+            if ch == "'":
+                state = 1
+                ansi = i > 0 and token[i - 1] == "$"
+            elif ch == '"':
+                state = 2
+        elif state == 1:
+            if ansi and ch == "\\":
+                if i + 1 >= n:
+                    trailing_escape = True  # escapes the separator inside $'...'
+                    break
+                buf.append(token[i : i + 2])
+                i += 2
+                continue
+            if ch == "'":
+                state = 0
+        else:  # state == 2, inside double quotes
+            if ch == "\\":
+                if i + 1 >= n:
+                    trailing_escape = True  # escaped separator / continuation
+                    break
+                buf.append(token[i : i + 2])
+                i += 2
+                continue
+            if ch == '"':
+                state = 0
+        buf.append(ch)
+        i += 1
+    if buf:
+        pieces.append("".join(buf))
+    return (pieces if found else None, state != 0 or trailing_escape)
+
+
+#: A token that BEGINS with a redirection: optional fd number, ``&``, or bash
+#: NAMED descriptor ``{name}`` prefix, then ``<`` or ``>`` (doubled, or ``>|``
+#: clobber, or ``>&``/``<&`` fd-dup). ``{name}>...`` is ALL redirection — read
+#: as a word, the ``{name}`` became a phantom refspec and erased every tag
+#: (GPT 5.6 round 11 on #7808). ``<<-`` (the tab-stripping heredoc) folds its
+#: ``-`` INTO the operator — left in the remainder it faked a self-contained
+#: token and the separated delimiter word became a phantom refspec (round 7)
+#: — while a ``-`` after an fd-dup (``>&-`` close, ``2>&1-`` move) is a
+#: disposition the remainder correctly keeps. group(3) is whatever follows
+#: the operator run — an ATTACHED target/fd makes the token self-contained;
+#: an empty remainder means the shell takes the NEXT word as the
+#: target/delimiter.
+_PUSH_REDIRECTION_RE = re.compile(r"^([0-9]*|&|\{[A-Za-z_][A-Za-z0-9_]*\})(<<-|[<>][<>&|]*)(.*)$")
+
+
+def _push_token_redirection(token: str) -> "tuple[bool, bool]":
+    """(is_redirection, consumes_next_word) for a RAW token.
+
+    Quotes and escapes are refused only where they could FOOL the grammar —
+    the prefix/operator span. The redirection operator grammar itself admits
+    no quote characters, so a quote can only ever sit in the TARGET group:
+    ``>'log'`` is a plain redirection with a quoted target, and refusing the
+    whole token for it pushed the shape into the fallback with the WRONG
+    catalog identity (GPT 5.6 round 11 on #7808). A token that is a fragment
+    (open quote state / trailing escape) is still refused — the caller's walk
+    poisons the split for those. The shell consumes a redirection before the
+    program runs, so such a token is never an argv word — treating it as a
+    positional is how ``git push origin </dev/null`` erased the single-arg
+    tag (round 4, verified real and pre-existing on main).
+    """
+    m = _PUSH_REDIRECTION_RE.match(token)
+    if m is None:
+        return (False, False)
+    if _push_token_shell_read(token)[1]:
+        return (False, False)  # fragment: the walk handles it protectively
+    return (True, m.group(3) == "")
+
 
 def _push_option_matches(token: str, names: "frozenset[str]") -> bool:
     """True when ``token`` is ``--`` plus a PREFIX of any option in ``names``.
@@ -5908,9 +6357,12 @@ def _push_option_matches(token: str, names: "frozenset[str]") -> bool:
 # If the agent is on main and pushes HEAD, it pushes to main on the remote.
 _AMBIGUOUS_REFS = {"head", "@", "fetch_head"}
 
-# Refspecs containing shell expansion or git-revision syntax cannot be
-# statically verified — deny them as ambiguous.
-_AMBIGUOUS_REFSPEC_RE = re.compile(r"[$`]|@\{")
+# Refspec spellings that resolve only at runtime: ``@{upstream}`` / ``@{u}``
+# git-revision syntax. (The ``$``/backtick branches this once carried are now
+# subsumed upstream — the per-token ``$`` check and the segment-level
+# expansion ungate both run before any refspec reaches this — so they were
+# removed as shadowed duplicates per First Principles review on #7808.)
+_AMBIGUOUS_REFSPEC_RE = re.compile(r"@\{")
 
 # TRUE shell command separators (NOT command-substitution boundaries). Used to
 # scan the PRE-SPLIT text for substitution glued into a push target — see
@@ -5922,10 +6374,20 @@ _CMD_SEPARATOR_RE = re.compile(r"&&|\|\||[;|\n]")
 # -> deny (fail closed):
 #   - command substitution   $(...)   and backticks  `...`
 #   - parameter expansion     ${...}
+#   - PROCESS substitution   <(...) / >(...)  -- the shell substitutes a
+#     /dev/fd path WORD, so the construct is a positional the split cannot
+#     model; mis-reading it as a removable redirection shifted a value
+#     option's consumption onto the remote and downgraded a protected push to
+#     the disableable single-arg row (GPT 5.6 round 8 on #7808). The operator
+#     adjacency ``<(``/``>(`` is required, so a parenthesis inside a quoted
+#     refname stays data -- but the match is deliberately CONSERVATIVE about
+#     quoting: a QUOTED ``<(`` spelling (a ref literally named ``feat<(x)``)
+#     also matches and over-denies, the same fail-closed posture this regex
+#     already takes for a quoted ``$(``.
 #   - BRACE expansion         {a,b} / {1..5}  -- bash expands ``ma{i,i}n`` to
 #     ``main`` and ``{main,x}`` to ``main x`` BEFORE git sees the token, so a
 #     brace group containing a comma or ``..`` must be treated as ambiguous.
-_AMBIGUOUS_EXPANSION_RE = re.compile(r"\$\(|\$\{|`|\{[^{}]*(?:,|\.\.)[^{}]*\}")
+_AMBIGUOUS_EXPANSION_RE = re.compile(r"\$\(|\$\{|`|[<>]\(|\{[^{}]*(?:,|\.\.)[^{}]*\}")
 
 
 def _dequote_token(token: str) -> str:
@@ -6111,28 +6573,249 @@ def _push_segment_targets_protected(arg_tokens: list[str]) -> frozenset[str]:
     if any(_push_option_matches(tok, _PUSH_ALL_BRANCHES_OPTS) for tok in tokens):
         tags.add("git-publish-push-mirror-all")
     # Skip flags (tokens starting with -); non_flags[0] is the remote and
-    # non_flags[1:] are the refspecs/branches. A flag that CARRIES the repository
-    # (``--repo=x`` / ``--repo x``, or any abbreviation of it) means the remote is
-    # NOT positional, so every remaining token is a refspec. Consuming the
-    # separated form's value keeps it from being read as the remote.
+    # non_flags[1:] are the refspecs/branches. Option ARITY is modelled
+    # explicitly (#7796): a flag that CARRIES the repository (``--repo=x`` /
+    # ``--repo x``) means the remote is NOT positional, a value-taking option's
+    # SEPARATED value is consumed so it is never read as a remote/refspec, and
+    # any option the scan does not recognise poisons the positional split
+    # entirely (see the fail-protective fallback below) — because trusting a
+    # split that may contain a leaked option value is how the floor tag was
+    # erased. A bare ``--`` ends option parsing, exactly as git reads it.
     repo_in_flag = False
+    positional_only = False
     non_flags: list[str] = []
     skip_next = False
-    for tok in tokens:
+    # One shared quote/escape walk per raw token yields both shell signals:
+    # operator PIECES (unquoted < > & split the word) and OPEN STATE (an
+    # unterminated quote or trailing escape means the shell fused a
+    # whitespace-spanning word this whitespace tokenizer split apart). Either
+    # signal means no per-token reading of the split can be trusted.
+    shell_reads = [_push_token_shell_read(t) for t in arg_tokens]
+    # ``#`` at the start of a WORD comments out the REST of the segment, so
+    # the shell never passes those tokens to git: truncate before any other
+    # reading, or ``git push origin #main`` scans a phantom refspec while the
+    # shell runs a remote-only push. A ``#`` is word-initial only when the
+    # whitespace before it was a REAL separator: if ANY earlier token leaves
+    # the shell state open (trailing escape / unterminated quote fuses across
+    # the split), the ``#`` may be mid-word — truncating there discarded a
+    # real trailing refspec (GPT 5.6 round 5 on #7808, verified: an
+    # escaped-space option value fused into ``#x`` dropped ``main`` from the
+    # scan, leaving only the disableable bare tag). With an open token seen,
+    # truncation is skipped entirely: the open state already poisons the
+    # split protectively and the superset scan keeps every later positional
+    # visible.
+    _open_seen = False
+    for _idx, _raw in enumerate(arg_tokens):
+        if _raw.startswith("#") and not _open_seen:
+            arg_tokens = arg_tokens[:_idx]
+            tokens = tokens[:_idx]
+            shell_reads = shell_reads[:_idx]
+            break
+        _open_seen = _open_seen or shell_reads[_idx][1]
+    unrecognised_option = any(open_state for _pieces, open_state in shell_reads)
+    # A segment whose CUMULATIVE quote/escape state is still open at its end
+    # continues into the NEXT line: bash line continuation (backslash-newline
+    # vanishes entirely) and quoted newlines splice words ACROSS the segment
+    # split, so the real refspec may be assembled from pieces this segment
+    # cannot see — ``origin ma\`` + newline + ``in`` pushes MAIN while no
+    # token here spells it (GPT 5.6 round 6 on #7808, verified real). An
+    # unreconstructable name gets the same posture as ``ma$in``: the ungated
+    # sentinel, which no catalog row can switch off. Deliberately NARROWER
+    # than ungating on any per-token open state: a MID-segment open (a quoted
+    # value containing a space, whose quote closes before segment end) stays
+    # on the DISABLEABLE fallback, because joining within one segment can
+    # only fuse whitespace into the word — never a valid refname — and every
+    # piece stays visible to the superset scan below. The cumulative state is
+    # the per-token walk run over the joined segment (whitespace is inert to
+    # the state machine).
+    if arg_tokens and _push_token_shell_read(" ".join(arg_tokens))[1]:
+        tags.add(_GIT_PUBLISH_UNGATED)
+    pending_redirection_target = False
+    for raw, tok, (operator_pieces, _open) in zip(arg_tokens, tokens, shell_reads):
+        if tok:
+            # Word-producing shell syntax makes ANY token unverifiable, no
+            # matter which slot the split assigns it (GPT 5.6 round 3 on
+            # #7808, verified real): ``V='ci.skip main'; git push
+            # --repo=origin --push-option $V`` expands and word-splits AFTER
+            # this scan, handing git a ``main`` refspec the split never saw —
+            # and consuming the literal ``$V`` had REGRESSED that case from
+            # the ungated posture (the leaked value used to hit the refspec
+            # ambiguity check) to the disableable bare rule. A ``$`` anywhere
+            # therefore lands on the ungated branch, the same posture as
+            # ``ma$in``; ``$(``/``${``/backticks never reach here because the
+            # caller's expansion regex already ungated the whole segment.
+            # Glob characters (``* ? [``) are pathname expansion — a file
+            # named ``main`` makes ``ma[i]n`` push main — and none of them is
+            # legal in a refname, so they keep the wildcard-refspec identity
+            # the leaked-value scan used to give them, at zero cost to real
+            # commands.
+            if "$" in tok or tok.startswith("~"):
+                # Tilde expansion is env-driven text, not path syntax: bare
+                # ``~`` IS ``$HOME`` (``HOME=main`` publishes main), ``~±``
+                # and ``~N`` read PWD/OLDPWD/DIRSTACK, and even ``~/main``
+                # resolves to ``refs/heads/main`` under a crafted
+                # ``HOME=refs/heads`` — so a leading unquoted ``~`` is as
+                # unverifiable as ``$`` (GPT 5.6 round 15 on #7808, verified
+                # real). Mid-word ``~`` is literal in an argv word and stays
+                # data.
+                tags.add(_GIT_PUBLISH_UNGATED)
+            # Extglob patterns (``@( +( !(`` — and ``?( *(``, already covered
+            # by their leading glob char) are pathname expansion too when the
+            # shell has extglob on, so they take the same wildcard identity:
+            # like a glob, they can only ever match existing FILE names
+            # (GPT 5.6 round 9 on #7808, verified: ``@(main)`` beside a file
+            # named ``main`` expands to a push of main with no tag at all).
+            if any(ch in tok for ch in "*?[") or any(op in tok for op in ("@(", "+(", "!(")):
+                tags.add("git-publish-push-wildcard-refspec")
+        # Shell operators are consumed by the SHELL, so they are handled
+        # before every argv-level reading — including after ``--``, which is
+        # git's end-of-options, not the shell's (GPT 5.6 round 4 on #7808).
+        if pending_redirection_target:
+            # The word a bare redirection operator takes as its target; the
+            # shell removes it from argv.
+            pending_redirection_target = False
+            continue
+        is_redirection, consumes_next = _push_token_redirection(raw)
+        if is_redirection:
+            # Modelled with the shell's own arity so ``2>&1`` keeps a feature
+            # push allowed while ``origin </dev/null`` reads as the precise
+            # remote-only shape instead of scanning a phantom refspec.
+            pending_redirection_target = consumes_next
+            continue
+        if operator_pieces is not None:
+            # A word GLUED to its redirection: bash reads ``origin>/dev/null``
+            # as the word ``origin`` plus a redirection, i.e. a remote-only
+            # push whose true row is SINGLE-ARG — the protective fallback
+            # emitted BARE for it, and a wrong identity is itself a hazard
+            # under per-rule opt-out (GPT 5.6 round 10 on #7808, verified
+            # real). When the token decomposes cleanly — a non-flag word,
+            # then a well-formed redirection (no risky ``&`` beyond an
+            # fd-dup) — keep the word positional and consume the redirection
+            # exactly as the shell does, with no fallback. Anything murkier
+            # (a bare ``&`` command boundary, a flag-shaped prefix, quotes
+            # inside the redirection) keeps the protective fallback below.
+            prefix = operator_pieces[0] if operator_pieces else ""
+            rest = raw[len(prefix) :] if prefix and raw.startswith(prefix) else ""
+            dequoted_prefix = _dequote_token(prefix)
+            # A flag GLUED to a redirection: the flag identity must not be
+            # lost to the fallback — ``--all>/dev/null`` is an all-branches
+            # push, and emitting only the disableable no-refspec rows let an
+            # operator who disabled those admit it while mirror-all stayed
+            # enabled (GPT 5.6 round 16 on #7808, verified real). The
+            # all-branches check is the one whose MISSED identity is a
+            # bypass; other flag prefixes stay on the fallback, which only
+            # ever over-protects.
+            if _push_option_matches(dequoted_prefix, _PUSH_ALL_BRANCHES_OPTS):
+                tags.add("git-publish-push-mirror-all")
+            if (
+                (rest[:1] in ("<", ">") or rest.startswith(("&>", "&>>")))
+                and dequoted_prefix
+                and not dequoted_prefix.startswith("-")
+                and _push_token_redirection(rest)[0]
+                and (
+                    "&" not in rest
+                    # Glued all-output redirection: the & is the operator head.
+                    or rest.startswith("&")
+                    # Glued fd-dup / fd-close / fd-move: >&2, >&-, >&1-.
+                    or re.fullmatch(r"[<>]{1,2}&([0-9]+-?|-)", rest)
+                )
+            ):
+                # The glued WORD is exactly what the shell hands git as the
+                # argv word, so it must flow wherever a plain word would: a
+                # pending option value first (GPT 5.6 round 13 — appending it
+                # as a positional while ``skip_next`` stayed armed let the
+                # NEXT real word be eaten as the "value" and erased the
+                # tags), else a positional.
+                if skip_next:
+                    skip_next = False
+                else:
+                    non_flags.append(dequoted_prefix)
+                pending_redirection_target = _push_token_redirection(rest)[1]
+                continue
+            # A bare control operator (``&`` — a single ampersand is NOT a
+            # segment separator upstream, only ``&&`` is) or operator glue
+            # mid-word (``main>log`` = the word ``main`` plus a redirection:
+            # it pushes main). The split is untrusted, and the operator-
+            # delimited pieces are scanned as refspec candidates so a
+            # protected name cannot hide behind the glue.
+            unrecognised_option = True
+            non_flags.extend(p for p in (_dequote_token(pc) for pc in operator_pieces) if p)
+            continue
         if skip_next:
             skip_next = False
             continue
         if not tok:
             continue
-        if tok.startswith("-"):
-            if _push_option_matches(tok, _PUSH_REPO_OPTS):
-                repo_in_flag = True
-                skip_next = "=" not in tok
+        if positional_only or tok == "-" or not tok.startswith("-"):
+            # A lone ``-`` is an OPERAND to git's option parser (a repository
+            # spelled ``./-`` is addressable) — skipping it as a flag shifted
+            # the real refspec into the remote slot and downgraded the row
+            # (GPT 5.6 round 13 on #7808).
+            non_flags.append(tok)
             continue
-        non_flags.append(tok)
-    # With the repository supplied by a flag there is no positional remote to
-    # drop, so the refspecs start at index 0.
-    refspecs = non_flags if repo_in_flag else non_flags[1:]
+        if tok == "--":
+            positional_only = True
+            continue
+        if _push_option_matches(tok, _PUSH_REPO_OPTS):
+            repo_in_flag = True
+            skip_next = "=" not in tok
+            continue
+        if "=" in tok:
+            # An attached value binds inside the token — whatever the option
+            # is, it cannot disturb the positional split.
+            continue
+        if tok.startswith("--"):
+            if _push_option_matches(tok, _PUSH_VALUE_OPTS):
+                skip_next = True
+            elif not (
+                tok.startswith("--no-")
+                or _push_option_matches(tok, _PUSH_NO_VALUE_OPTS)
+                or _push_option_matches(tok, _PUSH_ALL_BRANCHES_OPTS)
+            ):
+                unrecognised_option = True
+            continue
+        # Short-option token: resolve the bundle char by char like git does.
+        for i, ch in enumerate(tok[1:]):
+            if ch in _PUSH_VALUE_SHORTS:
+                # Rest of the token is the attached value; consume the NEXT
+                # token only when there is no rest.
+                skip_next = i == len(tok) - 2
+                break
+            if ch not in _PUSH_NO_VALUE_SHORTS:
+                unrecognised_option = True
+                break
+    if unrecognised_option:
+        # Fail-protective invariant (#7796, shape C): an option this scan does
+        # not model might take a separated value, so the positional split
+        # cannot be trusted — the "remote" it would drop may really be a
+        # leaked option value. Read the segment protectively instead: the
+        # current branch might be protected (the bare tag — unless an
+        # all-branches flag already names the target set exhaustively, the
+        # finding-3 suppression, in which case mirror-all covers a superset of
+        # bare), and EVERY positional is scanned as a refspec candidate so an
+        # actual protected name still reports its own precise catalog row. A
+        # mis-parse can therefore only ever OVER-protect: a future value-taking
+        # push option cannot silently reopen the erasure class.
+        if "git-publish-push-mirror-all" not in tags:
+            tags.add("git-publish-push-bare")
+            if non_flags:
+                # An untrusted split cannot distinguish the bare shape from
+                # the remote-only shape — the visible positionals may all be
+                # option values, or one may be the remote. Three review
+                # rounds (10, 13, 14 on #7808) each turned that ambiguity
+                # into a bypass by disabling whichever single row the
+                # fallback happened to emit, so the fallback now names BOTH
+                # no-refspec rows: admitting an unparseable spelling takes
+                # disabling both. (With no positionals at all the remote-only
+                # shape is impossible and bare stands alone; an all-branches
+                # flag still suppresses both, since mirror-all covers a
+                # superset.)
+                tags.add("git-publish-push-single-arg")
+        refspecs = non_flags
+    else:
+        # With the repository supplied by a flag there is no positional remote
+        # to drop, so the refspecs start at index 0.
+        refspecs = non_flags if repo_in_flag else non_flags[1:]
     if not refspecs and "git-publish-push-mirror-all" not in tags:
         # Bare ``push`` or ``push <remote>`` with no explicit branch — the
         # current branch might be protected.  The two spellings are separate
@@ -18568,24 +19251,42 @@ def _alt_command_string_payloads(
 
     :func:`_nested_shell_payloads` -- the extractor the self-protection floor
     already uses -- is unioned in rather than replaced by the scan above, because
-    the two cover different spellings and a payload missed is a traversal never
-    looked at. It adds a shell reached through a variable (``$SHELL -c``), a
-    herestring (``bash <<< '…'``), a payload after ``-c --``, an array expansion run
-    as a command line, GNU ``sed``'s ``s///e`` replacement, and a multiword alias.
-    The scan above adds the one it declines: a payload GLUED to a short cluster
-    (``sh -c'rg . …'``), whose token holds characters its flag pattern rejects.
-    Extracting text that turns out not to be a command costs nothing here -- it
-    re-tokenizes to stages that match no traversal rule. The result is de-duplicated
-    because the two extractors agree on most spellings, and re-staging one payload
-    twice doubles the walk below it for no new reading.
+    it reaches spellings a resolved-program scan does not: a shell reached
+    through a variable (``$SHELL -c``), a herestring (``bash <<< '…'``), a
+    payload after ``-c --``, an array expansion run as a command line, GNU
+    ``sed``'s ``s///e`` replacement, and a multiword alias.  The scan above adds
+    what the shared extractor cannot know: a program name that only resolves
+    through a local ASSIGNMENT (``S=sh; "$S" -c '…'``), and the POSITIONAL
+    parameters a shell binds after the command string.  Extraction itself is the
+    shared extractor's in both directions -- the resolved-program branch re-runs
+    it with the resolved name substituted, so one extractor remains and the two
+    passes cannot drift (#8197 folded the glued ``-c'…'`` spelling, previously a
+    local scan here, into the shared extractor).  Extracting text that turns out
+    not to be a command costs nothing here -- it re-tokenizes to stages that
+    match no traversal rule. The result is de-duplicated because the extractors
+    agree on most spellings, and re-staging one payload twice doubles the walk
+    below it for no new reading.
     """
     payloads: list[str] = list(_nested_shell_payloads(tokens))
+    substituted: list[str] = []
+    resolved_a_shell = False
     for index, token in enumerate(tokens):
         # Resolved, not literal: `S=sh; "$S" -c '…'` carries a payload and the
         # literal `$S` named no shell.
         program = _alt_resolved_program_word(token, assignments or {})
         if program in _NESTED_SHELL_PROGRAMS:
-            payloads.extend(_alt_shell_c_payloads(tokens[index + 1 :]))
+            payloads.extend(_alt_bound_shell_payloads(tokens[index + 1 :]))
+            # Substitute the resolved name IN PLACE when the shared extractor
+            # could not have seen this token as a shell itself (an assignment, a
+            # case difference, or a Windows ``.exe`` suffix resolved it), and
+            # re-run the extractor ONCE on the substituted list below.  Re-running
+            # it per resolved token multiplied its full cost by the number of
+            # such tokens; one substituted call reads every carrier past the
+            # first shell, which is what the per-token calls were deriving.
+            if _program_basename(token) not in _NESTED_SHELL_PROGRAMS:
+                resolved_a_shell = True
+                substituted.append(program)
+                continue
         elif program in _ENV_SPLIT_PROGRAMS:
             payloads.extend(_alt_env_s_payloads(tokens[index + 1 :]))
         elif program in _NESTED_SHELL_VERBS:
@@ -18597,6 +19298,9 @@ def _alt_command_string_payloads(
             operands = [word for word in tokens[index + 1 :] if not word.startswith("-")]
             if operands:
                 payloads.append(" ".join(operands))
+        substituted.append(token)
+    if resolved_a_shell:
+        payloads.extend(_nested_shell_payloads(substituted))
     deduped: list[str] = []
     for payload in payloads:
         if payload not in deduped:
@@ -18604,35 +19308,34 @@ def _alt_command_string_payloads(
     return deduped
 
 
-def _alt_shell_c_payloads(argv: list[str]) -> list[str]:
-    """The command strings a shell's ``-c`` carries, in every spelling of it.
+def _alt_bound_shell_payloads(argv: list[str]) -> list[str]:
+    """The ``-c`` command strings in *argv* with POSITIONAL parameters bound.
 
-    ``-c`` takes a value, so it ends a short-option cluster: the command is either
-    glued onto the cluster (``-c'cmd'``) or the next word (``-c 'cmd'``,
-    ``-lc 'cmd'``).
+    EXTRACTION lives in :func:`_nested_shell_payloads` (one extractor -- #8197);
+    this adds only the reading that pass needs on top of it: the words after a
+    shell's command string are what the shell binds as ``$0``/``$1``…, so a
+    payload referencing a positional gets a second, bound reading
+    (``sh -c 'rg . "$1"' _ <root>`` names its root only in that reading).
+    Locating the command string reuses the shared extractor's own loose carrier
+    recognition (:func:`_shell_c_carrier_glued`), so what is bound here and what
+    is extracted there cannot drift apart.
     """
     payloads: list[str] = []
     for index, token in enumerate(argv):
-        if token.startswith("--"):
+        glued = _shell_c_carrier_glued(token)
+        if glued is None:
             continue
-        if not token.startswith("-") or len(token) < 2:
-            continue
-        cluster = token[1:]
-        position = cluster.find("c")
-        if position == -1:
-            continue
-        glued = cluster[position + 1 :]
         if glued:
-            payloads.append(glued)
-            bound = _alt_positional_bound_payload(glued, argv[index + 1 :])
-            if bound:
-                payloads.append(bound)
+            # Every plausible split gets its own bound reading -- see
+            # _shell_c_carrier_payloads for why the case fold makes the split
+            # position ambiguous.
+            for candidate in _shell_c_carrier_payloads(token):
+                bound = _alt_positional_bound_payload(candidate, argv[index + 1 :])
+                if bound:
+                    payloads.append(bound)
         elif index + 1 < len(argv):
-            payloads.append(argv[index + 1])
             # The words AFTER the command string are its positional parameters.
-            bound = _alt_positional_bound_payload(
-                argv[index + 1], argv[index + 2 :]
-            )
+            bound = _alt_positional_bound_payload(argv[index + 1], argv[index + 2 :])
             if bound:
                 payloads.append(bound)
     return payloads

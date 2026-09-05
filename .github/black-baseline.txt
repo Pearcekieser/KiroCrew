@@ -187,9 +187,7 @@ src/kiro_crew/connections/registry.py
 src/kiro_crew/connections/tool_aliases.py
 src/kiro_crew/context_management.py
 src/kiro_crew/crew_chat.py
-src/kiro_crew/cron.py
 src/kiro_crew/cron_history.py
-src/kiro_crew/cron_script.py
 src/kiro_crew/dashboard/cautious_boot.py
 src/kiro_crew/dashboard/channel_folders.py
 src/kiro_crew/dashboard/chat_auto_tag.py
@@ -202,7 +200,6 @@ src/kiro_crew/dashboard/crash_dump_store.py
 src/kiro_crew/dashboard/file_index.py
 src/kiro_crew/dashboard/handlers/artifacts.py
 src/kiro_crew/dashboard/handlers/ask_question.py
-src/kiro_crew/dashboard/handlers/cron.py
 src/kiro_crew/dashboard/handlers/discover.py
 src/kiro_crew/dashboard/handlers/files.py
 src/kiro_crew/dashboard/handlers/hooks.py
@@ -290,7 +287,6 @@ src/kiro_crew/mcp_apps_render.py
 src/kiro_crew/mcp_caller.py
 src/kiro_crew/mcp_cleanup.py
 src/kiro_crew/mcp_core.py
-src/kiro_crew/mcp_cron.py
 src/kiro_crew/mcp_discovery.py
 src/kiro_crew/mcp_gateway/abort.py
 src/kiro_crew/mcp_gateway/app_call.py
@@ -475,7 +471,6 @@ test/test_bench_round18.py
 test/test_bench_round5.py
 test/test_bench_round6.py
 test/test_bench_round9.py
-test/test_bench_safepath.py
 test/test_bench_scorers.py
 test/test_bench_windows_symlink.py
 test/test_bootstrap.py
@@ -923,7 +918,6 @@ test/test_perf_sampler.py
 test/test_persist_off_loop.py
 test/test_persistence_probe.py
 test/test_personal_shopper_no_purchase_capability.py
-test/test_pid_lifecycle.py
 test/test_platform_admission.py
 test/test_platform_compat_coverage.py
 test/test_playwright_e2e.py

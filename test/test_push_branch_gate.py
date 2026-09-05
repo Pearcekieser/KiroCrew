@@ -673,3 +673,752 @@ def test_an_all_branches_push_does_not_also_carry_the_single_arg_tag():
     # And the bare/single-arg shapes still tag when no all-branches flag is present.
     assert "git-publish-push-single-arg" in security._git_publish_floor_tags("git push origin")
     assert "git-publish-push-bare" in security._git_publish_floor_tags("git push")
+
+
+class TestValueTakingOptionArity:
+    """Push options with a REQUIRED, separable value must have that value
+    consumed, not leaked into the positional list. (#7796 — the fourth finding
+    in this parser span.)
+
+    Measured on the unfixed parser: appending ``--push-option ci.skip`` (or
+    ``-o``, ``--receive-pack``, ``--exec``) to the bare ``--repo=origin``
+    publish flipped the floor from {bare} to EMPTY — an ALLOW, because the
+    leaked value was read as the only refspec and ``ci.skip`` is not a
+    protected name. The tag set IS the protected-branch decision, so one extra
+    flag switched the floor off.
+    """
+
+    SEPARATED = (
+        ("-o", "ci.skip"),
+        ("--push-option", "ci.skip"),
+        ("--receive-pack", "/usr/bin/git-receive-pack"),
+        ("--exec", "/usr/bin/git-receive-pack"),
+    )
+
+    def test_a_separated_value_does_not_erase_the_floor_tag(self):
+        base = security._git_publish_floor_tags("git push --repo=origin")
+        assert base == frozenset({"git-publish-push-bare"})
+        for opt, val in self.SEPARATED:
+            cmd = f"git push --repo=origin {opt} {val}"
+            assert security._git_publish_floor_tags(cmd) == base, (
+                f"{cmd!r}: appending one option changed the floor answer — the "
+                "separated value leaked into the positional list and erased the tag"
+            )
+
+    def test_a_separated_value_is_not_read_in_place_of_a_real_target(self):
+        for opt, val in self.SEPARATED:
+            cmd = f"git push {opt} {val} origin main"
+            tags = security._git_publish_floor_tags(cmd)
+            assert "git-publish-push-protected-branch-name" in tags, (
+                f"{cmd!r}: the real protected target lost its tag to the leaked "
+                f"option value: {set(tags)}"
+            )
+
+    def test_a_consumed_value_keeps_a_feature_branch_push_allowed(self):
+        # Kills the ARITY-TABLE mutant separately from the fallback mutant:
+        # drop a family from the table and these commands fall to the
+        # protective fallback and DENY, so this test is what proves the table
+        # (precision) is load-bearing, not just the fallback (protection).
+        for opt, val in self.SEPARATED:
+            cmd = f"git push {opt} {val} origin feature-x"
+            assert not security._git_publish_floor_tags(cmd), (
+                f"{cmd!r}: a legitimate feature-branch push with a known "
+                "value-taking option must stay allowed"
+            )
+
+    def test_the_attached_form_keeps_parsing_as_before(self):
+        # ``=`` binds the value inside the token, so it can never disturb the
+        # positional split; these already parsed correctly and must not regress.
+        for cmd in (
+            "git push --repo=origin --push-option=ci.skip",
+            "git push --repo=origin -oci.skip",
+        ):
+            assert security._git_publish_floor_tags(cmd) == frozenset(
+                {"git-publish-push-bare"}
+            ), f"{cmd!r}: the attached form regressed"
+
+    def test_value_option_abbreviations_consume_like_git(self):
+        # Git resolves an unambiguous long-option prefix, so ``--push-opt`` is
+        # ``--push-option`` — its separated value must be consumed too (the
+        # same resolution rule finding 2 established for the danger flags).
+        cmd = "git push --repo=origin --push-opt ci.skip"
+        assert security._git_publish_floor_tags(cmd) == frozenset({"git-publish-push-bare"})
+
+    def test_a_short_bundle_ending_in_o_consumes_like_git(self):
+        # ``-fo ci.skip`` is ``-f -o ci.skip``: the first value-taking short in
+        # a bundle takes the rest of the token or, when the rest is empty, the
+        # NEXT token.
+        cmd = "git push --repo=origin -fo ci.skip"
+        assert security._git_publish_floor_tags(cmd) == frozenset({"git-publish-push-bare"})
+
+
+class TestUnrecognisedOptionsReadProtectively:
+    """The invariant that closes the class (#7796 shape C): an option the scan
+    does not model might take a separated value, so the positional split cannot
+    be trusted — read the segment protectively instead. A mis-parse can then
+    only ever OVER-protect; a future value-taking push option cannot silently
+    reopen the erasure.
+    """
+
+    def test_an_unknown_separated_long_option_cannot_erase_the_floor(self):
+        cmd = "git push --frobnicate ci.skip origin feature-x"
+        tags = security._git_publish_floor_tags(cmd)
+        assert "git-publish-push-bare" in tags, (
+            f"{cmd!r}: an unrecognised option left the positional split trusted "
+            f"— the erasure class is open again: {set(tags)}"
+        )
+
+    def test_an_unknown_short_flag_reads_protectively(self):
+        tags = security._git_publish_floor_tags("git push -z origin feature-x")
+        assert "git-publish-push-bare" in tags
+
+    def test_a_quoted_value_containing_whitespace_reads_protectively(self):
+        # GPT 5.6 review findings on #7808 (rounds 1-2), verified real: the
+        # tokenizer is whitespace-split, so a quoted (or escape-continued)
+        # value spanning whitespace reaches the scan as FRAGMENTS — consuming
+        # one token left the tail fragment trusted as a refspec, and the
+        # erasure was back. Round 2: an ESCAPED quote is data, not a
+        # delimiter, so counting quote characters was bypassed by \" — the
+        # fragment test now tracks the shell's own quote/escape state and
+        # flags any token whose state does not return to normal.
+        for cmd in (
+            "git push --repo=origin --push-option='ci skip'",
+            'git push --repo=origin --push-option="ci skip"',
+            "git push --repo=origin --push-option 'ci skip'",
+            "git push --repo=origin -o 'ci skip'",
+            "git push --repo=origin --push-option=ci\\ skip",
+            'git push --repo=origin --push-option="ci\\" skip\\""',
+            "git push --repo=origin --push-option='ci'\\'' skip'",
+            "git push --repo=origin --push-option=$'ci\\' skip'",
+            # ANSI-C-only signal: under a plain-single reading BOTH fragments
+            # scan clean (the tail's quotes pair up), so this row is what
+            # proves the $'...' escape branch is load-bearing.
+            "git push --repo=origin --push-option=$'a\\' bc'\\''d'",
+        ):
+            tags = security._git_publish_floor_tags(cmd)
+            assert "git-publish-push-bare" in tags, (
+                f"{cmd!r}: a whitespace-fused option value erased the floor "
+                f"tag again: {set(tags)}"
+            )
+
+    def test_a_protected_name_beside_a_fragmented_value_keeps_its_tag(self):
+        tags = security._git_publish_floor_tags("git push --push-option='ci skip' origin main")
+        assert "git-publish-push-protected-branch-name" in tags
+
+    def test_balanced_quoting_still_parses_precisely(self):
+        # The fragment signal is the quote/escape state not returning to
+        # normal; complete words — including ones with ESCAPED quotes — keep
+        # their existing precise reading, both directions: no over-deny of a
+        # feature push, and no loss of the precise tag identity.
+        assert not security._git_publish_floor_tags("git push origin 'feature-x'")
+        assert "git-publish-push-protected-branch-name" in security._git_publish_floor_tags(
+            "git push origin 'main'"
+        )
+        assert security._git_publish_floor_tags(
+            'git push --repo=origin "--push-option=ci.skip"'
+        ) == frozenset({"git-publish-push-bare"})
+        # An escaped quote inside a COMPLETE word is data, not a fragment.
+        assert not security._git_publish_floor_tags('git push origin "feat\\"x"')
+        # The quote-splice spelling of a protected name reads EXACTLY as the
+        # protected-branch row: dequote evasion-resistance intact, and no
+        # spurious bare tag riding along from a fragment false-positive.
+        assert security._git_publish_floor_tags("git push origin 'ma'\\''in'") == frozenset(
+            {"git-publish-push-protected-branch-name"}
+        )
+
+    def test_the_protective_reading_still_names_a_protected_target_precisely(self):
+        # Not trusting the split widens the refspec scan to EVERY positional,
+        # so a protected name still reports its own catalog row — an operator
+        # who disabled the bare rule is still covered by the protected one.
+        tags = security._git_publish_floor_tags("git push --frobnicate ci.skip origin main")
+        assert (
+            "git-publish-push-protected-branch-name" in tags
+        ), f"the protective reading dropped the precise protected tag: {set(tags)}"
+
+    def test_known_no_value_flags_do_not_trip_the_fallback(self):
+        # The guard against over-denial: every boolean / attached-optional-value
+        # push option is modelled, so ordinary feature-branch pushes keep
+        # working. (``--signed`` / ``--force-with-lease`` take a value in
+        # ATTACHED form only — git never consumes a separate token for them.)
+        for cmd in (
+            "git push --force origin feature-x",
+            "git push --force-with-lease origin feature-x",
+            "git push --signed origin feature-x",
+            "git push --no-verify origin feature-x",
+            "git push -f origin feature-x",
+            "git push -fq origin feature-x",
+            "git push --atomic --dry-run origin feature-x",
+        ):
+            assert not security._git_publish_floor_tags(cmd), (
+                f"{cmd!r}: a known no-value flag was read as unrecognised and "
+                "over-denied a legitimate feature-branch push"
+            )
+
+    def test_recurse_submodules_is_deliberately_not_vouched_for(self):
+        # Its arity is not modelled (optional-value in current git, and the
+        # separated spelling is exactly the leak shape if that ever changes),
+        # so the separated form reads protectively while the attached form —
+        # which cannot leak — parses as before.
+        assert "git-publish-push-bare" in security._git_publish_floor_tags(
+            "git push --recurse-submodules check origin feature-x"
+        )
+        assert not security._git_publish_floor_tags(
+            "git push --recurse-submodules=check origin feature-x"
+        )
+
+    def test_an_all_branches_flag_keeps_its_single_tag_under_the_fallback(self):
+        # The fallback does not stack the bare tag on top of mirror-all: the
+        # all-branches flag names the target set exhaustively (finding 3's
+        # suppression), and mirror-all already covers a superset of bare.
+        tags = security._git_publish_floor_tags("git push --all --frobnicate v")
+        assert tags == frozenset({"git-publish-push-mirror-all"})
+
+    def test_an_expandable_value_lands_on_the_ungated_branch(self):
+        # GPT 5.6 round 3, verified real: a token the split consumes or drops
+        # is not inert text — `V='ci.skip main'; git push --repo=origin
+        # --push-option $V` expands and word-splits AFTER this scan, handing
+        # git `main` as a refspec the split never saw. Consuming the literal
+        # `$V` had REGRESSED this from main's accidental posture (the leaked
+        # value hit the refspec ambiguity check -> the ungated sentinel) to
+        # the disableable bare rule. Any unquoted expansion syntax anywhere in
+        # the segment now lands on the ungated branch, the same posture as
+        # `ma$in`: no single catalog row can be disabled to admit it.
+        for cmd in (
+            "git push --repo=origin --push-option $v",
+            "git push --repo=origin -o $v",
+            "git push --repo=origin --push-option=$v",
+            "git push --repo=origin --receive-pack $hook",
+            "git push --repo=$r",
+            "git push $remote feature-x",
+        ):
+            tags = security._git_publish_floor_tags(cmd)
+            assert security._GIT_PUBLISH_UNGATED in tags, (
+                f"{cmd!r}: an expandable token classified as only "
+                f"disableable rules: {set(tags)}"
+            )
+
+    def test_a_glob_value_or_remote_is_the_wildcard_shape(self):
+        # Pathname expansion also produces words: `--push-option ma*` with a
+        # matching file hands git extra positional words. Main's accidental
+        # value-scan already tagged these wildcard-refspec; the consumed value
+        # must keep that identity rather than degrading to bare.
+        for cmd in (
+            "git push --repo=origin --push-option ma*",
+            "git push --repo=origin --push-option=ma*",
+            "git push ma* feature-x",
+        ):
+            tags = security._git_publish_floor_tags(cmd)
+            assert "git-publish-push-wildcard-refspec" in tags, (
+                f"{cmd!r}: a glob-capable dropped token lost the wildcard " f"tag: {set(tags)}"
+            )
+
+    def test_glob_characters_beyond_star_in_a_refspec_are_wildcards(self):
+        # `ma[i]n` expands against CWD files BEFORE git runs — a file named
+        # `main` makes it push main. `?` and `[` are never legit in refnames
+        # (git refuses them), so over-protecting costs no real command.
+        for cmd in ("git push origin ma[i]n", "git push origin ma?n"):
+            assert "git-publish-push-wildcard-refspec" in security._git_publish_floor_tags(
+                cmd
+            ), f"{cmd!r} was not read as a wildcard shape"
+
+    def test_extglob_patterns_are_wildcards_too(self):
+        # GPT 5.6 round 9, verified real: with `shopt -s extglob` (or
+        # BASHOPTS=extglob), `@(main)` / `+(main)` / `!(x)` are pathname
+        # patterns — beside a file named `main`, `git push origin @(main)`
+        # expands to a push of MAIN, and the scan gave it NO tags. Extglob is
+        # pathname expansion, so it takes the same catalog identity as
+        # `*`/`?`/`[` (the wildcard row), not the substitution sentinel:
+        # like a glob, it can only ever match existing FILE names. `?(` and
+        # `*(` were already covered by their leading glob character.
+        for cmd in (
+            "git push origin @(main)",
+            "git push origin +(main)",
+            "git push origin !(x)",
+            "git push --repo=origin --push-option @(x)",
+        ):
+            assert "git-publish-push-wildcard-refspec" in security._git_publish_floor_tags(
+                cmd
+            ), f"{cmd!r} was not read as a wildcard shape"
+        # No operator adjacency, no extglob: an ordinary parenthesised
+        # refname spelling stays data.
+        assert not security._git_publish_floor_tags("git push origin 'feat(x)'")
+
+    def test_plain_values_and_remotes_keep_their_precise_reading(self):
+        # No expansion syntax, no glob: the new checks add nothing.
+        assert security._git_publish_floor_tags(
+            "git push --repo=origin --push-option ci.skip"
+        ) == frozenset({"git-publish-push-bare"})
+        assert not security._git_publish_floor_tags("git push origin feature-x")
+        assert not security._git_publish_floor_tags(
+            "git push --push-option ci.skip origin feature-x"
+        )
+
+    def test_a_heredoc_strip_operator_consumes_its_delimiter(self):
+        # GPT 5.6 round 7, verified real: `<<-` is a complete operator (the
+        # tab-stripping heredoc); its `-` landed in the regex REMAINDER, so
+        # the token read as self-contained and the separated delimiter word
+        # became a phantom refspec — erasing the tag exactly like round 4's
+        # `</dev/null`. The `-` is part of the operator only for `<<`.
+        assert security._git_publish_floor_tags("git push origin <<- EOF") == frozenset(
+            {"git-publish-push-single-arg"}
+        )
+        assert security._git_publish_floor_tags("git push --repo=origin <<- EOF") == frozenset(
+            {"git-publish-push-bare"}
+        )
+        # fd-close / fd-move spellings keep their self-contained reading:
+        # their trailing '-' is an fd disposition, not a separated target.
+        assert "git-publish-push-protected-branch-name" in security._git_publish_floor_tags(
+            "git push origin >&- main"
+        )
+        assert "git-publish-push-protected-branch-name" in security._git_publish_floor_tags(
+            "git push origin main 2>&1-"
+        )
+
+    def test_process_substitution_lands_on_the_ungated_branch(self):
+        # GPT 5.6 round 8, verified real: `<(cmd)` / `>(cmd)` are WORDS (the
+        # shell substitutes a /dev/fd path), not removable redirections —
+        # dropping `-o <(echo)` as a redirection shifted the option's value
+        # consumption onto `origin` and downgraded a push of MAIN to the
+        # disableable single-arg row. Process substitution is substitution:
+        # it joins `$(`/`${`/backticks on the upstream ungated branch.
+        for cmd in (
+            "git push -o <(echo) origin main",
+            "git push --push-option >(cat) origin main",
+            "git push origin <(echo x)",
+        ):
+            tags = security._git_publish_floor_tags(cmd)
+            assert security._GIT_PUBLISH_UNGATED in tags, (
+                f"{cmd!r}: process substitution classified as only "
+                f"disableable rules: {set(tags)}"
+            )
+        # A parenthesis without the operator adjacency is an ordinary
+        # refname character and stays data.
+        assert not security._git_publish_floor_tags("git push origin 'feat(x)'")
+
+    def test_a_named_fd_redirection_is_not_a_word(self):
+        # GPT 5.6 round 11, verified real — a regression the round-10
+        # decomposition introduced: bash's named descriptor `{fd}>...` is
+        # ALL redirection, but `{fd}` read as the pre-operator word and
+        # became the sole "refspec", erasing every tag while the shell ran a
+        # remote-only push with all rules enabled.
+        assert security._git_publish_floor_tags("git push origin {fd}>/dev/null") == frozenset(
+            {"git-publish-push-single-arg"}
+        )
+        assert security._git_publish_floor_tags("git push --repo=origin {fd}>err") == frozenset(
+            {"git-publish-push-bare"}
+        )
+        # Quoted, it is an ordinary (weird) refname and stays data.
+        assert not security._git_publish_floor_tags("git push origin '{fd}'")
+
+    def test_a_quoted_redirection_target_keeps_redirection_arity(self):
+        # Round 11's second leg: quotes can only ever appear in the TARGET
+        # group of a redirection token (the operator grammar admits none), so
+        # refusing the whole token for containing a quote pushed `>'log'`
+        # into the fallback and mislabelled a remote-only push as bare.
+        assert security._git_publish_floor_tags("git push origin >'log'") == frozenset(
+            {"git-publish-push-single-arg"}
+        )
+        assert security._git_publish_floor_tags("git push origin main 2>'err'") == frozenset(
+            {"git-publish-push-protected-branch-name"}
+        )
+
+    def test_shell_redirections_are_not_refspecs(self):
+        # GPT 5.6 round 4, verified real (and pre-existing on main): the
+        # shell consumes a redirection BEFORE git runs, so `git push origin
+        # </dev/null` executes a remote-only push while the scan read
+        # `</dev/null` as the refspec — a phantom positional filled the
+        # refspec slot and the single-arg tag was erased. Redirections are
+        # modelled with the shell's own arity: an attached target is
+        # self-contained, a bare operator consumes the next word.
+        assert security._git_publish_floor_tags("git push origin </dev/null") == frozenset(
+            {"git-publish-push-single-arg"}
+        )
+        assert security._git_publish_floor_tags("git push origin > log") == frozenset(
+            {"git-publish-push-single-arg"}
+        )
+        assert security._git_publish_floor_tags("git push --repo=origin 2>err") == frozenset(
+            {"git-publish-push-bare"}
+        )
+
+    def test_redirected_pushes_keep_their_precise_reading(self):
+        # The modelling is precise, not a blanket fallback: the everyday
+        # scripted spelling `... 2>&1` stays an allowed feature push, and a
+        # redirected protected push keeps its precise tag.
+        assert not security._git_publish_floor_tags("git push origin feature-x 2>&1")
+        assert "git-publish-push-protected-branch-name" in security._git_publish_floor_tags(
+            "git push origin main 2>&1"
+        )
+
+    def test_a_glued_operator_cannot_hide_a_protected_name(self):
+        # `main>log` is the word `main` plus the redirection `>log` to the
+        # shell — it pushes MAIN. The glued word is decomposed precisely:
+        # the pre-operator word is a positional, the redirection is consumed.
+        tags = security._git_publish_floor_tags("git push origin main>log")
+        assert "git-publish-push-protected-branch-name" in tags
+
+    def test_a_glued_redirection_keeps_the_precise_positional_identity(self):
+        # GPT 5.6 round 10, verified real: `origin>/dev/null` is the word
+        # `origin` plus a redirection — a remote-only push, whose true row is
+        # SINGLE-ARG. The protective fallback emitted BARE instead, so an
+        # operator who disabled only the bare rule had this shape allowed
+        # while its real row was still enabled. The pre-operator word is now
+        # kept as a positional and the redirection consumed, exactly as bash
+        # reads it — no fallback, no identity drift, and glued legit pushes
+        # stay allowed.
+        assert security._git_publish_floor_tags("git push origin>/dev/null") == frozenset(
+            {"git-publish-push-single-arg"}
+        )
+        assert security._git_publish_floor_tags("git push origin main>log") == frozenset(
+            {"git-publish-push-protected-branch-name"}
+        )
+        assert not security._git_publish_floor_tags("git push origin feature-x>log")
+        assert not security._git_publish_floor_tags("git push --repo=origin ci.skip>log")
+        # A glued separated-target form consumes the NEXT word as the target.
+        assert security._git_publish_floor_tags("git push origin> log") == frozenset(
+            {"git-publish-push-single-arg"}
+        )
+        # Glued fd-close and all-output forms are redirections too (GPT 5.6
+        # round 12): `origin>&-` closes stdout and `origin&>/dev/null`
+        # redirects everything — both remote-only pushes, single-arg rows.
+        assert security._git_publish_floor_tags("git push origin>&-") == frozenset(
+            {"git-publish-push-single-arg"}
+        )
+        assert security._git_publish_floor_tags("git push origin&>/dev/null") == frozenset(
+            {"git-publish-push-single-arg"}
+        )
+        assert not security._git_publish_floor_tags("git push --repo=origin ci>&2")
+        # A glued & is NOT a redirection (it is a command boundary) and keeps
+        # the protective fallback.
+        assert "git-publish-push-bare" in security._git_publish_floor_tags(
+            "git push origin& echo x"
+        )
+
+    def test_a_glued_value_still_feeds_a_pending_option(self):
+        # GPT 5.6 round 13, verified real: with a separated `--repo` pending
+        # its value, a GLUED word+redirection token fed its word into the
+        # positional list instead of the option — `--repo origin>/dev/null
+        # main` then consumed `main` as the "value" and returned NO tags
+        # while the shell hands git a protected push. The glued word now
+        # feeds the pending option value exactly as the shell's argv does.
+        assert security._git_publish_floor_tags(
+            "git push --repo origin>/dev/null main"
+        ) == frozenset({"git-publish-push-protected-branch-name"})
+        assert security._git_publish_floor_tags("git push --repo origin>/dev/null") == frozenset(
+            {"git-publish-push-bare"}
+        )
+
+    def test_a_glued_all_branches_flag_keeps_its_identity(self):
+        # GPT 5.6 round 16, verified real: `--all>/dev/null` is the
+        # all-branches flag plus a redirection, but the flag-shaped prefix
+        # bailed to the fallback, emitting only the disableable no-refspec
+        # rows — disabling those admitted an all-branches push while
+        # mirror-all stayed enabled. The prefix is now classified against
+        # the all-branches set (abbreviations included) before the fallback,
+        # and the finding-3 suppression then yields exactly the true row.
+        assert security._git_publish_floor_tags("git push --all>/dev/null") == frozenset(
+            {"git-publish-push-mirror-all"}
+        )
+        assert security._git_publish_floor_tags("git push --mirr>log") == frozenset(
+            {"git-publish-push-mirror-all"}
+        )
+        # Other glued flag prefixes keep the protective fallback (over-deny
+        # only — a redirected force push is denied, never admitted).
+        tags = security._git_publish_floor_tags("git push --force>/dev/null origin feature-x")
+        assert "git-publish-push-bare" in tags
+
+    def test_a_lone_dash_is_a_positional_not_an_option(self):
+        # Round 13's second leg: git's own option parsing treats a lone `-`
+        # as an OPERAND (a repository spelled `./-` is addressable), but the
+        # scan skipped it as a flag, shifting `main` into the remote slot and
+        # downgrading the row to single-arg.
+        assert security._git_publish_floor_tags("git push - main") == frozenset(
+            {"git-publish-push-protected-branch-name"}
+        )
+        assert not security._git_publish_floor_tags("git push - feature-x")
+
+    def test_spaced_subshell_parens_read_protectively(self):
+        # GPT 5.6 round 14, verified real: in `( ... )` with spaces, the `)`
+        # token read as a refspec and erased every tag for an otherwise-bare
+        # publish inside a subshell. Unquoted parens are shell operators;
+        # they now poison the split like the other operator glue. (The
+        # glued spelling without spaces never tokenizes a clean `git` word
+        # and was already ungated upstream.)
+        tags = security._git_publish_floor_tags("( git push --repo=origin )")
+        assert "git-publish-push-bare" in tags
+        assert "git-publish-push-protected-branch-name" in security._git_publish_floor_tags(
+            "( git push origin main )"
+        )
+
+    def test_the_untrusted_fallback_names_both_no_refspec_rows(self):
+        # Rounds 10, 13 and 14 each turned the fallback's single identity
+        # into a bypass by disabling whichever row it happened to emit. An
+        # untrusted split with visible positionals cannot distinguish the
+        # bare shape from the remote-only shape, so BOTH rows fire; with no
+        # positionals the remote-only shape is impossible and bare stands
+        # alone; an all-branches flag suppresses both.
+        tags = security._git_publish_floor_tags("git push --recurse-submodules check origin")
+        assert {"git-publish-push-bare", "git-publish-push-single-arg"} <= tags
+        assert security._git_publish_floor_tags("git push --frobnicate") == frozenset(
+            {"git-publish-push-bare"}
+        )
+        assert security._git_publish_floor_tags("git push --all --frobnicate v") == frozenset(
+            {"git-publish-push-mirror-all"}
+        )
+
+    def test_a_comment_truncates_the_argv_like_the_shell_does(self):
+        # `#` at the start of a word comments out the rest of the segment,
+        # so `git push origin #main` runs a remote-only push: the precise
+        # single-arg tag, not an erased one and not a fallback.
+        assert security._git_publish_floor_tags("git push origin #main") == frozenset(
+            {"git-publish-push-single-arg"}
+        )
+        assert "git-publish-push-protected-branch-name" in security._git_publish_floor_tags(
+            "git push origin main #x"
+        )
+        assert not security._git_publish_floor_tags("git push origin feature-x #main")
+
+    def test_a_fused_hash_is_not_a_comment_and_cannot_discard_a_refspec(
+        self,
+    ):  # GPT 5.6 round 5, verified real: `#` opens a comment only at the
+        # START of a word. When an earlier token leaves the shell state open
+        # (a trailing escape or an unterminated quote fuses across the
+        # split), a `#`-leading token may be MID-WORD — truncating there
+        # discarded the real trailing `main`, leaving only the disableable
+        # bare tag. Truncation now requires every preceding token to have
+        # closed cleanly; otherwise the open state poisons the split and the
+        # superset scan keeps the trailing protected name visible.
+        for cmd in (
+            "git push --repo=origin --push-option=ci\\ #x main",
+            "git push origin 'a #b' main",
+        ):
+            tags = security._git_publish_floor_tags(cmd)
+            assert "git-publish-push-protected-branch-name" in tags, (
+                f"{cmd!r}: a word-fused '#' truncated the scan and dropped "
+                f"the protected refspec: {set(tags)}"
+            )
+
+    def test_a_background_operator_reads_protectively(self):
+        # A single `&` is NOT a segment separator upstream (only `&&` is), so
+        # the second command rides inside this segment's token list. The
+        # split is untrusted, and the superset scan keeps a protected name in
+        # the trailing command visible.
+        tags = security._git_publish_floor_tags("git push origin & git push origin2 main")
+        assert "git-publish-push-protected-branch-name" in tags
+        assert "git-publish-push-bare" in tags
+
+    def test_quoted_operator_characters_stay_data(self):
+        # A quoted operator is an ordinary character the shell passes
+        # through (git allows < > & in refnames), so the precise reading
+        # holds and nothing over-denies.
+        assert not security._git_publish_floor_tags("git push origin 'feat<x'")
+
+    def test_a_line_continuation_lands_on_the_ungated_branch(self):
+        # GPT 5.6 round 6, verified real: backslash-newline VANISHES in bash,
+        # so `origin ma\` + newline + `in` splices to a push of MAIN — while
+        # the newline is a segment boundary here, so no token in this segment
+        # spells the name and the scan emitted only the DISABLEABLE bare tag.
+        # A segment whose cumulative quote/escape state is open at its end is
+        # therefore unreconstructable — the ungated posture, like ma$in.
+        for cmd in (
+            "git push origin ma\\\nin",
+            'git push origin "ma\\\nin"',
+        ):
+            tags = security._git_publish_floor_tags(cmd)
+            assert security._GIT_PUBLISH_UNGATED in tags, (
+                f"{cmd!r}: a spliced-across-segments word classified as only "
+                f"disableable rules: {set(tags)}"
+            )
+
+    def test_a_mid_segment_fused_value_stays_on_the_disableable_fallback(self):
+        # Deliberately narrower than ungating any open token: a quoted value
+        # whose quote CLOSES before segment end cannot splice into the next
+        # line, in-segment joining can only fuse whitespace into the word
+        # (never a valid refname), and the pieces stay visible to the
+        # superset scan — so the operator-facing bare row keeps covering it.
+        for cmd in (
+            "git push --repo=origin --push-option='ci skip'",
+            "git push --repo=origin --push-option='ci skip' origin feature-x",
+        ):
+            tags = security._git_publish_floor_tags(cmd)
+            assert security._GIT_PUBLISH_UNGATED not in tags, (
+                f"{cmd!r}: a closed in-segment fusion escalated to the "
+                f"ungated sentinel: {set(tags)}"
+            )
+            assert "git-publish-push-bare" in tags
+
+    def test_every_bash_metacharacter_is_accounted_for(self):
+        """The shell-syntax inventory, as a checked property (Design review).
+
+        The option-arity axis fails protective by CONSTRUCTION (unrecognised
+        option -> fallback); the shell-syntax axis cannot — a construct the
+        scan does not know about parses as an ordinary word — so its safety
+        rests on this inventory being COMPLETE over bash's metacharacters.
+        Every row names the layer that accounts for the character. Adding a
+        bash construct? It must land in one of these layers, and a row here.
+        """
+        floor = security._git_publish_floor_tags
+        UNGATED = security._GIT_PUBLISH_UNGATED
+        # Segment separators — split upstream (_CMD_SEPARATOR_RE), each side
+        # scanned on its own, so the push half keeps its precise tag.
+        assert floor("git push origin | cat") == {"git-publish-push-single-arg"}
+        assert floor("git push origin; echo x") == {"git-publish-push-single-arg"}
+        assert floor("git push origin && echo x") == {"git-publish-push-single-arg"}
+        # Substitution / expansion glue — ungated upstream
+        # (_AMBIGUOUS_EXPANSION_RE): $(, ${, backtick, brace-with-comma/range.
+        assert floor("git push origin `x`") == {UNGATED}
+        assert floor("git push origin $(echo main)") == {UNGATED}
+        assert floor("git push origin ma{i,x}n") == {UNGATED}
+        # Parameter expansion in any slot — the $ pre-check (ungated). A
+        # LEADING tilde is the same layer: it is env-driven text, not path
+        # syntax (bare `~` IS $HOME; `HOME=refs/heads` turns `~/main` into a
+        # protected refspec), so it cannot be vouched benign. Round 15
+        # corrected this inventory: tilde originally sat in the benign group
+        # with a "expands to a path" rationale, and the rationale was the bug.
+        assert UNGATED in floor("git push $remote feature-x")
+        assert UNGATED in floor("git push origin ~")
+        assert UNGATED in floor("git push origin ~main")
+        assert UNGATED in floor("git push ~/repo.git feature-x")
+        # Pathname expansion in any slot — the glob pre-check (wildcard row).
+        assert "git-publish-push-wildcard-refspec" in floor("git push origin ma?n")
+        # Redirections — consumed with the shell's arity; comments truncate;
+        # a lone & or operator glue reads protectively (this class).
+        assert floor("git push origin </dev/null") == {"git-publish-push-single-arg"}
+        assert floor("git push origin #x") == {"git-publish-push-single-arg"}
+        assert "git-publish-push-bare" in floor("git push origin & echo x")
+        # Quoting and escapes — the shared walk: fragments poison the split.
+        assert "git-publish-push-bare" in floor("git push --repo=origin -o 'a b'")
+        # Subshell parens glue onto the verb token, so no clean ``git`` token
+        # survives and the unparseable fallback ungates the segment.
+        assert floor("(git push origin main)") == {UNGATED}
+        # Benign by bash semantics, deliberately NOT flagged: a comma-free
+        # brace passes through LITERALLY (a ref named ``{main}`` is not
+        # ``main``); ``!`` history expansion does not run in non-interactive
+        # shells; a mid-word ``~`` is literal in an argv word.
+        assert floor("git push origin {main}") == frozenset()
+        assert floor("git push origin !x") == frozenset()
+        assert floor("git push origin feat~x") == frozenset()
+
+    def test_end_of_options_marker_makes_everything_after_it_positional(self):
+        # A bare ``--`` ends option parsing in git; the scan must read what
+        # follows as positionals, not drop or consume it as flags.
+        assert "git-publish-push-protected-branch-name" in security._git_publish_floor_tags(
+            "git push -- origin main"
+        )
+        assert not security._git_publish_floor_tags("git push -- origin feature-x")
+
+    def test_end_of_options_stops_option_parsing_for_later_dash_tokens(self):
+        # After ``--``, a dash-prefixed token is a POSITIONAL in git's reading
+        # (the only way to push a ref whose name starts with a dash), so it
+        # must be read as a refspec candidate — not dropped as a flag (the old
+        # scan's single-arg misread) and not fed to the unrecognised-option
+        # fallback (which would over-deny a shape git accepts).
+        assert not security._git_publish_floor_tags("git push -- origin -x")
+
+
+class TestParserBranchTable:
+    """Every branch of the positional/arity parser, with why each is correct.
+
+    The issue makes this table an explicit acceptance condition: four
+    consecutive findings landed in this one span, each fix narrowing one branch
+    while the adjacent one stayed wrong, so the parser's whole behaviour is
+    pinned here as data rather than implied by scattered tests. The same table
+    appears in the PR body.
+    """
+
+    BARE = "git-publish-push-bare"
+    SINGLE = "git-publish-push-single-arg"
+    MIRROR = "git-publish-push-mirror-all"
+    NAME = "git-publish-push-protected-branch-name"
+    REF_PATH = "git-publish-push-protected-ref-path"
+    AMBIG = "git-publish-push-ambiguous-ref"
+    WILD = "git-publish-push-wildcard-refspec"
+
+    # (push args, exact expected tag set, why this is the correct reading)
+    TABLE = (
+        ("", {BARE}, "no target named — the current branch may be protected"),
+        ("origin", {SINGLE}, "remote only, no refspec — same current-branch risk, its own row"),
+        ("origin feature-x", set(), "explicit non-protected target — the allowed shape"),
+        ("origin main", {NAME}, "explicit protected target by bare name"),
+        ("origin refs/heads/main", {REF_PATH}, "protected target by ref path — separate row"),
+        ("origin head", {AMBIG}, "symbolic ref resolves at runtime — unverifiable"),
+        ("origin refs/heads/*:refs/heads/*", {WILD}, "wildcard expands to many refs"),
+        ("origin main feature-x", {NAME}, "ALL refspecs scanned, one protected suffices"),
+        ("--repo=origin", {BARE}, "remote in the flag, nothing names a branch — bare"),
+        ("--repo origin", {BARE}, "separated repo value consumed, still bare"),
+        ("--repo=origin main", {NAME}, "remote in flag, so the sole positional is a refspec"),
+        ("--all origin", {MIRROR}, "all-branches flag; single-arg deliberately suppressed"),
+        ("--mirror", {MIRROR}, "mirror pushes everything"),
+        ("--force origin feature-x", set(), "boolean flag — force to a feature branch is allowed"),
+        ("-fq origin feature-x", set(), "short bundle of modelled no-value options"),
+        (
+            "--force-with-lease origin feature-x",
+            set(),
+            "optional-value option: git binds a value in attached form only",
+        ),
+        ("-o ci.skip origin feature-x", set(), "arity: -o consumes its separated value"),
+        (
+            "--push-option ci.skip origin main",
+            {NAME},
+            "value consumed, the real protected target still read",
+        ),
+        ("--push-option=ci.skip origin feature-x", set(), "attached value cannot leak"),
+        (
+            "--repo=origin --push-option ci.skip",
+            {BARE},
+            "the #7796 erasure row: value consumed, bare tag preserved",
+        ),
+        (
+            "--receive-pack /usr/bin/git-receive-pack origin feature-x",
+            set(),
+            "arity: --receive-pack consumes its separated value",
+        ),
+        (
+            "--exec /usr/bin/git-receive-pack origin main",
+            {NAME},
+            "arity: --exec consumes its value, protected target still read",
+        ),
+        ("-- origin main", {NAME}, "end-of-options: everything after -- is positional"),
+        ("-- origin feature-x", set(), "end-of-options with a feature target stays allowed"),
+        (
+            "-- origin -x",
+            set(),
+            "a dash-named refspec after -- is positional, not an option",
+        ),
+        (
+            "--frobnicate ci.skip origin feature-x",
+            {BARE, SINGLE},
+            "unrecognised option: split untrusted, BOTH no-refspec rows (the "
+            "positionals may be values or a remote — rounds 10/13/14)",
+        ),
+        (
+            "--frobnicate ci.skip origin main",
+            {BARE, SINGLE, NAME},
+            "protective reading scans every positional, precise tag preserved",
+        ),
+        ("--frobnicate", {BARE}, "unrecognised and nothing positional — bare either way"),
+        (
+            "--all --frobnicate v",
+            {MIRROR},
+            "fallback does not stack bare onto mirror-all (finding 3 suppression)",
+        ),
+        (
+            "--repo=origin --push-option ma*",
+            {BARE, WILD},
+            "a glob-capable consumed value keeps the wildcard identity: pathname "
+            "expansion can hand git words this scan never saw",
+        ),
+    )
+
+    def test_the_parser_branch_table(self):
+        for args, expected, why in self.TABLE:
+            cmd = f"git push {args}".strip()
+            got = security._git_publish_floor_tags(cmd)
+            assert got == frozenset(
+                expected
+            ), f"{cmd!r}: expected {set(expected) or '{}'} because {why}; got {set(got) or '{}'}"
+
+    def test_substitution_glue_stays_on_the_ungated_branch(self):
+        # Kept out of TABLE because the sentinel is not a catalog row: the
+        # anti-obfuscation branches are upstream of this parser and unaffected.
+        got = security._git_publish_floor_tags("git push origin $(echo main)")
+        assert got == frozenset({security._GIT_PUBLISH_UNGATED})

@@ -687,6 +687,7 @@ First-class `DeniedCommandRule` records in `BUILTIN_DENIED_RULES` (`security.py`
 - **Additive, never a replacement.** The raw view is matched first and independently, for the same reason the self-protection floor keeps its regex: a payload the tokenizer cannot see into (`bash -c "…"`, `eval "$CMD"`) is still caught on raw text. A normalization failure can lose the EXTRA match but never the raw one, so it cannot turn a denied command into an allowed one. `_shell_tokens` additionally degrades to whitespace splitting with quote stripping when `shlex` rejects the input, so an unterminated quote (`rm -rf "/`) still normalizes rather than yielding no view at all.
 - **Per SEGMENT, never per command.** Re-joining tokens with single spaces erases the separators that END a command, so a whole-input re-join would FABRICATE a command that was never run — `echo rm` + newline + `-rf /` is two commands and reads as `echo rm -rf /`. Views are built from `_split_segments` output so no boundary is ever crossed, **including inside a nested payload**, which is split the same way before being viewed; the heredoc frames pinned by `TestStdinProgramTextScoping::test_benign_neighbour_no_longer_reads_as_a_mint` are the concrete case this protects, and `TestDenyMatchingIsQuoteNormalized::test_the_view_never_crosses_a_separator` pins the property directly.
 - **Nested shell payloads are viewed in their own right.** A shell's `-c` argument is a *command*, and `shlex` strips only the OUTER quoting level — so `bash -c 'dd "if=/dev/zero" of=/dev/sda'` re-joins with its inner quotes intact and the `dd if=` rule still misses it, while the unquoted inner spelling (`bash -c 'rm -rf /'`) was already caught on raw text. Each literal payload is therefore walked and viewed, reusing `_nested_shell_payloads` — the same extractor the self-protection floor uses, so the `-c` / `eval` / `env -S` / herestring / `$SHELL -c` spellings and the `bash -c -- <script>` form are recognized by construction rather than re-enumerated. The walk takes **no numeric depth cap**, for the reason `_self_token_frames` records (whatever the number, one more wrapper defeats it); it terminates structurally, because a payload is carried inside ONE token of its parent and is therefore strictly shorter than the parent's source text. Only LITERAL payloads exist to walk — `eval "$CMD"` carries no visible script and stays the raw tier's job. Found by the GPT 5.6 review lane on the PR that added this view.
+  - **The GLUED `-c` spelling is a separate, independent scan (#8197).** `-c` takes a value, so a getopt-convention shell (`ksh`, `zsh`) ends option parsing at the `c` and runs everything glued after it — and the reading is deliberately over-approximated for shells whose parsers keep consuming cluster letters (bash, dash), because extraction must cover the strictest interpreter the command could reach. `sh -c'rg . <fenced-root>'` reaches the walk as ONE token (`-crg . <fenced-root>`) once `shlex` strips the quotes. `_SHELL_COMMAND_FLAG_RE` anchors the whole token as a bare flag cluster, so a token carrying the payload's own characters was rejected and the payload never yielded — unexamined by every consumer of the extractor, the self-protection floor included. The companion pattern `_SHELL_COMMAND_GLUED_RE` captures the glued remainder (non-greedy, splitting at the FIRST lowercase `c`, flag letters of either case before it) instead of weakening the flag pattern where it is used for pure flag detection — and the flag pattern itself deliberately stays lowercase-only, because widening it made an uppercase-clustered decoy (`-Cc`) the first flag stop and ate the stop through which a following `--command`'s payload was found (both directions found by review lanes on this change). The command flag, the herestring, and the glued spelling each get their OWN precomputed stop table (a shared table let whichever spelling came first EAT the stop through which a later spelling's payload was found), and an **every-carrier sweep** closes the within-class half for short-cluster `-c` carriers: one forward pass from the first shell token appends the payload of EVERY such carrier under the LOOSE recognition the deleted local extractor used (`_shell_c_carrier_glued`: any prefix before the first lowercase `c`, so `-1c…`, `-Cc` and a decoy like `-onoclobber` cannot eat a later carrier's stop), deduplicated against what the tables already yielded so exact-payload-list consumers are unchanged, keeping the function O(N) — each token's glued payload is extracted ONCE up front, because many shell tokens sharing one stop index would otherwise each copy the same substring (O(N·M), found by the GPT 5.6 lane). **The glued split is fold-ambiguity safe** (`_shell_c_carrier_payloads`): the deny tiers lowercase input before the walk, so `-Cc'<script>'` (a real zsh/ksh spelling) folds to `-cc<script>` and a first-`c`-only split misread the payload as `c<script>`, hiding a protected push behind one junk letter (GPT 5.6 CI lane; the folded spelling can also be written directly). Which `c` took the argument is unrecoverable after the fold, so every plausible split is yielded: the first `c`, plus each consecutive-`c` run's last and second-to-last split (covering payloads whose program starts with one `c`, like `cat`/`curl`). Split positions are bounded to the last `_CARRIER_SPLIT_WINDOW` (64) characters of the leading letter region — linear without a padding bypass, because the true split's distance to the region's end is the payload's first-word length (a real program name), while padding only adds fake splits farther out whose program words are flag-letter runs matching no rule; without the bound a ~3 KB alternating-`c` token made the candidate set quadratic and the synchronous deny scan outlived the loop watchdog (GPT 5.6 CI lane). Stated residuals: `--command` carriers stay first-stop-only (the sweep's loose recognition is scoped to short clusters; no supported shell has a `--command` option, so this is a lost over-approximation, not a bypass — and in the DENY tiers, which lowercase input first, `-Cc` folds to `-cc` and eats the `--command` stop exactly as it always has, a pre-existing residual the case-preserving protection cannot reach); herestrings keep a first-occurrence residual (`bash <<<'a' <<<'b'` yields `a`; a real shell applies the last redirect); and the sweep's carrier recognition is segment-wide rather than command-wide, so a `-c`-carrying token of a LATER pipeline stage (`sh -c 'cat log' | grep -c <pattern>`) yields a junk payload — accepted, since a junk payload re-tokenizes to text no rule routes, and over-approximation is this module's documented safe direction. A glued payload is SYNTHESIZED text (a substring, not a token), so per the synthesized-payload rule above the data-consumer exemption fails closed on it: `echo bash -c'rm -rf /'`, a pure print, is descended into and denied — the same accepted over-block direction as the herestring tail and the glued `env -S` argument. An all-alpha cluster (`-ecfoo`) is genuinely ambiguous post-tokenization — it satisfies the bare-flag reading (next token is the script) AND carries a remainder a getopt-convention shell would run — so BOTH readings are yielded. The alt-traversal pass's local copy of this handling (`_alt_shell_c_payloads`, added by the PR for #7309 when changing the shared extractor was out of its scope) is deleted with this: extraction is the shared extractor's alone (re-run ONCE on an assignment-substituted token list when a resolved program name is a shell the shared walk could not see literally), and the alt pass keeps only what the shared extractor cannot know — assignment-resolved program names and positional-parameter binding (`_alt_bound_shell_payloads`, which locates the command string through the same loose carrier recognition so the two cannot drift).
   - **A payload carried by a data consumer is not descended into.** `echo bash -c '<script>'` prints the script, so walking it would refuse a command that runs nothing. `_data_consumer_exempt` decides this — the same guarded exemption the self-protection floor uses, so a piped evaluator (`echo … | sh`), a substitution in program position, and an `awk`/`sed` script carrying an executing construct all withdraw the exemption. This is deliberately **not** implemented as "descend only when the launcher is in command position", the narrowing suggested alongside the advisory: the launcher is *not* in command position in `sudo bash -c …`, `timeout 5 bash -c …`, `nohup …`, `ssh host …`, `xargs …` or `env FOO=1 bash -c …`, all of which execute the payload, so a position rule trades one false positive for six bypasses (`TestDenyMatchingIsQuoteNormalized::test_executor_wrappers_are_still_walked` pins all six). Because the exemption governs only whether to DESCEND, the raw tier is untouched: the unquoted mention `echo rm -rf /` stays refused exactly as it was before this view existed.
   - **The exemption is decided per OCCURRENCE and fails closed, because a payload is not necessarily a token.** `_nested_shell_payloads` also returns SYNTHESIZED text — a `sed` `e`-flag replacement, the tail of a glued herestring (`bash<<<'<script>'`), a glued `env -S` argument, an `alias` assignment — which is a substring or a re-join rather than an element of the token list. Recovering a position with `list.index` therefore raised `ValueError` and propagated **out of the permission gate on legitimate input** (`sed 's/x/y/e' notes.txt`), which is a crash where a security decision belongs; the GPT 5.6 and Opus 4.8 lanes found it independently. The exemption is now applied only when the payload appears as a token AND *every* occurrence sits in the argv of a data consumer; a payload with no token position cannot be proven inert and is descended into. Deciding from a single recovered index would not be sound — a short synthesized payload can also be a coincidental substring of an unrelated token, and one wrong position could wrongly exempt a payload that really executes. Every window is additionally built inside a guard, so `_deny_segment_views` cannot raise at all: a failure drops that window and leaves the raw view standing (`test_view_construction_never_raises`).
 - **No expansion — which is why `_shell_tokens` was factored OUT of `normalize_shell_command` rather than reused whole.** The view stops before `~`/`$HOME` for two reasons. Expansion is platform-dependent: it DELETES the literal `~` that `rm -rf ~.*` is authored to match, and on Windows yields a drive path (`c:\users\…`) that no POSIX-anchored rule matches — so `rm -rf "~"` would be caught on Linux by the sibling `rm -rf /.*` rule and missed on Windows. And a denied view becomes the security event log's `operation` field, so expanding here would write the operator's real home path into the audit trail on every such denial. Path IDENTITY (dot segments, `..`, `$HOME` versus the resolved home) stays with `_check_sensitive_via_normalizer` over the sensitive-path keystone — the layer that RESOLVES rather than matches. Both functions share one tokenizer, so token identity cannot drift between the argv view and the path view.
@@ -927,6 +928,100 @@ stating: an ambiguous abbreviation reads as dangerous (`--a` matches `all`), whi
 is free, since git refuses an ambiguous abbreviation itself and the command never
 runs; a fully-spelled unrelated flag such as `--atomic` is unaffected, being a
 prefix of nothing dangerous.
+
+**Option arity is modelled, and a mis-parse can only over-protect.** Only `--repo`
+had its separated value consumed, so every other value-taking push option
+(`-o`/`--push-option`, `--receive-pack`, `--exec`) leaked its value into the
+positional list, where it was read as a remote or refspec. The consequence was not
+a misclassification but an ERASURE: for `--repo=origin --push-option ci.skip` the
+leaked `ci.skip` became the sole "refspec", it normalizes to a non-protected name,
+and the tag set came back empty — which is an ALLOW, since the tag set drives the
+protected-branch decision. The scan now carries an explicit arity table
+(`_PUSH_VALUE_OPTS`, resolved through `_push_option_matches` so abbreviations keep
+working) whose separated values are consumed, and a no-value table
+(`_PUSH_NO_VALUE_OPTS` plus the structural `--no-*` rule and the short-option
+bundles) vouching that a neighbour token is positional. Anything else — a future
+git option, an unmodelled arity such as `--recurse-submodules`'s — hits the
+**fail-protective fallback**: the positional split is not trusted, BOTH
+no-refspec rows are emitted — the bare tag, plus the single-arg tag whenever
+positionals are visible, since an untrusted split cannot distinguish option
+values from a remote and disabling whichever single row the fallback happened
+to pick was demonstrated as a bypass three times in review (suppressed only
+when an all-branches flag already covers a superset) — and EVERY positional is
+scanned as a refspec
+candidate so an actual protected name still reports its precise catalog row. A
+token with an attached `=` value never disturbs the split, whatever the option, so
+it is skipped as before; a bare `--` ends option parsing exactly as git reads it.
+The invariant this buys: an unrecognised option can change the answer only toward
+MORE protection, so the erasure class cannot silently reopen when git grows a new
+value-taking option. The same fallback covers word FRAGMENTS: the scan tokenizes
+on whitespace while the shell fuses a quoted or escape-continued span into one
+word, so a value like `--push-option='ci skip'` arrives as fragments whose tail
+would read as a refspec. `_push_token_shell_read` (one shared walk serving both
+the fragment and operator-piece signals) walks the shell's own
+quote/escape state over each raw token — backslash escapes outside quotes, inside
+double quotes, and inside `$'...'` ANSI-C strings, but is literal inside plain
+single quotes — and any token whose state does not return to normal (an open
+quote, or a trailing escape that consumed the separator) poisons the positional
+split the same protective way. An ESCAPED quote is data, not a delimiter: a
+character-count/parity test was bypassed by `\"` in review, which is why the walk
+tracks state rather than counting. Complete words keep their precise reading in
+both directions — `"feat\"x"` is not flagged, and the quote-splice `'ma'\''in'`
+still reads as exactly the protected-branch row. The `$`-lookback for ANSI-C can
+misread `$$'` (PID expansion) as ANSI-C, which only ever OVER-flags, never the
+reverse. Word-PRODUCING syntax is handled before the split assigns slots at all:
+a `$` anywhere in any token — or a token-LEADING `~`, which is env-driven text
+rather than path syntax (bare `~` IS `$HOME`, and `HOME=refs/heads` turns
+`~/main` into a protected refspec; a mid-word `~` stays literal data) — lands
+the segment on the ungated branch (parameter
+expansion word-splits AFTER this scan — `V='ci.skip main'; git push --repo=origin
+--push-option $V` hands git a `main` refspec the split never saw — and this slot
+must not be weaker than the refspec slot's existing `$` posture), while glob
+characters (`*` `?` `[`) and extglob patterns (`@(` `+(` `!(`) in any token keep
+the wildcard-refspec identity, since
+pathname expansion can produce words and none of those characters is legal in a
+refname. Shell OPERATORS are consumed by the shell, never by git, so they are
+handled before any argv-level reading (and before `--`, which is git's
+end-of-options, not the shell's): a `#`-opened comment truncates the segment's
+remaining tokens; a redirection token is excluded with the shell's own arity (an
+attached target — `2>err`, `2>&1` — is self-contained, a bare operator consumes
+the next word), which keeps `git push origin feature-x 2>&1` allowed while
+`git push origin </dev/null` reads as the precise remote-only shape instead of
+scanning a phantom refspec; a bare `&` (a single ampersand is not a segment
+separator upstream, only `&&` is) or operator glue mid-word marks the split
+untrusted AND scans the operator-delimited pieces, so a protected name cannot
+hide behind glue — except that a word glued to a WELL-FORMED redirection
+(`origin>/dev/null`, `main>log`) decomposes precisely instead: the pre-operator
+word stays positional and the redirection is consumed, because bash reads it
+exactly that way and the fallback's bare tag was the WRONG catalog identity for
+a remote-only push (an identity miss is itself a hazard under per-rule
+opt-out). Redirection arity also recognises bash NAMED descriptors
+(`{name}>...` is all redirection — read as a word, the `{name}` became a
+phantom refspec erasing every tag) and quoted TARGETS (`>'log'` — the operator
+grammar admits no quotes, so a quote can only sit in the target group;
+refusing the whole token for it had mislabelled the shape), while fragment
+tokens (open quote state) still poison the split protectively. Quoted operator characters are data and none of this fires. A segment
+whose CUMULATIVE quote/escape state is still open at its end continues into the
+next line — bash line continuation (`\<newline>` vanishes) and quoted newlines
+splice words across the newline segment boundary, so `origin ma\` + newline +
+`in` pushes `main` while no scanned token spells it — and lands on the ungated
+sentinel (the `ma$in` posture); a mid-segment open whose quote closes before
+segment end stays on the disableable fallback, because in-segment joining can
+only fuse whitespace into a word (never a valid refname) and the pieces stay
+visible to the superset scan. The invariant
+has two different strengths, stated honestly: the OPTION-ARITY axis fails
+protective by construction (an unrecognised option lands in the fallback), while
+the SHELL-SYNTAX axis rests on the metacharacter inventory being complete — a
+construct the scan does not know parses as an ordinary word — so that inventory
+is pinned as a checked property
+(`test_every_bash_metacharacter_is_accounted_for` maps every bash metacharacter
+to the layer that accounts for it: upstream separators, upstream
+substitution/expansion ungating, the `$`/glob pre-checks, redirection/comment
+consumption, the fragment walk, or a documented benign rationale). (Note the
+earlier retraction of a 35-entry option table on
+the dangerous-PREFIX axis is not precedent against these tables: prefix matching
+is a set intersection where extra names are inert, while arity decides which
+tokens are refspecs at all, so a table here does change outcomes.)
 
 **Opt-out state — keystone `denied_commands.json`.** The opt-out state is a
 security ceiling, so it lives in its OWN keystone file

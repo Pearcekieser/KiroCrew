@@ -2598,6 +2598,13 @@ export const api = {
   updateCron: (id: string, body: object) =>
     fetch('/api/crons/' + id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(j),
   runCron: (id: string) => post('/api/crons/' + id + '/run').then(j),
+  /** Grant/revoke vault secrets, or act on an agent-requested pending grant.
+   * Body: {secret_env: {...}} grants (empty object revokes), or
+   * {approve_pending: true, expected_secret_env, expected_ts} /
+   * {deny_pending: true}. Approval restates the displayed request; the server
+   * refuses with 409 stale_request if it was replaced. Operator-only server-side. */
+  cronSecretsGrant: (id: string, body: { secret_env?: Record<string, string>; approve_pending?: boolean; deny_pending?: boolean; expected_secret_env?: Record<string, string> | null; expected_ts?: number; expected_source_sha256?: string }) =>
+    put('/api/crons/' + id + '/secrets', body).then(j),
   cancelCron: (id: string) => post('/api/crons/' + id + '/cancel').then(j),
   cronToChat: (id: string) => post('/api/crons/' + id + '/to-chat').then(j),
   toggleCron: (id: string, enabled: boolean) => post('/api/crons/' + id + '/enable', { enabled }).then(j),
@@ -2610,6 +2617,9 @@ export const api = {
   },
   cronRunDetail: (jobId: string, runId: string) => fetch('/api/crons/' + jobId + '/history/' + encodeURIComponent(runId), { headers: { ..._sk } }).then(j),
   cronScript: (jobId: string) => fetch('/api/crons/' + jobId + '/script', { headers: { ..._sk } }).then(j),
+  /** Vault secret NAMES (values are never exposed). Same endpoint the Settings
+   * Secrets panel reads. */
+  secretsList: () => fetch('/api/secrets').then(j),
   ackCron: (id: string, summary: string, ts?: string) => post('/api/crons/' + id + '/ack', { summary, ts }).then(j),
   cronHistoryAll: (opts?: { offset?: number; limit?: number; jobId?: string }) => {
     const p = new URLSearchParams()
@@ -2933,6 +2943,10 @@ export const api = {
   // than in the middle of their first dictation. Returns as soon as the transfer
   // is under way; progress is read from `sttStatus`.
   sttPrepare: (model: string) => post('/api/stt/prepare', { model }).then(j),
+  // Fetch the audio decoder (ffmpeg) into the gateway's digest-verified store,
+  // for a source install whose OS ships no ffmpeg package. Same 202-then-poll
+  // shape as `sttPrepare`; progress arrives on `sttStatus().ffmpeg.download`.
+  sttFfmpegDownload: () => post('/api/stt/ffmpeg/download', {}).then(j),
   // Load the model and run one throwaway decode so the first real utterance does
   // not pay for the graph allocation. Fire-and-forget at every call site: a
   // failure only costs the latency it was meant to hide.
@@ -3151,6 +3165,7 @@ export const api = {
   spawn: (task: string) => post('/api/spawn', { task }).then(j),
   spawnStatus: (id: string, opts?: { signal?: AbortSignal }) => fetch('/api/spawn/' + encodeURIComponent(id), opts).then(j),
   spawnDelete: (id: string) => del('/api/spawn/' + encodeURIComponent(id)).then(j),
+  spawnStopAll: (slot: string) => post('/api/spawn/stop-all', { slot }).then(j),
   spawnRetry: (id: string) => post('/api/spawn/' + encodeURIComponent(id) + '/retry', {}).then(j),
   spawnClear: () => del('/api/spawn').then(j),
   approvals: (): Promise<{ id: string; source?: string; tool?: string; tool_input?: string; tool_call_id?: string; slot?: string; ts?: number }[]> => fetch('/api/approvals').then(j),

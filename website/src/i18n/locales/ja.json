@@ -4376,6 +4376,7 @@
           "starting": "開始中…",
           "tell_me_what_you_have_in_mind_i_ll_ask_a_few_cla": "どんなことを実現したいのか教えてください。チャットでいくつか質問をして、確認できるプランを書き、\n          準備ができたら実装します。",
           "this_folder_isn_t_a_git_repository_so_i_ll_work": "このフォルダーはGitリポジトリではないので、ここで直接作業します。Gitリポジトリを選択すると、新しいワークツリーのオプションが使えます（メインのチェックアウトそのままで作業できます）。",
+          "this_spec_will_be_called": "このスペックの名前は {{name}} になります",
           "type_bug_blurb": "問題を調査し、根本原因を特定して、修正計画を立てます。",
           "type_bug_title": "バグを修正",
           "type_feature_blurb": "完全なプラン：要件、技術設計、タスクリスト。",
@@ -4434,10 +4435,13 @@
           "approved": "承認済み",
           "approved_by_user": "{{user}} が承認",
           "archive_this_spec": "このスペックをアーカイブ",
+          "cancel": "キャンセル",
           "changed_since_approval": "承認後に変更あり",
           "clear": "クリア",
           "close_esc": "閉じる（Esc）",
           "close_review_view": "レビュービューを閉じる",
+          "delete_spec_named": "スペック {{name}} を除去",
+          "delete_this_spec": "このスペックを除去",
           "document_file_name": "{{name}}.md",
           "drafting_design": "設計を作成中…",
           "drafting_tasks": "タスクを作成中…",
@@ -4450,10 +4454,13 @@
           "pausing": "一時停止中…",
           "pending_comment_other": "{{count}} 件の保留中のコメント",
           "remove_comment_on": "{{document}} のコメントを削除",
+          "remove_spec_body": "「{{name}}」は Spec Builder から削除されます。マークダウンファイルはプロジェクトに残り、このスペックで実行中のエージェントは停止します。",
+          "remove_this_spec": "このスペックを削除しますか？",
+          "removing": "削除中…",
           "rename_this_spec_label_the_folder_name_stays": "このスペックのラベルを変更します。フォルダー名とブランチ名はそのままです。",
           "resize_document_panel": "ドキュメントパネルのサイズ変更",
           "restore_this_spec": "このスペックを復元",
-          "review_document": "{{document}} をレビュー",
+          "review_document_named": "{{name}} の {{document}}.md を確認",
           "send_all_to_agent": "すべてをエージェントに送信",
           "sending": "送信中…",
           "spec_label": "スペックのラベル",
@@ -4468,11 +4475,13 @@
           "working": "処理中…"
         },
         "specRail": {
+          "active": "進行中",
           "agent_working": "エージェント処理中",
           "an_agent_is_working": "エージェントが処理中です",
           "filter_specs": "スペックをフィルタリング",
           "filter_specs_by_name": "スペックを名前でフィルタリング",
           "new_spec": "新しいスペック",
+          "no_matching_specs": "その条件に合うスペックはありません",
           "plan_ready": "プラン完了",
           "settings": "設定",
           "show_spec_list": "スペックリストを表示",
@@ -4483,7 +4492,8 @@
           "v": "v"
         },
         "specStatePanel": {
-          "answer_with": "「{{title}}」はどのように答えますか？",
+          "answer_option": "「{{title}}」に「{{option}}」で回答",
+          "answer_option_recommended": "「{{title}}」に「{{option}}」で回答（推奨）",
           "answered": "回答済み",
           "blocking": "ブロッカー",
           "context": "コンテキスト",
@@ -7843,6 +7853,7 @@
       "xhigh": "特に高い"
     },
     "sttProviders": {
+      "downloading_decoder": "オーディオデコーダーをダウンロード中: {{pct}}（{{total}} 中 {{done}}）",
       "downloading_speech_model": "音声モデルをダウンロード中: {{pct}}（{{total}} 中 {{done}}）",
       "stream_error_decode_failed": "音声認識はこの書き起こしを完了できませんでした。もう一度口述してください。",
       "stream_error_max_duration": "口述が長さの上限に達しました。続けるには新しい録音を開始してください。",
@@ -8880,6 +8891,7 @@
         "ask_a_side_question_2": "サイドで質問…",
         "ask_a_side_question_main_agent_keeps_working": "実行中の処理を止めずにサイドで質問できます。ここの内容はチャットには保存されません。",
         "context_from": "コンテキスト元",
+        "context_only_tools_unavailable": "コンテキストのみ · ここではツールや MCP は利用できません。操作はメインチャットで依頼してください。",
         "question_too_long": "質問が長すぎます — 約 {{max}} 文字未満に短くしてください（現在は {{current}} 文字）",
         "queue_cancel_failed": "キューに入っている質問をキャンセルできませんでした",
         "queue_edit_failed": "キューに入っている質問を更新できませんでした",
@@ -8972,7 +8984,6 @@
         "s": "秒",
         "stop": "停止",
         "stop_all": "すべて停止",
-        "stop_all_running_subagents": "実行中のすべてのサブエージェントを停止",
         "stop_running_subagent": "実行中のサブエージェントを停止",
         "stop_subagent": "サブエージェント {{name}} を停止",
         "stop_this_subagent": "このサブエージェントを停止",
@@ -9361,7 +9372,9 @@
       "flat_view_all_chats_without_folders": "フラット表示 — フォルダーを使わず全チャットを表示",
       "folder": "フォルダー",
       "folder_2": "フォルダー {{name}}",
+      "folder_create_failed": "チャットを作成できませんでした。",
       "folder_options_for": "{{name}} のフォルダーオプション",
+      "folder_project_dir_missing": "フォルダーのプロジェクトディレクトリが存在しません：{{path}}。フォルダー設定で更新してください。",
       "folders": "フォルダー",
       "goal_loop_cycle": "ゴールループ · サイクル {{count}}/{{total}}",
       "goal_loop_cycle_no_cap": "ゴールループ · サイクル {{count}}（上限なし）",
@@ -9510,7 +9523,6 @@
     },
     "connectionsPage": {
       "action_failed": "操作に失敗しました: {{error}}",
-      "authorize": "認証する",
       "before_you_connect": "接続する前に",
       "cancel": "キャンセル",
       "complete_connection": "完了",
@@ -9567,7 +9579,9 @@
       "services": "サービス",
       "services_available": "{{value}}利用可能",
       "test_connection": "テスト",
+      "test_blocked_by_sibling": "コネクションテストは同時に1件だけ実行されます — {{provider}} をテスト中です",
       "test_failed": "プロバイダーがコネクションテストをパスしませんでした。",
+      "test_in_flight": "{{provider}} のコネクションテストが既に実行中です。完了後に再度お試しください。",
       "testing": "テスト中…",
       "unknown_error": "不明なエラー",
       "value_prop_atlassian": "Jira の課題を検索し、Confluence のページを読み取ります。",
@@ -11476,8 +11490,25 @@
       "script_source_download": "スクリプトをダウンロード",
       "script_source_failed": "スクリプトのソースを読み込めませんでした。",
       "script_source_truncated": "切り詰められました — スクリプトがプレビューの上限を超えています。",
+      "secrets_active_help": "実行時にこのジョブの環境変数に注入されます。名前のみ表示 — 値は保管庫に保持されます。",
+      "secrets_approve": "承認",
+      "secrets_deny": "拒否",
+      "secrets_direction_caption": "環境変数 ← ボールトのシークレット",
+      "secrets_none": "シークレットは付与されていません。",
+      "secrets_none_hint": "このジョブ用のシークレットをエージェントにリクエストさせてください。",
+      "secrets_pending_badge": "承認待ちのシークレットリクエスト",
+      "secrets_pending_help": "承認すると、これらの保管庫の値が実行時にジョブの環境変数へ注入されます。承認はジョブの現在のコードに紐づきます — スクリプトやコマンドが後で変更されると、再承認まで注入は停止します。",
+      "secrets_pending_source": "この承認が対象とするスクリプト",
+      "secrets_pending_source_failed": "スクリプトのソースを読み込めなかったため、このリクエストは承認できません。",
+      "secrets_pending_source_loading": "このリクエストが実行するスクリプトを読み込んでいます。表示されると承認できるようになります。",
+      "secrets_pending_source_truncated": "このスクリプトは確認可能なサイズの上限を超えているため、このリクエストは承認できません。",
+      "secrets_pending_source_unreviewable": "このスクリプトの一部は書かれたとおりに表示できません（マスクされた認証情報らしきテキスト、またはデコードできないバイト）。表示内容は実行される内容と完全には一致しないため、このリクエストは承認できません。",
+      "secrets_pending_title": "エージェントがシークレットを要求しました",
+      "secrets_section": "保管庫のシークレット",
       "no_owning_session": "所有セッションなし",
-      "owning_session": "所有セッション"
+      "owning_session": "所有セッション",
+      "secrets_revoke_all": "すべてのシークレットを取り消す",
+      "secrets_revoke_all_confirm": "すべて取り消しますか？"
     },
     "servicesTab": {
       "channels": "チャネル",
@@ -12827,7 +12858,13 @@
         "unavailable_import_failed": "音声認識エンジンはインストールされていますが、このマシンでは読み込めませんでした。",
         "unavailable_model_missing": "音声モデルはまだこのマシンにありません。下からダウンロードしてください。",
         "unavailable_apple_unsupported": "Apple Speech には macOS 26 以降が必要です。代わりにローカルのプロバイダーを選んでください。",
-        "unavailable_apple_needs_toolchain": "Apple Speech には Xcode コマンドラインツールが必要です。インストールしてからこのページを再読み込みしてください。"
+        "unavailable_apple_needs_toolchain": "Apple Speech には Xcode コマンドラインツールが必要です。インストールしてからこのページを再読み込みしてください。",
+        "decoder_fetch_prompt": "{{productName}} がこのマシン用にダイジェスト検証済みのコピーを取得できるので、手動でインストールする必要はありません。",
+        "download_decoder": "デコーダーをダウンロード",
+        "decoder_download_failed_reason": "デコーダーのダウンロードに失敗しました: {{error}}",
+        "let_the_agent_fix_it": "{{productName}} に任せる",
+        "decoder_failure_unknown": "報告なし",
+        "decoder_agent_prompt": "{{productName}} が音声録音を文字起こしするために必要なオーディオデコーダー（ffmpeg）をインストールできませんでした。このホストで動作するようにしてください。\n\n失敗した内容: {{code}} — {{detail}}\nホスト: {{os}} {{arch}}\n\n{{productName}} は、バイト列が固定された SHA-256 ダイジェストと一致する ffmpeg のみを実行し、探す場所はこれだけです: /usr/local/bin、/opt/homebrew/bin、この OS 自身のプログラムディレクトリ、そして <data home>/models/ffmpeg/ にあるダイジェスト検証済みのデコーダーストア。パスは決して信頼の根拠にならないため、~/.local/bin は意図的に信頼されず、そこに置いたコピーは無視されます。\n\nこのホストに実際に必要なもの——パッケージマネージャー、ソースからのビルド、あるいはデコーダーのダウンロードの再試行——を見極め、権限昇格が適切かどうかは自分で判断してから使ってください。終わったら GET /api/stt/status を再確認し、音声設定ページがデコーダーの不足を報告しなくなったことを確かめてください。"
       },
       "teamsPanel": {
         "above_unlike_slack_the_bot_framework_has_no_outb": "上記。Slack とは異なり、Bot Framework には\n              送信専用モードがありません。",
@@ -13580,7 +13617,12 @@
       "wake_error": "このメンバーの起動ソースを読み込めませんでした。",
       "wake_paused": "一時停止中",
       "wake_webhook": "Webhook",
-      "activity_error": "このメンバーのアクティビティを読み込めませんでした。"
+      "activity_error": "このメンバーのアクティビティを読み込めませんでした。",
+      "driving_sessions": "このメンバーが操作中のセッション",
+      "driving_none": "現在操作中のセッションはありません。",
+      "driving_idle": "アイドル",
+      "driving_show_all": "すべて表示（{{count}}）",
+      "driving_show_less": "折りたたむ"
     }
   },
   "privacyDisclosure": {
@@ -13745,7 +13787,8 @@
     },
     "offline": {
       "disabled_gateway_offline": "{{label}} は無効です — ゲートウェイがオフラインです",
-      "gateway_offline_reconnect": "ゲートウェイがオフラインです — {{action}}するには再接続してください"
+      "gateway_offline_reconnect": "ゲートウェイがオフラインです — {{action}}するには再接続してください",
+      "submit_comments": "コメントを送信"
     },
     "popoutController": {
       "your_browser_blocked_the_pop_out_window_allow_po": "ブラウザーがポップアップウィンドウをブロックしました。このサイトのポップアップを許可して、もう一度お試しください。"

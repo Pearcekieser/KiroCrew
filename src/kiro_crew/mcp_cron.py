@@ -10,6 +10,9 @@ Tools:
     cron_remove_all — remove all jobs
     cron_pause      — pause a job
     cron_resume     — resume a paused job
+    cron_secret_request — request vault secrets for an owned script cron
+                          job (records a PENDING grant; operator approves in
+                          the dashboard — this tool never grants)
 """
 
 from __future__ import annotations
@@ -36,7 +39,12 @@ from kiro_crew.cron import (
     is_valid_skip_date,
     is_valid_timezone,
 )
-from kiro_crew.cron_script import resolve_script_path
+from kiro_crew.cron_script import (
+    compute_secret_env_pin,
+    delivery_fingerprint,
+    resolve_script_path,
+    validate_secret_env_grant,
+)
 from kiro_crew.cron_trigger import _JOB_ID_RE, trigger_cron_job
 from kiro_crew.mcp_caller import current_caller
 from kiro_crew.mcp_core import (
@@ -134,9 +142,9 @@ _CRON_SECRET_NAME_RE = re.compile(
 # backtick pairs. We deliberately reject a lone backtick too — a stray one means
 # unmatched-quoting confusion, not a benign literal.
 _CRON_CMD_SUBST_RE = re.compile(
-    r"\$\(|"     # $( ... ) and $(( ... )) (`\(` covers both since $((… starts with $()
-    r"\$'|"      # $'...' ANSI-C quoting: `$'\x2e\x73\x73\x68'` decodes to ".ssh"
-    r"`",        # backtick — matches EITHER end of a pair, and unmatched too
+    r"\$\(|"  # $( ... ) and $(( ... )) (`\(` covers both since $((… starts with $()
+    r"\$'|"  # $'...' ANSI-C quoting: `$'\x2e\x73\x73\x68'` decodes to ".ssh"
+    r"`",  # backtick — matches EITHER end of a pair, and unmatched too
 )
 # A ``${...}`` that is NOT a plain ``${NAME}`` reference. Every other brace form
 # COMPOSES a string at expansion time, which is the same hazard as command
@@ -179,9 +187,7 @@ _CRON_POSITIONAL_PARAM_RE = re.compile(r"\$[0-9@*#]|\$\{[0-9@*#]")
 # start-of-command / after a separator / after `do`/`then` and word-bounded, so
 # `git log --format=for` (keyword as an argument) and a quoted `'while ...'` are
 # NOT matched. `case` is included because its patterns compose the same way.
-_CRON_SHELL_KEYWORD_RE = re.compile(
-    r"(?:^|[;&|]|\bdo\b|\bthen\b)\s*\b(?:for|while|until|case)\b"
-)
+_CRON_SHELL_KEYWORD_RE = re.compile(r"(?:^|[;&|]|\bdo\b|\bthen\b)\s*\b(?:for|while|until|case)\b")
 # Pathname expansion (globbing) is a FOURTH way to compose a sensitive path that
 # never appears literally: ``cat ~/.s?h/id_rsa`` reads ``~/.ssh/id_rsa`` (verified
 # against real sh, all three metacharacters). Blanket-refusing ``*``/``?``/``[``
@@ -212,10 +218,10 @@ _CRON_MAX_GLOB_WORD = 256
 # ``a=b`` as an assignment is harmless here: this map is only ever used to make
 # the credential-path scan see MORE, never to permit something.
 _CRON_LOCAL_ASSIGN_RE = re.compile(
-    r"(?:^|[;&|\s])\s*"          # start-of-command, a separator, or whitespace
+    r"(?:^|[;&|\s])\s*"  # start-of-command, a separator, or whitespace
     r"([A-Za-z_][A-Za-z0-9_]*)"  # variable name
-    r"="                         # literal =
-    r"([^\s;&|]*)",             # value up to next separator
+    r"="  # literal =
+    r"([^\s;&|]*)",  # value up to next separator
 )
 # A backslash escaping any character. sh drops the backslash and keeps the
 # character during word expansion, so the scan must do the same to see the string
@@ -330,7 +336,7 @@ def _glob_could_reach_credentials(command: str) -> bool:
             # stripped above). Both fnmatch directions so a glob in EITHER the
             # command or the sensitive name is caught.
             for start in range(len(cand_segments) - depth + 1):
-                win_segs = cand_segments[start:start + depth]
+                win_segs = cand_segments[start : start + depth]
                 # sh does NOT let a leading `*`/`?`/`[` match a leading dot — a
                 # hidden file is excluded from globbing unless the pattern spells
                 # the dot literally. Every sensitive name here is a dotfile
@@ -730,9 +736,7 @@ def _vet_shell_command(command: str) -> str | None:
     # fragment). `resolved` already has the tracked `A=.s; ... $A` cases expanded,
     # so this does not fire on those.
     leftover = {
-        name
-        for name in _CRON_VAR_REF_RE.findall(resolved)
-        if name not in _CRON_VAR_REF_ALLOWED
+        name for name in _CRON_VAR_REF_RE.findall(resolved) if name not in _CRON_VAR_REF_ALLOWED
     }
     if leftover:
         return (
@@ -1290,6 +1294,37 @@ def _list_tools() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {"job_id": {"type": "string", "description": "Job ID to trigger"}},
                 "required": ["job_id"],
+            },
+        },
+        {
+            "name": "cron_secret_request",
+            "description": (
+                "Request vault secrets for a SCRIPT cron job you own. "
+                "This does NOT grant anything: it records a PENDING request "
+                "(env-var name -> vault secret name, pinned to the job's "
+                "current code) that the operator must approve in the dashboard "
+                "(Schedule > job > Secrets) before the values are injected "
+                "into the job's subprocess env at fire time. Tell the user to "
+                "approve it. Secrets must already exist in the vault "
+                "(Settings > Secrets). An empty 'secrets' object withdraws a "
+                "pending request."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job_id": {"type": "string", "description": "Job ID to request secrets for"},
+                    "secrets": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": (
+                            "Mapping of env-var name (e.g. 'MY_SANDBOX_TOKEN', "
+                            "[A-Z][A-Z0-9_]*) to the vault secret name to "
+                            "inject under it. Empty object withdraws the "
+                            "pending request."
+                        ),
+                    },
+                },
+                "required": ["job_id", "secrets"],
             },
         },
     ]
@@ -2138,6 +2173,92 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         if ok:
             return f"{msg} - executing now."
         return msg
+
+    if name == "cron_secret_request":
+        jid = args["job_id"]
+        # Ownership check — a session may only request secrets for a job it owns.
+        own_err = _check_cron_job_ownership(svc, jid)
+        if own_err:
+            return own_err
+        secrets = args.get("secrets")
+        if not isinstance(secrets, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in secrets.items()
+        ):
+            return "Error: secrets must be an object mapping env-var names to vault secret names"
+        sjob = svc.get_job(jid)
+        if sjob is None:
+            return f"Error: job not found: {jid}"
+        if not secrets:
+            try:
+                svc.update_job(jid, secret_env_pending={})
+            except CronStoreBusy:
+                return "Error: cron store busy, please retry"
+            return "Withdrew the pending secret request."
+        if not sjob.script:
+            return (
+                "Error: secret grants apply only to SCRIPT jobs. An agent "
+                "job's session would expose the plaintext to the model; a "
+                "command job's pin can cover only the command text, not the "
+                "bytes of any helper file the command invokes."
+            )
+        try:
+            validate_secret_env_grant(secrets)
+        except ValueError as exc:
+            return f"Error: {redact(str(exc))}"
+        # Deliberately NO vault-name existence probe here: distinguishing
+        # "stored" from "not stored" to an agent caller would let it enumerate
+        # the owner's vault names by guessing. Names are validated on the
+        # owner-only approval surfaces, where the operator sees the vault and
+        # the request side by side; a request naming a missing secret is
+        # simply refused there.
+        try:
+            # Pin the REQUEST to the job's current code. Approval re-verifies
+            # this pin against the code at approval time, so what the operator
+            # blesses is exactly what the agent showed them.
+            pin = compute_secret_env_pin(
+                sjob.script,
+                sjob.command,
+                sjob.message,
+                job_id=sjob.id,
+                grant=secrets,
+                domain="pending",
+                delivery=delivery_fingerprint(
+                    sjob.session_key, sjob.silent, sjob.channel or "", sjob.thread_ts or ""
+                ),
+            )
+        except (ValueError, FileNotFoundError, PermissionError, RuntimeError) as exc:
+            return f"Error: {redact(str(exc))}"
+        try:
+            svc.update_job(
+                jid,
+                secret_env_pending=dict(secrets),
+                secret_env_pending_pin=pin,
+                secret_env_pending_ts=time.time(),
+            )
+        except CronStoreBusy:
+            return "Error: cron store busy, please retry"
+        except CronStoreUnreadable as exc:
+            return f"Error: {exc}"
+        except ValueError as exc:
+            return f"Error: {redact(str(exc))}"
+        sel().log_api_access(
+            caller="mcp",
+            operation="cron.secret_request",
+            outcome="allowed",
+            source="mcp",
+            resources=f"job_id={jid}:{','.join(sorted(secrets))}",
+        )
+        # No in-chat approval surface, deliberately: an approval record
+        # reachable from generic chat resolution paths kept widening the
+        # owner-only boundary in review, so approval lives EXCLUSIVELY on the
+        # owner-gated Schedule page. The durable pending record above is the
+        # source of truth.
+        return (
+            f"Recorded a PENDING secret request for job {jid} "
+            f"({', '.join(sorted(secrets))}). Nothing is granted yet: the "
+            "operator must approve it in the dashboard under Schedule > this "
+            "job > Secrets. Tell the user to review and approve it there."
+        )
 
     return f"Unknown tool: {name}"
 

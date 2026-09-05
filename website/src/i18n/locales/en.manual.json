@@ -3227,6 +3227,7 @@
       },
       "sideChat": {
         "ask_a_side_question_2": "Ask a side question…",
+        "context_only_tools_unavailable": "Context only · Tools and MCPs are unavailable here. Use the main chat to take action.",
         "question_too_long": "Question too long — reduce to under ~{{max}} characters (yours: {{current}})",
         "queue_cancel_failed": "Could not cancel that queued question",
         "queue_edit_failed": "Could not update that queued question",
@@ -3287,7 +3288,6 @@
         "open_in_subagents_sidebar": "Open {{label}} in subagents sidebar",
         "retry_failed_count": "Retry failed ({{count}})",
         "stop_all": "Stop all",
-        "stop_all_running_subagents": "Stop all running subagents",
         "stop_running_subagent": "Stop running subagent",
         "stop_subagent": "Stop subagent {{name}}"
       },
@@ -3507,7 +3507,9 @@
       "delete_folder_confirm": "Delete “{{name}}”? Sessions will be ungrouped.",
       "filter_tags": "Filter tags: {{name}}",
       "folder_2": "Folder {{name}}",
+      "folder_create_failed": "Could not create the chat.",
       "folder_options_for": "Folder options for {{name}}",
+      "folder_project_dir_missing": "The folder's project directory no longer exists: {{path}}. Update it in Folder settings.",
       "goal_loop_cycle": "Goal loop · cycle {{count}} of {{total}}",
       "goal_loop_cycle_no_cap": "Goal loop · cycle {{count}} (no cap)",
       "goal_loop_interrupted_title": "Goal loop armed — last turn was interrupted; resume the chat or wait for the next cycle",
@@ -3606,7 +3608,6 @@
     },
     "connectionsPage": {
       "action_failed": "Action failed: {{error}}",
-      "authorize": "Authorize",
       "before_you_connect": "Before you connect",
       "cancel": "Cancel",
       "complete_connection": "Complete",
@@ -3663,7 +3664,9 @@
       "services": "Services",
       "services_available": "{{value}} available",
       "test_connection": "Test",
+      "test_blocked_by_sibling": "One connection test runs at a time — {{provider}} is testing",
       "test_failed": "The provider did not pass the connection test.",
+      "test_in_flight": "A connection test for {{provider}} is already running. Try again once it finishes.",
       "testing": "Testing…",
       "unknown_error": "Unknown error",
       "value_prop_atlassian": "Search Jira issues and read Confluence pages.",
@@ -4547,7 +4550,24 @@
       "script_source": "Script source",
       "script_source_download": "Download script",
       "script_source_failed": "Could not load the script source.",
-      "script_source_truncated": "Truncated — the script is larger than the preview limit."
+      "script_source_truncated": "Truncated — the script is larger than the preview limit.",
+      "secrets_active_help": "Injected into this job's environment at run time. Names only — values stay in the vault.",
+      "secrets_approve": "Approve",
+      "secrets_deny": "Deny",
+      "secrets_direction_caption": "environment variable ← vault secret",
+      "secrets_none": "No secrets granted.",
+      "secrets_none_hint": "Ask the agent to request secrets for this job.",
+      "secrets_pending_badge": "Secret request awaiting approval",
+      "secrets_pending_help": "Approving injects these vault values into this job's environment at run time. The approval is pinned to the job's current code — if the script or command changes later, injection stops until you approve again.",
+      "secrets_pending_source": "Script this approval covers",
+      "secrets_pending_source_failed": "The script source could not be loaded, so this request cannot be approved.",
+      "secrets_pending_source_loading": "Loading the script this request would run. Approval unlocks once it is shown.",
+      "secrets_pending_source_truncated": "This script is larger than the reviewable limit, so this request cannot be approved.",
+      "secrets_pending_source_unreviewable": "Parts of this script cannot be shown as written (masked credential-like text or undecodable bytes), so what you see is not exactly what would run. This request cannot be approved.",
+      "secrets_pending_title": "Agent requested secrets",
+      "secrets_section": "Vault secrets",
+      "secrets_revoke_all": "Revoke all secrets",
+      "secrets_revoke_all_confirm": "Revoke all?"
     },
     "servicesTab": {
       "channels": "Channels",
@@ -5138,7 +5158,13 @@
         "unavailable_import_failed": "The speech recogniser is installed but could not be loaded on this machine.",
         "unavailable_model_missing": "The speech model is not on this machine yet. Download it below.",
         "unavailable_apple_unsupported": "Apple Speech needs macOS 26 or newer. Choose the local provider instead.",
-        "unavailable_apple_needs_toolchain": "Apple Speech needs the Xcode command line tools. Install them, then reload this page."
+        "unavailable_apple_needs_toolchain": "Apple Speech needs the Xcode command line tools. Install them, then reload this page.",
+        "decoder_fetch_prompt": "{{productName}} can fetch a digest-verified copy for this machine, so nothing has to be installed by hand.",
+        "download_decoder": "Download decoder",
+        "decoder_download_failed_reason": "The decoder download failed: {{error}}",
+        "let_the_agent_fix_it": "Let {{productName}} fix it",
+        "decoder_failure_unknown": "not reported",
+        "decoder_agent_prompt": "The audio decoder (ffmpeg) that {{productName}} needs in order to transcribe voice recordings could not be installed. Please get it working on this host.\n\nWhat failed: {{code}} — {{detail}}\nHost: {{os}} {{arch}}\n\n{{productName}} only executes an ffmpeg whose bytes match a pinned SHA-256 digest, and it looks in exactly these places: /usr/local/bin, /opt/homebrew/bin, this operating system's own program directories, and its own digest-verified decoder store at <data home>/models/ffmpeg/. The path is never the trust anchor, so ~/.local/bin is deliberately NOT trusted and a copy left there is ignored.\n\nWork out what this host actually needs — a package manager, a build from source, or another attempt at the decoder download — and decide for yourself whether elevated privileges are appropriate before using any. When you are done, re-check GET /api/stt/status and confirm that the Voice settings page no longer reports a missing decoder."
       },
       "teamsPanel": {
         "active": "Active",
@@ -5580,7 +5606,8 @@
     },
     "offline": {
       "disabled_gateway_offline": "{{label}} disabled — gateway offline",
-      "gateway_offline_reconnect": "Gateway offline — reconnect to {{action}}"
+      "gateway_offline_reconnect": "Gateway offline — reconnect to {{action}}",
+      "submit_comments": "submit comments"
     },
     "popoutController": {
       "your_browser_blocked_the_pop_out_window_allow_po": "Your browser blocked the pop-out window. Allow pop-ups for this site and try again."
@@ -5698,6 +5725,7 @@
       "xhigh": "Extra High"
     },
     "sttProviders": {
+      "downloading_decoder": "Downloading the audio decoder: {{pct}} ({{done}} of {{total}})",
       "downloading_speech_model": "Downloading the speech model: {{pct}} ({{done}} of {{total}})",
       "stream_error_decode_failed": "Speech recognition could not finish this transcript. Dictate it again.",
       "stream_error_max_duration": "Dictation reached its length limit. Start a new recording to continue.",
