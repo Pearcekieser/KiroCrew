@@ -5899,6 +5899,7 @@
       "copy_failed": "Échec de la copie",
       "copy_selection": "Copier la sélection",
       "disconnected_message": "Terminal déconnecté",
+      "displaced_message": "Une autre fenêtre a pris le contrôle de ce terminal",
       "failed_retry": "Échec — réessayer",
       "reconnect": "Reconnecter",
       "reconnecting": "Reconnexion…",
@@ -5907,7 +5908,8 @@
       "send_to_chat": "Envoyer au chat",
       "sending": "Envoi…",
       "touch_select_anchor": "Premier point défini — touchez l'autre extrémité",
-      "touch_select_done": "Plage sélectionnée — touchez Copier"
+      "touch_select_done": "Plage sélectionnée — touchez Copier",
+      "use_here": "Utiliser le terminal ici"
     },
     "codeBlock": {
       "copied": "Copié !",
