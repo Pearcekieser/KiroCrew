@@ -9530,6 +9530,9 @@
       }
     },
     "chatPage": {
+      "turn_minimap": "대화 턴 탐색",
+      "turn_minimap_active": "{{current}}/{{count}}번째 턴: {{prompt}}",
+      "turn_minimap_landmark": "대화 턴",
       "agent_list": "에이전트 목록",
       "agent_selector": "에이전트 선택",
       "autopilot_plans_before_executing_each_stage_need": "오토파일럿은 실행 전에 계획을 세웁니다. 각 단계에는 승인이 필요합니다 (자율로 실행하려면 ‘Go All’을 선택하세요). 서브에이전트는 자동으로 위임됩니다. 계획 학습 내용은 세션 간에 유지됩니다.",

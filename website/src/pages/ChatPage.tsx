@@ -91,6 +91,7 @@ import { useChatPageResourcesController } from './chat/useChatPageResourcesContr
 import EarlierMessagesBar from './chat/EarlierMessagesBar'
 import TranscriptScrollShell from './chat/TranscriptScrollShell'
 import { devLog, devWatchMessages, inspectorOn } from '../dev/scrollInspector'
+import TurnNavigationMinimap, { buildTurnNavigationItems } from './chat/TurnNavigationMinimap'
 import { useVirtualChat } from '../hooks/virtualizer/useVirtualChat'
 import { addPendingFile, prepareSendPayload, buildRelMap, hasExactRelMention, normalizeWindowsPath, parseDirTokens, serializeDirTokens, spliceDirTokens } from '../utils/fileTokens'
 import { makeRelative } from '../components/FilePickerMenu'
@@ -5280,6 +5281,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     return map
   }, [displayItems])
 
+  const turnNavigationItems = useMemo(
+    () => buildTurnNavigationItems(messages, messageToDisplayIdx),
+    [messages, messageToDisplayIdx],
+  )
+  const navigateToTurn = useCallback((displayIndex: number) => {
+    navToDisplayIndex(displayIndex, { behavior: 'smooth', align: 'start', offset: -24 })
+  }, [navToDisplayIndex])
+
   const chatNav = useChatNavigation(messages, messageToDisplayIdx)
 
   // ── Chat Pins ──────────────────────────────────────────────────────────────
@@ -7105,6 +7114,12 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 />
               </motion.div>
             ) : (
+            <>
+            <TurnNavigationMinimap
+              items={turnNavigationItems}
+              scrollerRef={scrollerRef}
+              onNavigate={navigateToTurn}
+            />
             <TranscriptScrollShell
               scrollerRef={scrollerRef}
               onScroll={onScrollPin}
@@ -7258,6 +7273,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               })}
               
             </TranscriptScrollShell>
+            </>
             )}
             {/* Restore cover. A session left mid-history reopens on a transcript
                 that hydrates in chunks and is only positioned once its anchored
