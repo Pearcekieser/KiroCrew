@@ -3357,6 +3357,7 @@ class _ChatSlot:
         "_pending_variants",
         "_lock",
         "forked_from",
+        "fork_ancestors",
         "_fork_lock",
         "_model_pick_lock",
         "_remote_pick_lock",
@@ -3886,6 +3887,8 @@ class _ChatSlot:
         self._pending_variants: list[dict] = []
         self._lock = asyncio.Lock()
         self.forked_from: str | None = None  # parent slot key if this is a fork
+        # Full fork chain, nearest ancestor first (see dashboard/fork_lineage.py).
+        self.fork_ancestors: list[str] = []
         self._fork_lock: asyncio.Lock = asyncio.Lock()  # serialises concurrent forks on this slot
         # Serialises explicit model-pick transactions (check → mutate → live
         # switch → rollback) on this slot: picks interleaving at the set_model
