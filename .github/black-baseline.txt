@@ -28,7 +28,6 @@ src/kiro_crew/apps/builtins/auto_improvement/tests/test_github_profile.py
 src/kiro_crew/apps/builtins/auto_improvement/tests/test_lint_findings.py
 src/kiro_crew/apps/builtins/auto_improvement/tests/test_pr_checks.py
 src/kiro_crew/apps/builtins/auto_improvement/tests/test_profile_capture.py
-src/kiro_crew/apps/builtins/auto_improvement/tests/test_reconcile_and_publish.py
 src/kiro_crew/apps/builtins/auto_improvement/tests/test_runner.py
 src/kiro_crew/apps/builtins/auto_improvement/tests/test_spine_scope_cov80.py
 src/kiro_crew/apps/builtins/auto_research/handlers.py
@@ -234,7 +233,6 @@ src/kiro_crew/deploy/skills/artifact-deploy/scripts/detach_backend.py
 src/kiro_crew/deploy/skills/artifact-deploy/scripts/reaper_lambda/index.py
 src/kiro_crew/deploy/skills/artifact-deploy/templates/handler-example.py
 src/kiro_crew/deploy/webapp_types.py
-src/kiro_crew/diagnostics.py
 src/kiro_crew/discord/attachments.py
 src/kiro_crew/doc_parser.py
 src/kiro_crew/emoji_list.py
@@ -297,7 +295,6 @@ src/kiro_crew/mcp_gateway/verdict_cache.py
 src/kiro_crew/mcp_shared.py
 src/kiro_crew/mcp_tools/apps.py
 src/kiro_crew/mcp_tools/artifacts.py
-src/kiro_crew/mcp_tools/knowledge.py
 src/kiro_crew/mcp_tools/skills.py
 src/kiro_crew/metrics/http_metrics.py
 src/kiro_crew/metrics/provider.py
@@ -377,7 +374,6 @@ test/test_agent_template_skills.py
 test/test_ai_agent_runner_coverage.py
 test/test_ai_backend_routes_coverage.py
 test/test_ai_pr_watchers_coverage.py
-test/test_ai_spine_driver_coverage.py
 test/test_api_agent_config_put_succeeds.py
 test/test_api_agents_order.py
 test/test_api_file_diff.py
@@ -410,7 +406,6 @@ test/test_appearance_packs_store.py
 test/test_appearance_packs_transfer.py
 test/test_approval_and_update_task.py
 test/test_approval_threading.py
-test/test_apps_backend_coverage.py
 test/test_apps_instances_loop_offload.py
 test/test_apps_registry.py
 test/test_apps_registry_coverage.py

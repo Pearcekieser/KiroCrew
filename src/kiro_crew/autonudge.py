@@ -39,7 +39,7 @@ from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Iterator
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator
 
 from kiro_crew import irq, platform_compat, probes, shutdown_event
 from kiro_crew.atomic_write import replace_with_retry
@@ -65,17 +65,16 @@ from kiro_crew.monitoring.models import (
     MonitorDispatchResult,
     MonitorObservationStatus,
     MonitorOutcome,
+    MonitorProbeResult,
     MonitorState,
     MonitorVerdict,
     monitor_state_from_dict,
     monitor_state_to_dict,
     quarantine_monitor_state,
 )
+from kiro_crew.monitoring.registry import REVIEW_READY, kind_supports_objective
 from kiro_crew.probes import targets
 from kiro_crew.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
-
-if TYPE_CHECKING:
-    from kiro_crew.monitoring.github_pull_request import GitHubPullRequestProbeResult
 
 logger = logging.getLogger(__name__)
 
@@ -714,7 +713,7 @@ def infer_monitor(message: str, now: float) -> MonitorState | None:
         return MonitorState(
             kind=target.kind,
             target=target.subject,
-            objective="review_ready",
+            objective=REVIEW_READY,
             created_ts=now,
         )
     except ValueError:
@@ -858,10 +857,11 @@ class AutoNudgeService:
                         loop.monitor = monitor_state_from_dict(monitor_raw)
                     except (TypeError, ValueError):
                         monitor_quarantined = True
+                        quarantine_needs_rewrite = loop.active or loop.next_due_ts != 0.0
                         loop.monitor = quarantine_monitor_state(monitor_raw)
                         loop.active = False
                         loop.next_due_ts = 0.0
-                        self._store_dirty = True
+                        self._store_dirty = self._store_dirty or quarantine_needs_rewrite
                         logger.warning(
                             "AutoNudge: quarantined malformed monitor record for loop %s",
                             loop.id,
@@ -1477,13 +1477,19 @@ class AutoNudgeService:
                         raise MonitorUpdateConflict(
                             "the session's stopped automation is retained as evidence "
                             "and is not replaceable by a re-arm; its owner must clear "
-                            "it first"
+                            "it first from the dashboard's goal popover"
                         )
                     if existing_monitor is not None and existing_monitor.wake_in_flight:
                         raise MonitorUpdateConflict(
                             "existing monitor cannot be replaced while a wake is in flight"
                         )
                 due = created + cadence
+                # Refused HERE rather than discovered later. This is the one place a
+                # caller-supplied kind reaches persistence, and a monitor stored under
+                # a kind nothing registered would be probed by whatever provider the
+                # controller happens to hold.
+                if not kind_supports_objective(kind, objective):
+                    raise ValueError(f"no monitored kind {kind!r} supports objective {objective!r}")
                 monitor = MonitorState(
                     kind=kind,
                     target=target,
@@ -1648,7 +1654,8 @@ class AutoNudgeService:
                     raise MonitorUpdateConflict(
                         "the session's stopped automation is retained as evidence "
                         f"(stop reason: {existing.stopped_reason or 'manual'!s}) and is "
-                        "not replaceable by a re-arm; its owner must clear it first"
+                        "not replaceable by a re-arm; its owner must clear it first "
+                        "from the dashboard's goal popover"
                     )
                 if existing_monitor is not None and existing_monitor.wake_in_flight:
                     raise MonitorUpdateConflict(
@@ -2195,7 +2202,7 @@ class AutoNudgeService:
 
         Every removal path (explicit remove, session close, replacement by a
         new arm) funnels through ``remove_sync``, so this is the one place the
-        trust record is told a loop no longer exists -- and the ONLY path that
+        trust record is told a loop has left the store -- and the ONLY path that
         drops an entry, since ``record_self_arm`` is a pure upsert. Otherwise a
         removed id would keep its authorization indefinitely, and a forged
         store entry reusing that id on the same slot would inherit it.
@@ -2241,11 +2248,59 @@ class AutoNudgeService:
                 await self._remove_unserialized(loop.id)
             return loop
 
-    async def _remove_unserialized(self, loop_id: str) -> None:
+    async def clear_terminal_monitor(self, monitor_id: str) -> bool:
+        """Remove a structured monitor row ONLY while it is still terminal.
+
+        The owner-facing clear (``authorize_and_clear_monitor``) checks the
+        record's state, then audits — and the audit hands off to a thread, which
+        yields the event loop. In that window a concurrent
+        ``restore_monitor_after_failed_session_close`` can put the SAME row back
+        into service, so an unconditional removal afterwards would delete a live
+        watch with no record it existed: exactly the harm the live-monitor
+        refusal exists to prevent, reached from the other side.
+
+        So the decision is re-taken here, under the one lock hold that also
+        performs the removal. Returns ``False`` when the row moved on (restored,
+        already gone, or a wake accepted since), and removes nothing.
+        """
+
+        def _still_terminal(loop: NudgeLoop) -> bool:
+            state = loop.monitor
+            if state is None or state.outcome is None:
+                return False
+            if state.version != MONITOR_STATE_VERSION:
+                return False
+            return not state.wake_in_flight
+
+        lock = await self._acquire_mutation_lock(monitor_id)
+        if lock is None:
+            return False
+        try:
+            return await self._remove_unserialized(monitor_id, precondition=_still_terminal)
+        finally:
+            lock.release()
+
+    async def _remove_unserialized(
+        self,
+        loop_id: str,
+        *,
+        precondition: Callable[[NudgeLoop], bool] | None = None,
+    ) -> bool:
+        """Remove one loop. Returns whether the removal happened.
+
+        ``precondition`` is evaluated on the LIVE row inside the same ``_lock``
+        hold that removes it, so a caller whose decision was taken before an
+        await can re-take it atomically here instead of racing whatever landed
+        in between. A refused precondition changes nothing.
+        """
         async with self._lock:
             existed = loop_id in self._loops
             if not existed and loop_id not in self._pending_removals:
-                return
+                return False
+            if precondition is not None:
+                current = self._loops.get(loop_id)
+                if current is None or not precondition(current):
+                    return False
             # Remove in-memory but SKIP the blocking save: _save() -> _write_state
             # fsyncs, and a wedged disk must not freeze the event loop. Snapshot
             # under THIS lock hold (serialization vs the post-fire write). Keep
@@ -2306,6 +2361,7 @@ class AutoNudgeService:
                     # entry may go too (see remove_sync for why not earlier).
                     self._revoke_self_arm_for(removed_loop)
                     self._emit("removed", removed_loop)
+                return True
 
     def get_by_id(self, loop_id: str) -> NudgeLoop | None:
         """The loop with this id, or ``None``.
@@ -2374,7 +2430,7 @@ class AutoNudgeService:
     async def apply_monitor_probe(
         self,
         monitor_id: str,
-        result: GitHubPullRequestProbeResult,
+        result: MonitorProbeResult,
         *,
         now: float,
         config_generation: int,
@@ -2405,6 +2461,8 @@ class AutoNudgeService:
                 staged_state.last_probe_at = now
                 staged_state.last_decision = decision
                 observation = result.observation
+                staged_state.last_observation_status = observation.status
+                staged_state.last_observation_reason_code = observation.reason_code
                 provider_error = (
                     observation.provider_error or observation.supplemental_provider_error
                 )
@@ -2595,6 +2653,16 @@ class AutoNudgeService:
             if target is not None:
                 staged_state.target = target
             if objective is not None:
+                # The objective allowlist upstream is a union across every publicly
+                # armable kind, so it is a first filter and never the whole check.
+                # This is the boundary that knows BOTH halves -- the monitor's kind is
+                # already fixed -- so the pairing is refused here rather than
+                # discovered at probe time.
+                if not kind_supports_objective(staged_state.kind, objective):
+                    raise ValueError(
+                        f"monitored kind {staged_state.kind!r} does not support "
+                        f"objective {objective!r}"
+                    )
                 staged_state.objective = objective
             if cadence_secs is not None:
                 cadence = max(_MIN_IDLE_SECS, min(_MAX_IDLE_SECS, int(cadence_secs)))
@@ -2624,6 +2692,8 @@ class AutoNudgeService:
             if reset_baseline:
                 staged_state.config_generation += 1
                 staged_state.last_observation = {}
+                staged_state.last_observation_status = None
+                staged_state.last_observation_reason_code = ""
                 staged_state.last_fingerprint = ""
                 staged_state.last_observed_at = 0.0
                 staged_state.last_decision = None

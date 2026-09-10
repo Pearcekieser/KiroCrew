@@ -8,11 +8,15 @@ they can be persisted and evaluated without starting an agent turn.
 from __future__ import annotations
 
 import json
+import logging
 import math
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 MONITOR_STATE_VERSION = 1
 DEFAULT_MONITOR_RUNTIME_SECS = 14_400
@@ -47,6 +51,31 @@ MONITOR_STOP_UNSUPPORTED_VERSION = "unsupported_monitor_version"
 MONITOR_STOP_USER = "user_stop"
 MONITOR_STOP_SESSION_UNAVAILABLE = "session_unavailable"
 MONITOR_STOP_SESSION_CLOSE = "session_close"
+PULL_REQUEST_MONITOR_KINDS = frozenset({"github_pull_request"})
+_GITHUB_OBSERVATION_FIELDS = (
+    "blocking_review",
+    "checks",
+    "draft",
+    "head_revision",
+    "kind",
+    "mergeability",
+    "review_decision",
+    "review_threads_complete",
+    "state",
+    "target",
+    "unresolved_review_threads",
+)
+_GITHUB_CHECK_FIELDS = ("failed", "passed", "pending", "unknown")
+_GITHUB_BLOCKING_REVIEWS = {"unknown", "changes_requested", "unresolved_threads", "none"}
+_GITHUB_MERGEABILITY = {"conflicting", "behind", "blocked", "pending", "mergeable"}
+_GITHUB_REVIEW_DECISIONS = {
+    "none",
+    "approved",
+    "changes_requested",
+    "review_required",
+    "unknown",
+}
+_GITHUB_PULL_REQUEST_STATES = {"open", "closed", "merged", "unknown"}
 MONITOR_PUBLIC_FIELDS = (
     "version",
     "config_generation",
@@ -58,6 +87,8 @@ MONITOR_PUBLIC_FIELDS = (
     "cadence_secs",
     "wake_instructions",
     "last_observation",
+    "last_observation_status",
+    "last_observation_reason_code",
     "last_fingerprint",
     "last_observed_at",
     "last_wake_fingerprint",
@@ -161,6 +192,50 @@ class MonitorDispatchResult(str, Enum):
     DISPATCHED = "dispatched"
     BUSY = "busy"
     UNAVAILABLE = "unavailable"
+
+
+def monitor_frontend_contract() -> dict[str, object]:
+    """Return the checked data contract consumed by the dashboard bundle."""
+    return {
+        "monitorStateVersion": MONITOR_STATE_VERSION,
+        "limits": {
+            "cadenceSecs": {
+                "minimum": MIN_MONITOR_CADENCE_SECS,
+                "maximum": MAX_MONITOR_CADENCE_SECS,
+                "defaultValue": DEFAULT_MONITOR_CADENCE_SECS,
+            },
+            "maxRuntimeSecs": {
+                "minimum": 1,
+                "maximum": MAX_MONITOR_RUNTIME_SECS,
+                "defaultValue": DEFAULT_MONITOR_RUNTIME_SECS,
+            },
+            "maxAgentTurns": {
+                "minimum": 1,
+                "maximum": MAX_MONITOR_AGENT_TURNS,
+                "defaultValue": DEFAULT_MONITOR_AGENT_TURNS,
+            },
+            "maxTokens": {
+                "minimum": 1,
+                "maximum": MAX_MONITOR_TOKENS,
+                "defaultValue": DEFAULT_MONITOR_TOKENS,
+            },
+            "maxProviderErrors": {
+                "minimum": 1,
+                "maximum": MAX_MONITOR_PROVIDER_ERRORS,
+                "defaultValue": DEFAULT_MONITOR_PROVIDER_ERRORS,
+            },
+            "wakeInstructions": {"maximumLength": MAX_MONITOR_WAKE_INSTRUCTIONS_CHARS},
+        },
+        "pullRequestMonitorKinds": sorted(PULL_REQUEST_MONITOR_KINDS),
+        "enums": {
+            "wakeDelivery": [item.value for item in MonitorDispatchResult],
+            "lastCompletionDisposition": [item.value for item in MonitorActionDisposition],
+            "lastDecision": [item.value for item in MonitorDecision],
+            "lastProviderError": [item.value for item in ProviderErrorKind],
+            "lastObservationStatus": [item.value for item in MonitorObservationStatus],
+            "outcome": [item.value for item in MonitorOutcome],
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -305,6 +380,104 @@ class MonitorVerdict:
                 raise ValueError("every verdict entry must be a MonitorObservation")
 
 
+@dataclass(frozen=True)
+class MonitorProbeResult:
+    """What one probe learned about ONE subject, in terms the engine can read.
+
+    Names no host. ``canonical`` holds that subject's durable facts -- shaped by
+    the kind that produced them and opaque to the decision engine, which only
+    ever persists and compares it -- and ``observation`` is the generic
+    classification the engine acts on.
+
+    This is a RECORD rather than a bare list of per-check rows on purpose. A host
+    that publishes its own overall verdict, distinct from the rows a probe
+    enumerates, needs somewhere to put it, and a defaulted field added to a
+    record reaches every caller without changing this type's shape or any
+    signature that names it. A protocol returning a bare sequence would have to
+    change its return type instead, which is the cost this shape avoids.
+    """
+
+    canonical: dict[str, object]
+    observation: MonitorObservation
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.observation, MonitorObservation):
+            raise ValueError("observation must be a MonitorObservation")
+        if not isinstance(self.canonical, dict):
+            raise ValueError("canonical must be a dict")
+
+
+class MonitorProbe(Protocol):
+    """The external probe boundary, shared by every path that observes a subject.
+
+    PLURAL by contract even where an implementation loops internally: it takes a
+    sequence of subjects and returns one result per subject. A monitored kind
+    whose host answers for many subjects in one call -- most review and CI hosts
+    do -- can then satisfy this without the signature changing, and a caller that
+    wants one subject passes a one-element sequence.
+
+    The returned mapping is keyed by the subject string AS PASSED IN, not by any
+    identity the host derives from it. A caller can only look up what it asked
+    for, and a host is free to normalize a subject for its own use without that
+    reshaping the mapping its caller has to read.
+
+    Nothing in this signature names a host. That is what lets a second kind
+    satisfy the same boundary.
+    """
+
+    def probe(
+        self,
+        subjects: Sequence[str],
+        *,
+        previous_observations: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> Mapping[str, MonitorProbeResult]: ...
+
+
+def transient_probe_failure() -> MonitorProbeResult:
+    """The result a probe that could not answer usably is treated as returning."""
+    return MonitorProbeResult(
+        canonical={},
+        observation=MonitorObservation(
+            "",
+            MonitorObservationStatus.PROVIDER_ERROR,
+            provider_error=ProviderErrorKind.TRANSIENT,
+            reason_code="provider_transient",
+        ),
+    )
+
+
+def resolve_probe_result(results: object, subject: str) -> MonitorProbeResult:
+    """Take one subject's result out of a probe's mapping, or fail closed.
+
+    A plural boundary lets a provider answer for a SUBSET of what it was asked,
+    and lets it answer with the wrong shape. Neither is a verdict: an absent
+    subject leaves no observation to decide from, and the decision engine reads
+    attributes off whatever it is handed, so an untyped value would fail deep
+    inside it rather than at the boundary.
+
+    EVERY consumer of the boundary resolves through here, so the paths cannot
+    disagree about what an unusable answer means -- a guard in one consumer and a
+    bare ``KeyError`` in the other is the same hazard handled two ways.
+
+    The unusable case is logged HERE, not by the caller. A synthesized fallback and
+    a provider's own correctly-classified transient both carry ``PROVIDER_ERROR``
+    and both carry ``provider_transient``, so a caller testing the status cannot
+    tell them apart and would report an ordinary rate limit as "no usable result".
+    This function is the only place that knows which branch it took.
+    """
+    if not isinstance(results, Mapping):
+        logger.error(
+            "structured monitor probe answered with %s, not a mapping",
+            type(results).__name__,
+        )
+        return transient_probe_failure()
+    result = results.get(subject)
+    if not isinstance(result, MonitorProbeResult):
+        logger.error("structured monitor probe gave no usable result for %r", subject)
+        return transient_probe_failure()
+    return result
+
+
 @dataclass
 class MonitorState:
     """Restart-durable state for one structured monitor."""
@@ -319,6 +492,8 @@ class MonitorState:
     cadence_secs: int = DEFAULT_MONITOR_CADENCE_SECS
     wake_instructions: str = ""
     last_observation: dict[str, object] = field(default_factory=dict)
+    last_observation_status: MonitorObservationStatus | None = None
+    last_observation_reason_code: str = ""
     last_fingerprint: str = ""
     last_observed_at: float = 0.0
     last_wake_fingerprint: str = ""
@@ -500,9 +675,14 @@ class MonitorState:
                 self.last_wake_fingerprint,
                 self.last_completion_fingerprint,
                 self.last_wake_reason_code,
+                self.last_observation_reason_code,
             )
         ):
-            raise ValueError("monitor fingerprints must be strings")
+            raise ValueError("monitor observation metadata must be strings")
+        if self.last_observation_status is not None and not isinstance(
+            self.last_observation_status, MonitorObservationStatus
+        ):
+            raise ValueError("last_observation_status must be a MonitorObservationStatus")
         if not isinstance(self.wake_in_flight, bool):
             raise ValueError("wake_in_flight must be a boolean")
         if self.wake_delivery is not None and not isinstance(
@@ -598,6 +778,9 @@ def monitor_state_from_dict(raw: object) -> MonitorState:
     provider_error = values.get("last_provider_error")
     if provider_error is not None:
         values["last_provider_error"] = ProviderErrorKind(provider_error)
+    observation_status = values.get("last_observation_status")
+    if observation_status is not None:
+        values["last_observation_status"] = MonitorObservationStatus(observation_status)
     return MonitorState(**values)
 
 
@@ -615,6 +798,16 @@ def quarantine_monitor_state(raw: object) -> MonitorState:
     if is_finite_non_negative_number(raw_created_ts):
         assert isinstance(raw_created_ts, (int, float)) and not isinstance(raw_created_ts, bool)
         created_ts = raw_created_ts
+    raw_payload_candidate: dict[str, object] = deepcopy(raw)
+    try:
+        _validate_strict_json_object("_raw_payload", raw_payload_candidate)
+    except ValueError:
+        # Python's permissive JSON decoder accepts non-finite numbers that the
+        # persisted monitor contract forbids. Keep the outer loop and its inert
+        # quarantine view even though that invalid payload cannot be rewritten.
+        raw_payload = None
+    else:
+        raw_payload = raw_payload_candidate
     return MonitorState(
         kind=_identity("kind"),
         target=_identity("target"),
@@ -622,6 +815,7 @@ def quarantine_monitor_state(raw: object) -> MonitorState:
         created_ts=created_ts,
         outcome=MonitorOutcome.BLOCKED,
         stopped_reason=MONITOR_STOP_INVALID_RECORD,
+        _raw_payload=raw_payload,
     )
 
 
@@ -638,8 +832,55 @@ def monitor_state_to_dict(state: MonitorState) -> dict[str, object]:
     return payload
 
 
+def _public_github_observation(raw: dict[str, object]) -> dict[str, object]:
+    """Project only the bounded canonical schema across the public boundary."""
+    if not raw:
+        return {}
+    checks = raw.get("checks")
+    if not isinstance(checks, dict):
+        return {}
+    for field_name in _GITHUB_OBSERVATION_FIELDS:
+        if field_name not in raw:
+            return {}
+    for field_name in _GITHUB_CHECK_FIELDS:
+        values = checks.get(field_name)
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value for value in values
+        ):
+            return {}
+    unresolved = raw.get("unresolved_review_threads")
+    blocking_review = raw.get("blocking_review")
+    mergeability = raw.get("mergeability")
+    review_decision = raw.get("review_decision")
+    pull_request_state = raw.get("state")
+    if (
+        raw.get("kind") != "github_pull_request"
+        or not isinstance(raw.get("target"), str)
+        or not raw.get("target")
+        or not isinstance(raw.get("head_revision"), str)
+        or not isinstance(raw.get("draft"), bool)
+        or not isinstance(raw.get("review_threads_complete"), bool)
+        or isinstance(unresolved, bool)
+        or not isinstance(unresolved, int)
+        or unresolved < 0
+        or not isinstance(blocking_review, str)
+        or blocking_review not in _GITHUB_BLOCKING_REVIEWS
+        or not isinstance(mergeability, str)
+        or mergeability not in _GITHUB_MERGEABILITY
+        or not isinstance(review_decision, str)
+        or review_decision not in _GITHUB_REVIEW_DECISIONS
+        or not isinstance(pull_request_state, str)
+        or pull_request_state not in _GITHUB_PULL_REQUEST_STATES
+    ):
+        return {}
+    public = {key: deepcopy(raw[key]) for key in _GITHUB_OBSERVATION_FIELDS}
+    public["checks"] = {key: deepcopy(checks[key]) for key in _GITHUB_CHECK_FIELDS}
+    return public
+
+
 def monitor_state_public_dict(state: MonitorState) -> dict[str, object]:
     """Return the stable inspect/dashboard fields without persistence internals."""
     payload = {key: deepcopy(getattr(state, key)) for key in MONITOR_PUBLIC_FIELDS}
     payload["budgets"] = asdict(state.budgets)
+    payload["last_observation"] = _public_github_observation(state.last_observation)
     return payload

@@ -46,7 +46,7 @@ export const SKILLS_TIMEOUT_MS = 15_000
 export const SLASH_COMMANDS_TIMEOUT_MS = 15_000
 import { installApiTransport } from './apiTransport'
 import type { SessionSummary } from '../types/sessionSummary'
-import { queryClient } from './queryClient'
+import { queryClient, resolveDefaultMemoryMode } from './queryClient'
 import { getStoredConsent } from '../utils/themeConsent'
 import { recordError, parseErrorCode, requestPath } from '../utils/errorReport'
 import { i18nT } from '../i18n/t'
@@ -128,6 +128,21 @@ export interface WorkflowDefinitionWrite {
   slug?: string
   derived_from?: WorkflowLineage | null
 }
+
+export type MonitorWrite = {
+  slot_key?: string
+  kind?: 'github_pull_request'
+  objective?: 'review_ready'
+  target?: string
+  cadence_secs?: number
+  max_runtime_secs?: number
+  max_agent_turns?: number
+  max_tokens?: number
+  max_provider_errors?: number
+  wake_instructions?: string
+}
+
+export type MonitorResponse = { ok: true; monitor: unknown }
 /** The gateway's advisory reading of whether a server's backend can be shared.
  *
  *  `strength` is the evidence tier, weakest first: `unknown`, `no_objection`,
@@ -1197,6 +1212,22 @@ export interface AcpBackendProbe {
    * that is guaranteed to error.
    */
   restart_required: boolean
+  /**
+   * How this harness gets its credential, and what to tell an operator who has
+   * not given it one. OPTIONAL because a gateway that predates this field sends
+   * no `auth` at all, and the panel already treats absent probe information as
+   * "say nothing, gate nothing".
+   *
+   * `sign_in_remedy` is a complete sentence rendered VERBATIM: the server owns
+   * the wording, so it carries no placeholder to interpolate and is not
+   * translated here. `signs_in_separately` is what decides whether the sentence
+   * is shown at all -- a harness authenticating through Crew's own identity
+   * store has no separate sign-in to finish.
+   */
+  auth?: {
+    sign_in_remedy: string
+    signs_in_separately: boolean
+  }
 }
 
 let _sessionExpiredShown = false
@@ -1511,6 +1542,27 @@ const apiFailure = (r: Response, errText: string): ApiError => {
   return new ApiError(r.status, message, errText, authRequired || staleOwnerSession)
 }
 
+/**
+ * The auth-recovery half of `j` for a response that is handed back RAW instead
+ * of parsed (the chat-core transport's wire): the pre-body 403 `X-Auth-Required`
+ * hook, and the body-borne stale-owner code a 401 carries -- read off a CLONE so
+ * the caller's own `json()` still works. Fire-and-forget: the recovery prompts
+ * are idempotent and the receipt read must not wait on them. A 2xx also clears
+ * a stale session-expired banner, exactly as `j` does -- a send that succeeds
+ * after auth was restored elsewhere must not leave the banner up.
+ */
+function sendResponseAuthRecovery(r: Response): Response {
+  checkSessionExpired(r)
+  if (r.ok) removeAuthBanner()
+  if (r.status === 401) {
+    // Best-effort: a wire may hand back a Response-like without `clone`.
+    try {
+      void r.clone().text().then((body) => noteStaleOwnerResponse(r.status, body)).catch(() => {})
+    } catch { /* not a real Response; nothing to read */ }
+  }
+  return r
+}
+
 const j = async (r: Response) => {
   checkSessionExpired(r)
   if (r.ok) removeAuthBanner()
@@ -1730,6 +1782,23 @@ export interface CloudPreflight {
   session_manager_plugin_command?: string
 }
 
+/** One remote-instance provisioner the gateway offers, from
+ *  `GET /api/cloud/provisioners`.
+ *
+ *  `id` is what `POST /api/cloud/launch` names in `provider_id`; `kind` names the
+ *  FRONTEND form that collects its inputs (see
+ *  `components/remoteProvisionerRenderers.tsx`), so several rows may share one
+ *  kind. `label` and `steps[].label` are server-authored and rendered verbatim,
+ *  not translated. `posix_only` is informational: the server refuses a launch on
+ *  a Windows gateway itself, with 400 `posix_host_required`. */
+export interface RemoteProvisioner {
+  id: string
+  kind: string
+  label: string
+  posix_only: boolean
+  steps: { key: string; label: string }[]
+}
+
 export type LaunchJobStatus =
   | 'pending' | 'running' | 'awaiting_signin' | 'done' | 'failed' | 'cancelled'
 export type LaunchStepState = 'pending' | 'active' | 'done' | 'failed' | 'skipped'
@@ -1752,6 +1821,9 @@ export interface CloudLaunchSignin {
 
 export interface LaunchJob {
   id: string
+  /** Which provisioner ran this job. A job persisted before the provisioner seam
+   *  existed loads as "aws_ec2", so this is always present. */
+  provider_id: string
   profile: string
   region: string
   size_key: string
@@ -2214,6 +2286,32 @@ export interface FeatureVideoNext {
   enabled: boolean
 }
 
+/**
+ * The saved filename a `Content-Disposition` asks for, or `fallback`.
+ *
+ * Prefers the RFC 5987 `filename*=UTF-8''<percent-encoded>` form, because that is
+ * what the dashboard's own download handlers emit so a non-Latin name survives an
+ * ASCII header. The bare `filename=` form is still read for anything that sends
+ * it. Exported so the precedence can be unit-tested without a DOM.
+ *
+ * A malformed percent sequence falls through to the next candidate rather than
+ * throwing: `decodeURIComponent` raises on bad input, and a broken header must not
+ * take the download with it.
+ */
+export function filenameFromDisposition(disposition: string, fallback: string): string {
+  const star = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(disposition)
+  if (star) {
+    try {
+      const decoded = decodeURIComponent(star[1].trim())
+      if (decoded) return decoded
+    } catch {
+      // fall through to the bare form
+    }
+  }
+  const plain = /filename="?([^";]+)"?/.exec(disposition)
+  return (plain && plain[1].trim()) || fallback
+}
+
 export const api = {
   status: () => fetch('/api/status').then(j),
   tunnelStatus: () => fetch('/api/tunnel/status').then(j) as Promise<TunnelStatus>,
@@ -2470,6 +2568,41 @@ export const api = {
     }>,
   // Copies a session to another instance. The local session is left untouched:
   // the peer allocates its own key, so this is a copy and never a move.
+  /** Download one session as a single gzipped file.
+   *
+   *  Fetches rather than navigating, so a refusal (an incognito session, an
+   *  empty one) raises here and the menu row can report it, instead of replacing
+   *  the dashboard with a raw JSON error body. The saved filename comes from the
+   *  endpoint's own Content-Disposition, whose slug is built from the REDACTED
+   *  title — the frontend must not reconstruct a name from `slot.title`, which
+   *  is the unredacted copy. */
+  exportSession: async (slot: string) => {
+    const r = await get('/api/chat/slots/' + encodeURIComponent(slot) + '/export')
+    if (!r.ok) {
+      let message = `HTTP ${r.status}`
+      try {
+        const body = await r.json()
+        if (body?.error) message = body.error
+      } catch {
+        // A non-JSON error body is not worth a second failure mode; the status
+        // line above is still a usable message.
+      }
+      throw new ApiError(r.status, message)
+    }
+    const blob = await r.blob()
+    const filename = filenameFromDisposition(
+      r.headers.get('Content-Disposition') || '',
+      `${slot}.kcsession.json.gz`,
+    )
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  },
   sendSessionToInstance: (id: string, slot: string) =>
     post('/api/instances/' + encodeURIComponent(id) + '/send-session', { slot }).then(j) as Promise<{
       ok: boolean
@@ -2493,8 +2626,16 @@ export const api = {
     return get('/api/cloud/preflight' + (s ? '?' + s : '')).then(j) as Promise<CloudPreflight>
   },
   cloudIamPolicy: () => get('/api/cloud/iam-policy').then(j) as Promise<{ policy: string }>,
+  // Which provisioners this gateway offers. Answers on every platform (a Windows
+  // host still lists the POSIX-only built-in, and refuses the launch itself), so
+  // the setup tab can pick a form before it knows whether a launch would be
+  // allowed.
+  cloudProvisioners: () =>
+    get('/api/cloud/provisioners').then(j) as Promise<{ provisioners: RemoteProvisioner[] }>,
   cloudLaunches: () => get('/api/cloud/launch').then(j) as Promise<{ jobs: LaunchJob[] }>,
-  cloudLaunch: (body: { profile: string; region: string; size_key: string }) =>
+  // `provider_id` is optional on the wire: the server defaults it to "aws_ec2"
+  // and answers 400 `unknown_provisioner` for an id it does not offer.
+  cloudLaunch: (body: { provider_id?: string; profile: string; region: string; size_key: string }) =>
     post('/api/cloud/launch', body).then(j) as Promise<LaunchJob>,
   cloudLaunchStatus: (id: string) =>
     get('/api/cloud/launch/' + encodeURIComponent(id)).then(j) as Promise<LaunchJob>,
@@ -2631,6 +2772,34 @@ export const api = {
   /** Stage a crew's picture on the server (a `.pending` file only — the
    *  config PUT with `avatar: {kind:'image'}` is what promotes it live,
    *  keeping the editor's Apply→Save two-step a real commit point). */
+  /**
+   * The crew appearance library — the packs a crew can wear.
+   *
+   * Owner-gated, same-origin cookie auth. There is deliberately no `detail`
+   * wrapper: that route inlines every file in the pack, so drawing a grid of
+   * thumbnails through it would load N whole packs to show N frames. The picker
+   * reads the per-slot route through an `<img>` instead (`packSlotUrl`), and
+   * `detail` lands here with its first real caller.
+   */
+  appearances: {
+    list: () => fetch('/api/appearances').then(j) as Promise<{ packs?: unknown }>,
+    /** Install an exported pack. The JSON envelope, not multipart: the bundle is
+     *  already parsed client-side to reject an obviously wrong pick, so posting
+     *  it back as a file would only re-serialize what we hold. */
+    importBundle: (bundle: unknown) =>
+      post('/api/appearances/import', { bundle }).then(j) as Promise<{
+        ok?: boolean
+        id?: string
+        error?: string
+      }>,
+    /** Delete a custom pack. Rejects 409 while a crew wears it, and the rejection
+     *  body names those crews — `force` is deliberately NOT exposed. */
+    remove: (id: string) =>
+      del('/api/appearances/' + encodeURIComponent(id)).then(j) as Promise<{
+        ok?: boolean
+        id?: string
+      }>,
+  },
   uploadCrewAvatar: (name: string, file: Blob) => {
     const form = new FormData()
     form.append('file', file, 'avatar.png')
@@ -3087,6 +3256,28 @@ export const api = {
    *  callers need no flag check. */
   autonudgeList: (): Promise<AutoNudgeListResponse> =>
     fetch('/api/autonudge').then(j),
+  autonudgeForSlot: (slot: string): Promise<{ enabled: boolean; loop: unknown | null }> =>
+    fetch('/api/autonudge/slot/' + encodeURIComponent(slot)).then(j),
+  /** Structured monitor records include terminal outcomes for inspection. */
+  monitorsList: (): Promise<{ enabled: boolean; monitors: unknown[] }> =>
+    fetch('/api/monitors').then(j),
+  monitorForSlot: (slot: string): Promise<{ enabled: boolean; monitor: unknown | null }> =>
+    fetch('/api/monitors/slot/' + encodeURIComponent(slot)).then(j),
+  monitorCreate: (body: Required<MonitorWrite>): Promise<MonitorResponse> =>
+    post('/api/monitors', body).then(j) as Promise<MonitorResponse>,
+  monitorUpdate: (id: string, body: MonitorWrite): Promise<MonitorResponse> =>
+    patch('/api/monitors/' + encodeURIComponent(id), body).then(j) as Promise<MonitorResponse>,
+  monitorStop: (id: string): Promise<MonitorResponse> =>
+    post('/api/monitors/' + encodeURIComponent(id) + '/stop').then(j) as Promise<MonitorResponse>,
+  /** Remove an already-STOPPED monitor's record. `monitorStop` retains its
+   *  outcome for inspection, and a retained stop refuses a re-arm, so this is
+   *  the only way the session's slot is freed to watch a different subject --
+   *  `monitorRestart` revives the same one. Irreversible; the response carries
+   *  `monitor: null`, which is how every read here spells "nothing armed". */
+  monitorClear: (id: string): Promise<MonitorResponse> =>
+    post('/api/monitors/' + encodeURIComponent(id) + '/clear').then(j) as Promise<MonitorResponse>,
+  monitorRestart: (id: string): Promise<MonitorResponse> =>
+    post('/api/monitors/' + encodeURIComponent(id) + '/restart').then(j) as Promise<MonitorResponse>,
   /** Every pull request / issue link a session carries — the unbudgeted read
    *  behind the sidebar's expandable "+N" overflow chip. The slots payload caps
    *  chips per kind, so the links behind that chip are not on the client until
@@ -3104,7 +3295,23 @@ export const api = {
    *  over there. The backend opens the peer's slot first, so a peer that is
    *  disconnected or on a different version fails the create rather than yielding
    *  a session that cannot send. */
-  createChatSlot: (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, clean_mode?: boolean, artifact?: string, folder_id?: string, instance_id?: string) => post('/api/chat/slots', { ...(name ? { name } : {}), ...(agent ? { agent } : {}), ...(model ? { model } : {}), ...(mode ? { mode } : {}), ...(memory_mode ? { memory_mode } : {}), ...(title ? { title } : {}), ...(clean_mode !== undefined ? { clean_mode } : {}), ...(artifact ? { artifact } : {}), ...(folder_id ? { folder_id } : {}), ...(instance_id ? { instance_id } : {}) }).then(j) as Promise<ChatSlot>,
+  createChatSlot: async (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, clean_mode?: boolean, artifact?: string, folder_id?: string, instance_id?: string) => {
+    const resolvedMemoryMode = memory_mode ?? await resolveDefaultMemoryMode(
+      () => fetch('/api/dashboard/config').then(j),
+    )
+    return post('/api/chat/slots', {
+      ...(name ? { name } : {}),
+      ...(agent ? { agent } : {}),
+      ...(model ? { model } : {}),
+      ...(mode ? { mode } : {}),
+      memory_mode: resolvedMemoryMode,
+      ...(title ? { title } : {}),
+      ...(clean_mode !== undefined ? { clean_mode } : {}),
+      ...(artifact ? { artifact } : {}),
+      ...(folder_id ? { folder_id } : {}),
+      ...(instance_id ? { instance_id } : {}),
+    }).then(j) as Promise<ChatSlot>
+  },
   /** Inject silent background context into a slot — consumed on the next user
    * message. Used by the artifact companion chat to name the bound artifact so
    * the user's first message needs no slug boilerplate. */
@@ -3202,26 +3409,24 @@ export const api = {
     // whenever Browser Mode is enabled in Settings (a durable capability),
     // gated there rather than per turn.
     //
-    // `steer` carries the user's "act on this now" intent into a send that
-    // starts its OWN turn. The slot is idle, so there is no running turn to
-    // inject into; the flag's only effect server-side is to skip the hold that
-    // parks a user message behind still-running sub-agents. Sent through this
-    // endpoint rather than steerChat because a new turn needs `ws=1` to stream.
+    // `steer` carries the user's "act on this now" intent. Mid-turn it injects
+    // into the RUNNING turn instead of queueing (the backend falls back to the
+    // queue if steer is unavailable, so the text is never dropped, and answers
+    // `{ok, steered}`); on an idle slot there is no running turn to inject into
+    // and the flag's only effect server-side is to skip the hold that parks a
+    // user message behind still-running sub-agents. One wire for both: this is
+    // the fetch seam under the chat-core `sendTurn`, which every steer now
+    // rides (there is no separate steer helper).
+    //
+    // The response is handed back RAW (the chat-core transport reads the
+    // receipt itself; a 4xx/5xx must resolve, not throw like `j`), but it still
+    // runs the same auth recovery every `j`-parsed call has -- see
+    // `sendResponseAuthRecovery` -- instead of surfacing an expired or
+    // stale-owner session as a bare "refused" send. The steer helper this
+    // replaced went through `j` and had both; the transport must not lose them.
     const themeConsent = themeConsentSha(colorTheme)
-    return fetch('/api/chat?ws=1', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, ...(colorTheme ? { color_theme: colorTheme } : {}), ...(themeConsent ? { theme_consent_sha: themeConsent } : {}), ...(meta ? { meta } : {}), ...(steer ? { steer: true } : {}) }), signal })
+    return fetch('/api/chat?ws=1', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, ...(colorTheme ? { color_theme: colorTheme } : {}), ...(themeConsent ? { theme_consent_sha: themeConsent } : {}), ...(meta ? { meta } : {}), ...(steer ? { steer: true } : {}) }), signal }).then(sendResponseAuthRecovery)
   },
-  // Mid-turn steer: inject into the RUNNING turn instead of queueing. Fire-and-forget
-  // JSON response ({ok, steered}); the backend falls back to queue if steer is
-  // unavailable so the text is never dropped.
-  // `ws=1` because a steer that races `chat_done` falls through to the plain send
-  // path, whose JSON receipt is gated on it — without it that arm streams SSE.
-  // `sendId` is the client-minted correlation id stamped on the optimistic steer
-  // bubble (same convention as the plain send path). It rides in `meta`, which
-  // BOTH backend paths persist — the accepted-steer row and the new-turn row a
-  // steer that races chat_done falls onto — so the bubble is reconcilable, and
-  // its accepted-vs-new-turn ambiguity resolvable, by id identity (#6075).
-  steerChat: (message: string, slot?: string, sendId?: string) =>
-    fetch('/api/chat?ws=1', { method: 'POST', headers: { 'Content-Type': 'application/json', ..._sk }, body: JSON.stringify({ message, slot, steer: true, ...(sendId ? { meta: { sendId } } : {}) }) }).then(j),
   sessionsHealth: () => fetch('/api/sessions/health').then(j),
   // Knowledge
   knowledgeSearch: (q: string) => get(`/api/knowledge/search-for-context?q=${encodeURIComponent(q)}`).then(j),

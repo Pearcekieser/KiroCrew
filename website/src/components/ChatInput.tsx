@@ -1,6 +1,6 @@
 import { Component, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useId, memo, lazy, Suspense } from 'react'
 import { markComposerResize } from '../utils/composerResize'
-import { ArrowUpFromLine, ArrowUp, Loader2, RotateCw, Plus, Crop, Bot, Mic, Keyboard, Square, BookOpen, X, ClipboardList, CheckCircle, Ban, Sparkles, Target, Lock, Folder, FolderOpen, FileText, FileDiff, PenLine, ChevronsDownUp, ChevronsUpDown, MoreHorizontal } from 'lucide-react'
+import { ArrowUpFromLine, ArrowUp, Loader2, RotateCw, Plus, Crop, Bot, Mic, Keyboard, Square, X, ClipboardList, CheckCircle, Ban, Sparkles, Target, Lock, Folder, FolderOpen, FileText, FileDiff, PenLine, ChevronsDownUp, ChevronsUpDown, MoreHorizontal } from 'lucide-react'
 import SketchDialog from './SketchDialog'
 import AppIcon from './AppIcon'
 import CopyBranchButton from './CopyBranchButton'
@@ -30,7 +30,7 @@ import { useLanguage } from '../i18n/LanguageProvider'
 import { pickToolLabel } from '../utils/toolLabel'
 import { toApiDecision } from '../utils/approvalDecision'
 import TrustDropdown from './TrustDropdown'
-import AutoNudgePopover, { type AutoNudgeLoop } from './AutoNudgePopover'
+import type { AutomationRecord } from '../monitoring/automation'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { isTouchDevice } from '../utils/isTouchDevice'
 import { useIsTouchDevice } from '../hooks/useIsTouchDevice'
@@ -97,6 +97,8 @@ class ComposerLoadBoundary extends Component<
     return this.state.failed ? null : this.props.children
   }
 }
+
+const SessionAutomationPopover = lazy(() => import('./SessionAutomationPopover'))
 
 // Upload picker accept hints. Client-side ONLY (UX) — the server validates type
 // (magic bytes), size, and runs malware scanning per input-validation guidance.
@@ -397,6 +399,9 @@ function applyHeight(
 /** Stable empty result for suppressed spawn-approval reads — a fresh [] per render would churn every dependent memo. */
 const EMPTY_SPAWN_APPROVALS: ReturnType<typeof selectSlotPendingSpawnApprovals> = []
 
+/** Busy-composer send affordance — see `ChatInputProps.busyMode`. */
+export type ComposerBusyMode = 'split' | 'steer-only'
+
 interface ChatInputProps {
   value: string
   onChange: (v: string) => void
@@ -420,6 +425,17 @@ interface ChatInputProps {
    * composer text and pending files itself (ChatPage) and clears them
    * atomically — ChatInput must NOT clear the value around this call. */
   onSteer?: () => void
+  /** How the BUSY composer offers its send. `'split'` (default): the
+   * Steer/Queue split button with its per-slot mode picker — the main chat
+   * and split-view panes. `'steer-only'`: the surface has no queue concept —
+   * while busy the plain send button stays in place and Enter/click steers
+   * into the running turn (or starts one when only sub-agents run). A
+   * conversation with ONE named peer (a member DM thread) uses it: talking to
+   * a person has no "wait until they finish, then they'll listen" step, so
+   * offering one would present a console control inside a chat. Needs
+   * `canSteer` + `onSteer` exactly like the split button; without a steer
+   * path the busy send still falls back to the queue button. */
+  busyMode?: ComposerBusyMode
   disabled?: boolean
   placeholder?: string
   prefillHint?: boolean
@@ -632,11 +648,15 @@ interface ChatInputProps {
   cleanMode?: boolean
   /** User-sent messages for ↑/↓ history navigation (oldest → newest). */
   sentMessages?: string[]
-  /** Auto-nudge loop state for this slot (if any) */
-  onAutoNudgeClick?: (open: boolean) => void
-  autoNudgeLoop?: AutoNudgeLoop | null
-  autoNudgeOpen?: boolean
-  onAutoNudgeChange?: (loop: AutoNudgeLoop | null) => void
+  /** Authoritative automation record for this slot (if any). */
+  onAutomationClick?: (open: boolean) => void
+  automation?: AutomationRecord | null
+  automationOpen?: boolean
+  onAutomationChange?: (automation: AutomationRecord | null) => void
+  automationCreationReady?: boolean
+  automationSnapshotFailed?: boolean
+  /** Session routing mode; crew/member cannot host direct monitor turns. */
+  sessionMode?: string
   /** Send-key mode. Default 'enter'. */
   sendOnEnter?: SendMode
   /** Follow-up options from assistant message */
@@ -918,6 +938,7 @@ function ChatInput({
   onSend,
   canSteer,
   onSteer,
+  busyMode = 'split',
   disabled: disabledProp = false,
   placeholder = '',
   prefillHint,
@@ -997,10 +1018,13 @@ function ChatInput({
   memoryMode,
   cleanMode,
   sentMessages,
-  onAutoNudgeClick,
-  autoNudgeLoop,
-  autoNudgeOpen,
-  onAutoNudgeChange,
+  onAutomationClick,
+  automation,
+  automationOpen,
+  onAutomationChange,
+  automationCreationReady,
+  automationSnapshotFailed,
+  sessionMode,
   sendOnEnter = 'enter',
   followUpOptions,
   followUpPicked,
@@ -1080,6 +1104,14 @@ function ChatInput({
   // never be promoted into grant authority by a frontend fallback.
   const approvalTrustCommandGrantable = approvalMeta?.trust_command_grantable === '1'
   const approvalTrustBaseGrantable = approvalMeta?.trust_base_grantable === '1'
+  /** Server proof that the SESSION-wide grant ("trust all tools") can be
+   *  recorded for this card. Read separately from the command-scoped bit above
+   *  because the session grant names no command: it auto-approves whatever this
+   *  slot asks for next. Reusing the command bit for it hid the whole menu
+   *  whenever the transport redacted or could not canonicalize the command, so
+   *  a card that could still take a session grant offered allow-once and reject
+   *  alone. */
+  const approvalTrustAllGrantable = approvalMeta?.trust_grantable === '1'
   /** Sources that run with no human attached to THIS conversation. Session
    *  trust means "auto-approve tools for this chat session", which is
    *  incoherent for an unattended job: the job is not this session, so the
@@ -1539,8 +1571,13 @@ function ChatInput({
   // not stopping, on a steer-capable slot, and the user hasn't switched the
   // split button to Queue. Everywhere else the composer falls back to onSend
   // (normal send, or server-side queue while busy).
+  //
+  // `steer-only` has no Queue to switch to, so the persisted per-slot mode is
+  // not consulted: a slot that once picked Queue in the main chat must not
+  // silently queue from a surface that never shows that choice.
+  const steerOnly = busyMode === 'steer-only'
   const busyChoiceAvailable = isRunning && (!stopState || stopState === 'idle') && !!canSteer && !!onSteer
-  const steerActive = busyChoiceAvailable && busySendMode === 'steer'
+  const steerActive = busyChoiceAvailable && (steerOnly || busySendMode === 'steer')
   /**
    * Fire the composer. `alternate === true` performs the OTHER busy action for
    * this one send — queue when the split button says steer, steer when it says
@@ -1548,7 +1585,9 @@ function ChatInput({
    * (#4608). Strictly `=== true`: this callback is also wired straight to
    * `onClick`, which hands it a MouseEvent, and an event must read as "default",
    * never as "flip". Outside the busy split (idle, stopping, no steer path) the
-   * flag is meaningless and a normal send happens.
+   * flag is meaningless and a normal send happens. In `steer-only` there is no
+   * other action to flip to — the surface has no queue — so the gesture is a
+   * plain steer there too.
    */
   const fireComposer = useCallback((alternate?: unknown) => {
     if (disabled) return
@@ -1559,11 +1598,11 @@ function ChatInput({
     // sends the complete text. Covers both Enter (handleKeyDown) and the Send
     // button, since both route through here.
     if (voiceTranscribing) return
-    const flip = alternate === true && busyChoiceAvailable
+    const flip = alternate === true && busyChoiceAvailable && !steerOnly
     const steerNow = flip ? !steerActive : steerActive
     if (steerNow && onSteer) onSteer()
     else onSend()
-  }, [disabled, voiceTranscribing, busyChoiceAvailable, steerActive, onSteer, onSend])
+  }, [disabled, voiceTranscribing, busyChoiceAvailable, steerOnly, steerActive, onSteer, onSend])
   const sendFollowUp = useCallback((text?: string, sourceKeyAtClick?: string | null) => {
     if (!disabled) onFollowUpSend?.(text, sourceKeyAtClick)
   }, [disabled, onFollowUpSend])
@@ -1577,8 +1616,8 @@ function ChatInput({
   // content width — only this remeasure can refresh the cue. Boolean presence,
   // not the callback itself: the handler's identity may change every render
   // and would re-run the effect for nothing.
-  const hasAutoNudge = !!onAutoNudgeClick
-  useEffect(() => { remeasureControlRow() }, [hasAutoNudge, autoNudgeLoop, approvalMode, isMobile, remeasureControlRow])
+  const hasAutomation = !!onAutomationClick
+  useEffect(() => { remeasureControlRow() }, [hasAutomation, automation, approvalMode, isMobile, remeasureControlRow])
   const ime = useImeGuard()
   const resolvedPlaceholder = placeholder || i18nT('components.chatInput.message_placeholder', { bot: botName })
   // An icon swap alone announces nothing, so the empty-state placeholder carries
@@ -3629,13 +3668,21 @@ function ChatInput({
                       catalog translates the labels. */}
                   <div data-approval-actions className="flex gap-1.5 flex-wrap items-center">
                       <button disabled={approvalSubmitting} className={approvalBtnClass} onClick={() => handleApprovalAction('approved')}><CheckCircle size={12} className="shrink-0" />{i18nT('components.chatInput.allow_once')}</button>
-                      {approvalIsReadOnly && approvalTrustGrantable && <button disabled={approvalSubmitting} className={approvalBtnClass} onClick={() => handleApprovalAction('trust_reads')}><BookOpen size={12} className="shrink-0" />{i18nT('components.chatInput.trust_reads')}</button>}
-                      {approvalTrustGrantable && approvalTrustCommandGrantable && (
+                      {/* One dropdown carries every standing grant this card can
+                          record. Trust-reads is a tier inside it, not a sibling
+                          button: the row is capped at three controls
+                          (`max-two-buttons-per-row` grandfathers Allow once +
+                          Trust + Reject and forbids a fourth), and a read-only
+                          scopeless card can offer reads and session trust at
+                          once. */}
+                      {approvalTrustGrantable && (approvalTrustCommandGrantable || approvalTrustAllGrantable || approvalIsReadOnly) && (
                         <TrustDropdown
                             fullCommand={approvalFullCommand}
                             baseCommand={approvalBaseCommand}
                             isShell={approvalIsShell && approvalTrustBaseGrantable}
                             hasCommand={approvalTrustCommandGrantable}
+                            trustReadsLabelKey={approvalIsReadOnly ? 'components.chatInput.trust_reads' : undefined}
+                            showTrustAll={approvalTrustAllGrantable || approvalTrustCommandGrantable}
                             disabled={approvalSubmitting}
                             className={approvalBtnClass}
                             onAction={(action, pattern) => { handleApprovalAction(action, pattern) }}
@@ -4270,18 +4317,23 @@ function ChatInput({
             <div className="relative min-w-0 flex-1">
               <div ref={attachControlRow} data-testid="composer-control-row" className="flex items-center gap-0.5 overflow-x-auto">
 
-              {onAutoNudgeClick && (
-                <AutoNudgePopover
-                  slotKey={slotId || ''}
-                  loop={autoNudgeLoop || null}
-                  open={autoNudgeOpen || false}
-                  onOpenChange={v => onAutoNudgeClick(v)}
-                  onChange={onAutoNudgeChange || (() => {})}
-                  // Same condition as the Resume placeholder (`resumeOffered`):
-                  // whenever the composer says "press Resume", the loop chip
-                  // must not pulse as if a cycle were executing.
-                  interrupted={resumeOffered}
-                />
+              {onAutomationClick && (
+                <Suspense fallback={null}>
+                  <SessionAutomationPopover
+                    slotKey={slotId || ''}
+                    automation={automation || null}
+                    open={automationOpen || false}
+                    onOpenChange={v => onAutomationClick(v)}
+                    onChange={onAutomationChange || (() => {})}
+                    creationReady={automationCreationReady}
+                    snapshotFailed={automationSnapshotFailed}
+                    sessionMode={sessionMode}
+                    // Same condition as the Resume placeholder (`resumeOffered`):
+                    // whenever the composer says "press Resume", the loop chip
+                    // must not pulse as if a cycle were executing.
+                    interrupted={resumeOffered}
+                  />
+                </Suspense>
               )}
               {!isMobile && approvalMode && (
                 <ApprovalModePicker mode={approvalMode} slotKey={activeSlot || ''} openSignal={approvalPickerSignal} nudge={approvalNudgeActive} onNudgeDismiss={dismissApprovalNudge} onNudgeHide={hideApprovalNudge} />
@@ -4405,6 +4457,21 @@ function ChatInput({
               // waits for the turn to end and rides the idle send button.
               composerHasDraft ? (
                 canSteer && onSteer ? (
+                  steerOnly ? (
+                    // No queue concept on this surface: the busy send is the
+                    // SAME control as the idle one (colour, glyph, name), and
+                    // pressing it steers. Nothing splits, nothing to pick.
+                    <button
+                      className="primary w-8 h-8 rounded-full bg-accent text-accent-fg border-none flex items-center justify-center cursor-pointer hover:bg-accent-hover disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                      onClick={fireComposer}
+                      disabled={disabled || !connected}
+                      aria-label={i18nT('components.chatInput.send')}
+                      data-testid="steer-only-send"
+                      {...offlineProps(connected, 'send', i18nT('components.chatInput.send'))}
+                    >
+                      <ArrowUp size={18} />
+                    </button>
+                  ) : (
                   <BusySendButton
                     mode={busySendMode}
                     onModeChange={setBusySendMode}
@@ -4412,6 +4479,7 @@ function ChatInput({
                     disabled={disabled}
                     altChordAvailable={sendOnEnter === 'enter'}
                   />
+                  )
                 ) : (
                   <button className="w-8 h-8 rounded-full bg-warn text-warn-fg border-none flex items-center justify-center cursor-pointer hover:bg-warn/80 disabled:opacity-30 disabled:cursor-not-allowed transition-all" onClick={fireComposer} disabled={disabled} title={i18nT('components.chatInput.queue_message')} aria-label={i18nT('components.chatInput.queue_message')}>
                     <ArrowUpFromLine size={18} />
@@ -4420,6 +4488,17 @@ function ChatInput({
               ) : onStop ? (
                 <button className="w-8 h-8 rounded-lg bg-transparent border-none text-danger hover:bg-danger/10 flex items-center justify-center cursor-pointer transition-all" onClick={onStop} title={i18nT('components.chatInput.stop_generation')} aria-label={i18nT('components.chatInput.stop_generation')} data-testid="stop-button-armed">
                   <Square size={18} fill="currentColor" />
+                </button>
+              ) : steerOnly ? (
+                // Same shape-stability rule as the split case below, with the
+                // surface's own (plain) send button.
+                <button
+                  className="primary w-8 h-8 rounded-full bg-accent text-accent-fg border-none flex items-center justify-center cursor-not-allowed disabled:opacity-30 transition-all"
+                  disabled
+                  aria-label={i18nT('components.chatInput.send')}
+                  data-testid="steer-only-send"
+                >
+                  <ArrowUp size={18} />
                 </button>
               ) : (
                 // No stop affordance and nothing typed: keep the split button
@@ -4855,6 +4934,7 @@ function ChatInput({
               className="inline-flex items-center gap-1.5 h-7 min-w-0 text-[12px] text-muted hover:text-text px-2 rounded-md bg-transparent hover:bg-[color-mix(in_srgb,var(--bg-elevated)_84%,var(--text))] transition-colors border-none cursor-pointer disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted"
               onClick={e => onModelClick(e.currentTarget.getBoundingClientRect())}
               disabled={isRunning}
+              data-testid="composer-model-chip"
               // Inherited default: mirror the agent chip -- ` · default` marker on
               // the label, and the explanation on hover (title) AND keyboard
               // focus / screen readers (aria-label), because a bare served id

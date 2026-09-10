@@ -926,16 +926,28 @@ class AgentConfig:
         metadata=_meta(
             "Allow Unsandboxed Execution",
             "When true, allow agent subprocesses to execute without any sandbox "
-            "backend (fail-open). When false (default), wrap_argv raises a "
-            "RuntimeError if no sandbox backend is available and mode is not 'off', "
-            "preventing unsandboxed execution entirely (fail-closed). This is "
-            "distinct from sandbox_allow_no_isolation which only controls warning "
-            "severity — this field controls whether execution proceeds at all. "
-            "The default is platform-independent: on a host with no backend (any "
-            "Windows host, a Linux kernel refusing user namespaces) `kirocrew "
-            "setup` OFFERS this opt-in interactively and writes it only on an "
-            "explicit yes, so unconfined execution stays operator-declared and is "
-            "never enabled implicitly by the platform.",
+            "backend (fail-open). When false, wrap_argv raises if no sandbox "
+            "backend is available and mode is not 'off', preventing unsandboxed "
+            "execution entirely (fail-closed). This is distinct from "
+            "sandbox_allow_no_isolation which only controls warning severity — "
+            "this field controls whether execution proceeds at all. "
+            "A LOADED config carries the effective policy: the loader resolves an "
+            "undeclared key through config.loader.unsandboxed_exec_platform_default() "
+            "— allow on Windows, which has no backend that any operator action could "
+            "install, and fail-closed everywhere else, where a missing backend is "
+            "broken or one profile away from working. A declared value always wins in "
+            "both directions, and a governance sandbox.min_level floor outranks the "
+            "declaration. The resolution is folded into the VALUE rather than keyed on "
+            "key presence so a full-document save() — which serializes every field — "
+            "cannot turn 'never decided' into a declared lockdown. This dataclass "
+            "default stays platform-independent so the committed config-schema "
+            "snapshot is identical on every platform; the one caller that writes a "
+            "document from a directly constructed config (the first-run default write "
+            "in cli_server) resolves the platform default explicitly before saving. "
+            "`kirocrew setup` surfaces the decision on a backend-less host, offering "
+            "the opt-in where the default is fail-closed and stating the exposure plus "
+            "offering the opt-out where it is allow, and writes nothing unless the "
+            "operator answers yes.",
         ),
     )
     apps_allow_third_party: bool = field(
@@ -1910,6 +1922,29 @@ class KnowledgeConfig:
             "0 removes the bound.",
         ),
     )
+    import_chunk_budget: int = field(
+        default=0,
+        metadata=_meta(
+            "Explicit Import Chunk Budget",
+            "Maximum chunks ingested through the EXPLICIT one-shot import paths "
+            "(a single-file add, an agent-driven add, a direct text ingest, and "
+            "remote sync) within a rolling ~60s window -- the cross-file cost "
+            "ceiling those paths lack, since they are many independent calls "
+            "with no scan boundary the way a watcher sweep has. Each chunk costs "
+            "an LLM extraction call. When the window is exhausted the next import "
+            "is REFUSED with a reason rather than silently truncated, so a "
+            "deliberate import never loses part of a file. A single file stays "
+            "bounded by the 50-chunk per-file cap independently. 0 (the default) "
+            "removes the bound -- opt in by setting it (e.g. 500, matching "
+            "sweep_chunk_budget) so this changes nothing until you choose it. "
+            "LIMITATION if you enable it: reservation is worst-case -- each "
+            "in-flight import books the 50-chunk per-file maximum up front and "
+            "reconciles to the real count only when it finishes, so several "
+            "concurrent imports throttle below the nominal number you set here "
+            "until that accounting is refined. Set it with that headroom in "
+            "mind.",
+        ),
+    )
     embed_rate_limit: int = field(
         default=120,
         metadata=_meta(
@@ -2597,6 +2632,17 @@ class DashboardConfig:
             "session restores — with short pauses instead of launching "
             "everything at once, so a host still under memory pressure is "
             "not pushed straight back into the same collapse.",
+        ),
+    )
+    default_memory_mode: str = field(
+        default="persistent",
+        metadata=_meta(
+            "Default Memory Mode",
+            "Memory mode for new dashboard chat sessions. 'persistent' reads "
+            "and writes memory; 'incognito' reads but does not write; "
+            "'temporary' neither reads nor writes. Explicit per-session choices "
+            "still win.",
+            enum=["persistent", "incognito", "temporary"],
         ),
     )
     widget_density: str = field(
@@ -3760,6 +3806,10 @@ FOLDER_INGEST_CHUNK_BUDGET_MAX = 10000
 DEDUP_EVERY_N_SWEEPS_MAX = 288
 SWEEP_CHUNK_BUDGET_MAX = 50000
 EMBED_RATE_LIMIT_MAX = 10000
+# Ceiling on the explicit-import cross-file chunk budget, same rationale as the
+# folder/sweep budgets above: clamp a negative to 0 (0 == unbounded) and cap an
+# absurd hand-edited value so it cannot load verbatim into real work.
+IMPORT_CHUNK_BUDGET_MAX = 50000
 
 
 ACTIVATION_ALWAYS = "always"  # Process every message

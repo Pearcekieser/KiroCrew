@@ -1775,6 +1775,118 @@ class TestTheCacheOnlyChildCanSeeTheCacheItMustBootFrom:
         assert seen.get("visible") == ()
 
 
+class TestTheMdNotebookBackendCanSeeItsOwnStateFiles:
+    """The md-notebook spawn's isolated startup, which rides with its mask carve-out.
+
+    The carve-out itself is main's (``app_backend_visible_targets``, pinned in
+    ``test_sandbox_governance_mask.py``). What is pinned HERE is the startup shape that
+    has to accompany it: this is the one spawn whose namespace holds an unmasked PAT, so
+    a bare ``python -m`` — which runs ``sitecustomize`` / ``usercustomize`` and the user
+    site's ``.pth`` files from an agent-writable directory — would execute that injected
+    code right where the token is readable. The spawn therefore starts with ``-I`` and
+    re-states its import root explicitly, and that rewrite is scoped to this spawn alone.
+    """
+
+    @staticmethod
+    def _spy(bmod, monkeypatch):
+        seen: dict = {}
+
+        def _spy_wrap(argv, **kwargs):
+            seen["visible"] = kwargs.get("extra_visible_dirs")
+            seen["argv"] = list(argv)
+            return (list(argv), None)
+
+        monkeypatch.setattr(bmod, "wrap_argv", _spy_wrap)
+        monkeypatch.setattr(
+            bmod.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(OSError("stop"))
+        )
+        return seen
+
+    def test_the_shipped_builtin_spawn_starts_isolated_with_the_carveout(
+        self, app_env, monkeypatch
+    ):
+        import kiro_crew.apps.backend as bmod
+        from kiro_crew.apps.manager import register_builtin_apps
+        from kiro_crew.sandbox import MD_NOTEBOOK_APP_NAME, app_backend_visible_targets
+
+        register_builtin_apps()
+        seen = self._spy(bmod, monkeypatch)
+
+        bmod.start_app_backend("md-notebook")
+
+        assert seen.get("visible"), "the spawn passed no visible dirs at all"
+        for path in app_backend_visible_targets(MD_NOTEBOOK_APP_NAME):
+            assert path in seen["visible"], (
+                "md-notebook's own state stays masked from the one spawn that "
+                f"owns it, so attach/clone still EPERMs (missing {path!r}, "
+                f"saw {seen['visible']!r})"
+            )
+        # Startup isolation rides with the carve-out: a bare `python -m` runs
+        # sitecustomize/usercustomize, and the default user site is an
+        # agent-writable injection path that would execute inside the one
+        # namespace where the PAT is unmasked.
+        argv = seen["argv"]
+        assert "-I" in argv, f"module builtin spawned without isolated startup: {argv!r}"
+        assert "-m" not in argv and any(
+            "runpy" in a and "kiro_crew.apps.builtins.md_notebook" in a for a in argv
+        ), f"the module must run via runpy with an explicit import root: {argv!r}"
+
+    def test_other_module_builtins_keep_the_bare_module_launch(self, app_env, monkeypatch):
+        """The isolated-startup rewrite is scoped to the spawn that carries the
+        carve-out: the other module builtins have no unmasked secret in their
+        namespace, and rewriting their import environment would be a rider on a
+        fix scoped to one (First Principles review)."""
+        import kiro_crew.apps.backend as bmod
+        from kiro_crew.apps.manager import register_builtin_apps
+
+        register_builtin_apps()
+        seen = self._spy(bmod, monkeypatch)
+
+        bmod.start_app_backend("file-explorer")
+
+        argv = seen["argv"]
+        assert "-I" not in argv and "-m" in argv, (
+            f"a non-md-notebook module builtin changed launch shape: {argv!r}"
+        )
+        assert seen.get("visible") == (), (
+            "a non-md-notebook builtin received the state carve-out"
+        )
+
+    def test_a_third_party_app_wearing_the_name_keeps_the_mask(
+        self, app_env, tmp_path, monkeypatch
+    ):
+        """The carve-out is bought with provenance, never with a name: an app
+        NAMED md-notebook that executes from the mutable installed tree (here
+        via the blanket third-party toggle the fixture enables) must not see
+        the GitHub token."""
+        import kiro_crew.apps.backend as bmod
+
+        seen = self._spy(bmod, monkeypatch)
+
+        src = tmp_path / "source" / "md-notebook"
+        src.mkdir(parents=True)
+        (src / APP_MANIFEST_FILENAME).write_text(
+            json.dumps(
+                {
+                    "name": "md-notebook",
+                    "version": "9.9.9",
+                    "displayName": "Impostor",
+                    "description": "wears the builtin's name",
+                    "backend": {"entryPoint": "server.py", "healthCheck": "/health"},
+                }
+            )
+        )
+        (src / "server.py").write_text("import time\ntime.sleep(30)\n")
+        install_app(src)
+
+        bmod.start_app_backend("md-notebook")
+
+        assert seen.get("visible") == (), (
+            "a third-party app bought the md-notebook state carve-out with its "
+            f"name alone (saw {seen.get('visible')!r})"
+        )
+
+
 # =============================================================================
 # Post-startup liveness watch (#5726)
 # =============================================================================
@@ -3685,3 +3797,56 @@ class TestEnabledStateDistinguishesUnreadableFromDisabled:
         meta.write_text("{ not json", encoding="utf-8")
 
         assert bmod._app_enabled_state("probe") is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="shebang semantics are POSIX-only")
+class TestExecBackendShebangShim:
+    def _spawn_cmd(self, tmp_path, shebang_line: str):
+        """Build the exec-arm inputs and return the resolved cmd."""
+        import kiro_crew.apps.backend as bk
+        from kiro_crew.apps.interpreter import app_deps_dir
+
+        root = tmp_path / "app"
+        root.mkdir()
+        (root / "requirements.txt").write_bytes(b"requests\n")
+        d = app_deps_dir(root)
+        d.mkdir(parents=True)
+        (d / bk._DEPS_STAMP_NAME).write_text(bk._deps_digest(b"requests\n"))
+        (d / bk._DEPS_ABI_NAME).write_text(bk._deps_abi_tag())
+        script = root / "run"
+        script.write_text(f"{shebang_line}\nimport requests\n")
+        script.chmod(0o755)
+        return bk, root, script
+
+    def test_an_abi_matched_shebang_script_launches_through_deps_boot(
+        self, tmp_path
+    ):
+        import sys as _sys
+
+        bk, root, script = self._spawn_cmd(tmp_path, f"#!{_sys.executable}")
+        got = bk._abi_shebang_of(root, str(script))
+        assert got == _sys.executable
+
+    def test_an_argument_bearing_shebang_keeps_its_flags(self, tmp_path):
+        """#!<python> -I keeps its kernel launch: the shared reader answers
+        None for argument-bearing shebangs, so no rewrite happens - and the
+        flag REMAINS in what actually executes. Both halves are asserted:
+        not a candidate, and the on-disk launch still carries -I exactly as
+        written (the kernel, not a rewrite, interprets the shebang)."""
+        import sys as _sys
+
+        bk, root, script = self._spawn_cmd(tmp_path, f"#!{_sys.executable} -I")
+        assert bk._abi_shebang_of(root, str(script)) is None
+        first_line = script.read_bytes().split(b"\n", 1)[0]
+        assert first_line == f"#!{_sys.executable} -I".encode()
+        # And a no-candidate script is launched as-is: simulate the exec-arm
+        # decision the spawn makes with this answer.
+        cmd = [str(script), "--serve"]
+        si = bk._abi_shebang_of(root, cmd[0])
+        assert si is None
+        # the arm leaves cmd untouched when there is no shim candidate
+        assert cmd == [str(script), "--serve"]
+
+    def test_a_foreign_shebang_is_not_a_shim_candidate(self, tmp_path):
+        bk, root, script = self._spawn_cmd(tmp_path, "#!/opt/foreign/python3.11")
+        assert bk._abi_shebang_of(root, str(script)) is None

@@ -67,7 +67,7 @@ from kiro_crew.slack.blocks import (
     dashboard_link_block,
     voice_config_modal,
 )
-from kiro_crew.slack.enterprise import validated_self_bot_id
+from kiro_crew.slack.enterprise import trusted_bot_admission
 from kiro_crew.slack.files import (
     VOICE_MEMO_FAILED,
     VOICE_MEMO_UNAVAILABLE,
@@ -977,41 +977,31 @@ async def init_socket_mode(orch: GatewayOrchestrator, seen: SeenCache) -> None:
             await _handle_message_deleted(orch, event)
             return
         # A bot-authored event is admitted ONLY on a positive match of its
-        # bot_id against the slack.trusted_bot_ids allowlist (deny-by-default:
-        # an empty/unset allowlist drops every bot-authored event). The
-        # admission is carried as from_trusted_bot so _route_message lets the
-        # bot_id stand in as sender_id and handle_message suppresses error
+        # bot_id against the slack.trusted_bot_ids allowlist. The rule itself
+        # (deny by default, own id never trusted, unverified self id fails
+        # closed) lives in ONE place — trusted_bot_admission — which the
+        # transport applies too, so one owner keeps both drop sites in step.
+        #
+        # The admission is carried as from_trusted_bot so _route_message lets
+        # the bot_id stand in as sender_id and handle_message suppresses error
         # replies (echo-loop guard). Successful-reply loops are bounded by the
         # per-thread turn cap in _route_message (slack.trusted_bot_turn_limit);
-        # richer cross-bot coordination is the agent
-        # layer's job (envelope protocol). The gateway's OWN bot id
-        # (cached from startup auth.test) is never trusted even when listed —
-        # admitting it would make every reply re-enter this handler as fresh
-        # input, a self-reply loop. When auth.test was unavailable the self
-        # id is UNKNOWN, and an unknown self identity admits nobody (fail
-        # closed): admitting on an empty cache would let a startup auth.test
-        # hiccup re-open the self-reply loop for a misconfigured allowlist.
-        # Same posture as enterprise validation: a configured restriction
-        # plus unverifiable identity fails closed. The trust decision runs
-        # BEFORE the generic subtype filter because a bot-authored message
-        # commonly carries subtype == "bot_message": the untrusted denial
-        # must be audited (not silently subtype-dropped), and a trusted
-        # bot's bot_message must pass the subtype gate below.
-        _self_bot_id = validated_self_bot_id()
-        _is_own_bot = bool(_bot_id) and _bot_id == _self_bot_id
-        _from_trusted_bot = (
-            bool(_bot_id)
-            and bool(_self_bot_id)
-            and not _is_own_bot
-            and _bot_id in orch._cfg.slack.trusted_bot_ids
+        # richer cross-bot coordination is the agent layer's job (envelope
+        # protocol).
+        #
+        # READ TIMING: this site passes the LIVE config, so an operator's
+        # allowlist edit takes effect on the next event without a restart. The
+        # transport deliberately freezes a snapshot instead; the predicate
+        # takes the set as an argument precisely so each site owns that choice.
+        #
+        # The trust decision runs BEFORE the generic subtype filter because a
+        # bot-authored message commonly carries subtype == "bot_message": the
+        # untrusted denial must be audited (not silently subtype-dropped), and
+        # a trusted bot's bot_message must pass the subtype gate below.
+        _from_trusted_bot, _deny_error = trusted_bot_admission(
+            _bot_id or "", orch._cfg.slack.trusted_bot_ids
         )
-        if _bot_id and not _from_trusted_bot:
-            if _is_own_bot and _bot_id in orch._cfg.slack.trusted_bot_ids:
-                _deny_error = "own_bot_id_never_trusted"
-            elif not _self_bot_id and _bot_id in orch._cfg.slack.trusted_bot_ids:
-                _deny_error = "trusted_bot_requires_verified_self_id"
-            else:
-                _deny_error = "untrusted_bot"
+        if _deny_error:
             sel().log_api_access(
                 caller=_bot_id,
                 operation="slack.message",
@@ -1564,11 +1554,11 @@ def _voice_memo_context(
 ) -> str:
     """*text* plus one visible note per voice memo that produced no words.
 
-    A memo whose transcription is unavailable or failed used to be dropped in
-    TOTAL silence: nothing was appended to the prompt, so a voice-only message
-    had no text at all and the turn never started. The sender's send succeeded, so
+    A memo whose transcription is unavailable or failed would otherwise be dropped
+    in TOTAL silence: nothing appended to the prompt, so a voice-only message has
+    no text at all and the turn never starts. The sender's send succeeded, so
     from their side that is indistinguishable from being ignored, and the agent
-    was never told anything arrived. The note makes both true again: the turn runs,
+    is never told anything arrived. The note keeps both true: the turn runs,
     and it runs knowing a memo it cannot hear is what the user sent.
 
     The wording is the neutral half's (``slack/files.py`` pins it), so the same
@@ -2278,7 +2268,7 @@ async def _route_message(
     # EXEMPT only cancellation (``!stop``): a denied channel must still be able to
     # halt a runaway session it previously started. ``!restart`` is NOT
     # cancellation and stays gated. Default OSS build (no ``channels`` policy)
-    # permits, so this is byte-identical to today. handle_message keeps its own
+    # permits. handle_message keeps its own
     # gate as defense-in-depth for its other entry points (interaction
     # re-dispatch, synthetic sends).
     #
@@ -2412,7 +2402,7 @@ async def _route_message(
     # ── Transcribe audio files (voice memos) ──
     # Placed after dedup + auth to avoid expensive work on duplicate events
     # or unauthorized users.
-    _image_temp_paths: list[str] = []
+    _attachment_temp_paths: list[str] = []
     _had_voice_input = False
     if files and orch.slack and _user_authorized:
         memos = [f for f in files if is_voice_memo(f)]
@@ -2444,13 +2434,13 @@ async def _route_message(
                     _had_voice_input = True
             text = _voice_memo_context(text, len(memos), len(transcripts), available=stt_ok)
 
-        # ── Process non-audio files (images, text, etc.) ──
-        image_paths, text_blocks = await process_slack_files(orch, files)
-        _image_temp_paths = image_paths
+        # ── Process non-audio files (images, text, opaque files, etc.) ──
+        attachment_paths, text_blocks = await process_slack_files(orch, files)
+        _attachment_temp_paths = attachment_paths
 
-        # Inject image paths so AcpClient._send_prompt() inlines them as base64
-        if image_paths:
-            paths_text = "\n".join(image_paths)
+        # Image paths are inlined by ACP; opaque paths remain available to agent tools.
+        if attachment_paths:
+            paths_text = "\n".join(attachment_paths)
             text = f"{text}\n{paths_text}" if text else paths_text
 
         # Inject text file contents
@@ -2460,16 +2450,16 @@ async def _route_message(
 
     # Bail out if we still have no text after attempting transcription
     if not text:
-        # Clean up any downloaded image temp files
-        for p in _image_temp_paths:
+        # Clean up any downloaded attachment temp files
+        for p in _attachment_temp_paths:
             try:
                 os.unlink(p)
             except OSError:
                 pass
         return
 
-    def _cleanup_image_temps() -> None:
-        for p in _image_temp_paths:
+    def _cleanup_attachment_temps() -> None:
+        for p in _attachment_temp_paths:
             try:
                 os.unlink(p)
             except OSError:
@@ -2491,7 +2481,7 @@ async def _route_message(
         if end != -1:
             clean_text = text[end + 1 :].lstrip()
     if not clean_text:
-        _cleanup_image_temps()
+        _cleanup_attachment_temps()
         return
 
     # ── !stop: intercept BEFORE handle_message to bypass session semaphore ──
@@ -2635,7 +2625,8 @@ async def _route_message(
             team_id=team_id,
             agent_override=agent_override,
             user_display_name=_sender_display,
-            image_temp_paths=list(_image_temp_paths),
+            # Historical key; carries every attachment temp path for cleanup.
+            image_temp_paths=list(_attachment_temp_paths),
             from_trusted_bot=from_trusted_bot,
         )
         if not _queued:
@@ -2651,7 +2642,7 @@ async def _route_message(
                         team_id=team_id,
                         agent_override=agent_override,
                         user_display_name=_sender_display,
-                        image_temp_paths=list(_image_temp_paths),
+                        image_temp_paths=list(_attachment_temp_paths),
                         from_trusted_bot=from_trusted_bot,
                     ),
                 )
@@ -2664,11 +2655,9 @@ async def _route_message(
                 await orch.slack.add_reaction(channel, msg_ts, "hourglass_flowing_sand")
             except Exception:
                 logger.debug("Failed to add queue reaction", exc_info=True)
-        # NOTE: do NOT _cleanup_image_temps() here — clean_text references these
-        # temp-file paths and the queued turn hasn't run yet. They are carried in
-        # the queue kwargs and unlinked by _dispatch_queued after the turn runs
-        # (deleting them now dropped the images silently: p.is_file() was False
-        # by dispatch time, so _send_prompt skipped them with no error).
+        # NOTE: do NOT _cleanup_attachment_temps() here — clean_text references
+        # these paths. The historical image_temp_paths queue key transfers cleanup
+        # ownership to _dispatch_queued after the turn runs.
         return
     elif orch.sessions and orch.sessions.enqueue(
         session_key,
@@ -2680,7 +2669,7 @@ async def _route_message(
         team_id=team_id,
         agent_override=agent_override,
         user_display_name=_sender_display,
-        image_temp_paths=list(_image_temp_paths),
+        image_temp_paths=list(_attachment_temp_paths),
         from_trusted_bot=from_trusted_bot,
     ):
         logger.info("Message %s queued for busy session %s", msg_ts, session_key)
@@ -2690,8 +2679,7 @@ async def _route_message(
             except Exception:
                 logger.debug("Failed to add queue reaction", exc_info=True)
         # See the force=True branch above: cleanup is deferred to
-        # _dispatch_queued so the queued turn's clean_text can still resolve
-        # its image temp-file paths.
+        # _dispatch_queued so every queued attachment path remains valid.
         return
 
     # ── New transport path: route to the messaging abstraction ──
@@ -2768,7 +2756,7 @@ async def _route_message(
             orch._handler_tasks.discard(task)
             if orch._session_tasks.get(session_key) is task:
                 del orch._session_tasks[session_key]
-            _cleanup_image_temps()
+            _cleanup_attachment_temps()
             # Drain queue: only if no other task took over this session.
             # Mirrors native _on_done so messages queued while this session was
             # busy aren't stranded when the transport path is the active route.
@@ -2824,7 +2812,7 @@ async def _route_message(
         )
     except Exception:
         logger.exception("Failed to create handle_message task")
-        _cleanup_image_temps()
+        _cleanup_attachment_temps()
         return
 
     orch._session_tasks[session_key] = t
@@ -2833,7 +2821,7 @@ async def _route_message(
         orch._handler_tasks.discard(task)
         if orch._session_tasks.get(session_key) is task:
             del orch._session_tasks[session_key]
-        _cleanup_image_temps()
+        _cleanup_attachment_temps()
         # Drain queue: only if no other task took over this session
         try:
             if session_key not in orch._session_tasks and orch.sessions:

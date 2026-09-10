@@ -37,7 +37,7 @@ import ToolCallLine from './ToolCallLine'
 import NudgeCard, { nudgeMatchesLoop } from './NudgeCard'
 import RecoveryCard, { resolveInjectCard } from './RecoveryCard'
 import { SystemNoticeRow, isSystemNoticeRow } from './CompactionCard'
-import { ErrorCard } from './ErrorCard'
+import { ErrorCard, isModelUnentitled } from './ErrorCard'
 import WorkflowRunCard, { extractWorkflowRunId, isWorkflowRunTool } from './WorkflowRunCard'
 import SubagentRunCard, { extractSpawnRunLaunch, isSpawnRunTool } from './SubagentRunCard'
 import WorkflowCompletionCard, { isWorkflowCompletionMessage } from './WorkflowCompletionCard'
@@ -45,7 +45,10 @@ import SubagentCompletionCard from './SubagentCompletionCard'
 import { isSubagentCompletionMessage, type ParsedSubagentCompletion } from './subagentCompletion'
 import { REASONING_ROLES, hasReasoningContent } from './groupDisplayItems'
 import { FileCard } from '../../components/FileCard'
-import type { MessageRenderer, MessageRenderContext } from '../../app-sdk/messageRenderers'
+import UserMessage from './UserMessage'
+import { formatTs, type MessageRenderer, type MessageRenderContext } from '../../app-sdk/messageRenderers'
+import { renderUserContent } from './ChatPageMessageContent'
+import { fmtMessageTimeFull } from './messageTime'
 import type { ChatMessage } from '../../types'
 
 /** Disclosure-map identity for a tool row (#8204). messageRowKey is
@@ -119,6 +122,20 @@ export interface TranscriptRendererOptions {
   interrupted?: boolean
   continuing?: boolean
   onContinue?: () => void
+  /** Fix affordances for a model-entitlement error row (`model_unentitled`
+   *  kind): open this surface's model picker, and deep-link to the Default
+   *  Model setting. Omitted → the row renders as plain prose, which is correct
+   *  for a surface with no picker of its own (a pane). Offered on EVERY such
+   *  row, not only the newest: an entitlement error is settled state the user
+   *  still has to act on, whereas Continue resumes a turn and so is unique. */
+  onPickModel?: () => void
+  onOpenDefaultModel?: () => void
+  /** Draw confirmed steers as ordinary user messages (no "Steered into the
+   *  running turn" badge). A `steer-only` composer host sets it: every busy
+   *  send on that surface is a steer, so the badge would label each one with
+   *  the very mechanics the surface hides. Off (default) the SDK's `user`
+   *  entry is used unchanged. */
+  hideSteerBadge?: boolean
 }
 
 /** Index of the last `error` row, so only that one offers Continue. Derived
@@ -326,18 +343,47 @@ export function createTranscriptRenderers(
       // affordance on the LAST error when a turn was interrupted.
       id: 'error',
       roles: ['error'],
-      render: (m, ctx) =>
-        ctx.row(
+      render: (m, ctx) => {
+        const unentitled = isModelUnentitled(m)
+        return ctx.row(
           <ErrorCard
             content={m.content}
+            // A rejection the backend says no retry can fix never offers Continue,
+            // even when this row is the newest and the turn was interrupted:
+            // resuming would replay the identical rejection.
             onContinue={
-              o.onContinue && o.continuable && o.interrupted && ctx.index === lastErrorIndex(ctx.messages)
+              !unentitled && o.onContinue && o.continuable && o.interrupted && ctx.index === lastErrorIndex(ctx.messages)
                 ? o.onContinue
                 : undefined
             }
             continuing={o.continuing}
+            onPickModel={unentitled ? o.onPickModel : undefined}
+            onOpenDefaultModel={unentitled ? o.onOpenDefaultModel : undefined}
+            unentitledElsewhere={unentitled}
           />,
-        ),
+        )
+      },
     },
+    // Replaces the SDK's `user` entry (same id) ONLY when the host asks for it:
+    // identical content path (renderUserContent — paste chips, inline images
+    // and file cards included), one prop different. Absent the flag no entry is emitted, so every other
+    // surface keeps the SDK row byte-for-byte.
+    ...(o.hideSteerBadge
+      ? [{
+          id: 'user',
+          roles: ['user'],
+          render: (m: ChatMessage, ctx: MessageRenderContext) => ctx.wrapper(
+            <UserMessage
+              content={m.content}
+              meta={m.meta}
+              timestamp={formatTs(m.ts)}
+              timestampTitle={fmtMessageTimeFull(m.ts)}
+              renderContent={(c, mt) => renderUserContent({ content: c, meta: mt, onFileOpen: ctx.onFileOpen })}
+              hideSteerBadge
+            />,
+            true,
+          ),
+        } satisfies MessageRenderer]
+      : []),
   ]
 }

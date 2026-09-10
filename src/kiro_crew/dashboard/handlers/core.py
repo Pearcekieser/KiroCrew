@@ -37,6 +37,7 @@ from kiro_crew.config.loader import (
     EXTRACTION_POOL_SIZE_MAX,
     EXTRACTION_POOL_SIZE_MIN,
     FOLDER_INGEST_CHUNK_BUDGET_MAX,
+    IMPORT_CHUNK_BUDGET_MAX,
     MAX_SUBAGENTS_FIXED_FLOOR,
     MCP_PROBE_TIMEOUT_MAX,
     MCP_PROBE_TIMEOUT_MIN,
@@ -81,7 +82,9 @@ from kiro_crew.stt.limits import (
 from kiro_crew.transcribe import (
     _find_ffmpeg,
     _whisper_language,
+    audio_exceeds_secs,
     availability_detail,
+    batch_duration_cap_secs,
     ensure_ffmpeg_in_path,
     ffmpeg_source,
     is_available,
@@ -1333,7 +1336,29 @@ async def api_stt_transcribe(request: web.Request) -> web.Response:
                 {"error": "audio too large", "code": _CODE_STT_AUDIO_TOO_LARGE}, status=413
             )
 
-        text = await transcribe_audio(tmp)
+        duration_cap = batch_duration_cap_secs(cfg.stt)
+        if duration_cap is not None:
+            exceeds = await audio_exceeds_secs(tmp, duration_cap, timeout_secs=cfg.stt.timeout_secs)
+            if exceeds is None:
+                return web.json_response(
+                    {
+                        "error": "could not verify audio duration; retry the upload",
+                        "code": "stt_audio_duration_unverified",
+                    },
+                    status=503,
+                )
+            if exceeds:
+                return web.json_response(
+                    {
+                        "error": (
+                            f"audio exceeds the {duration_cap // 60}-minute transcription limit"
+                        ),
+                        "code": "stt_audio_too_long",
+                    },
+                    status=422,
+                )
+
+        text = await transcribe_audio(tmp, cfg.stt)
         if text:
             from kiro_crew.security import (  # noqa: F811
                 redact_credentials,
@@ -2024,6 +2049,7 @@ _EDITABLE_CONFIG: dict[str, dict] = {
     },
     "knowledge.dedup_every_n_sweeps": {"type": "int", "min": 0, "max": DEDUP_EVERY_N_SWEEPS_MAX},
     "knowledge.sweep_chunk_budget": {"type": "int", "min": 0, "max": SWEEP_CHUNK_BUDGET_MAX},
+    "knowledge.import_chunk_budget": {"type": "int", "min": 0, "max": IMPORT_CHUNK_BUDGET_MAX},
     "knowledge.embed_rate_limit": {"type": "int", "min": 0, "max": EMBED_RATE_LIMIT_MAX},
     "knowledge.extraction_model": {"type": "str"},
     "knowledge.extraction_pool_size": {

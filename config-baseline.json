@@ -356,7 +356,7 @@
       "sensitive": false,
       "tags": [],
       "label": "Allow Unsandboxed Execution",
-      "help": "When true, allow agent subprocesses to execute without any sandbox backend (fail-open). When false (default), wrap_argv raises a RuntimeError if no sandbox backend is available and mode is not 'off', preventing unsandboxed execution entirely (fail-closed). This is distinct from sandbox_allow_no_isolation which only controls warning severity — this field controls whether execution proceeds at all. The default is platform-independent: on a host with no backend (any Windows host, a Linux kernel refusing user namespaces) `kirocrew setup` OFFERS this opt-in interactively and writes it only on an explicit yes, so unconfined execution stays operator-declared and is never enabled implicitly by the platform.",
+      "help": "When true, allow agent subprocesses to execute without any sandbox backend (fail-open). When false, wrap_argv raises if no sandbox backend is available and mode is not 'off', preventing unsandboxed execution entirely (fail-closed). This is distinct from sandbox_allow_no_isolation which only controls warning severity — this field controls whether execution proceeds at all. A LOADED config carries the effective policy: the loader resolves an undeclared key through config.loader.unsandboxed_exec_platform_default() — allow on Windows, which has no backend that any operator action could install, and fail-closed everywhere else, where a missing backend is broken or one profile away from working. A declared value always wins in both directions, and a governance sandbox.min_level floor outranks the declaration. The resolution is folded into the VALUE rather than keyed on key presence so a full-document save() — which serializes every field — cannot turn 'never decided' into a declared lockdown. This dataclass default stays platform-independent so the committed config-schema snapshot is identical on every platform; the one caller that writes a document from a directly constructed config (the first-run default write in cli_server) resolves the platform default explicitly before saving. `kirocrew setup` surfaces the decision on a backend-less host, offering the opt-in where the default is fail-closed and stating the exposure plus offering the opt-out where it is allow, and writes nothing unless the operator answers yes.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false
@@ -1765,6 +1765,7 @@
         "dedup_every_n_sweeps": 12,
         "doc_ingest_hosts": [],
         "sweep_chunk_budget": 500,
+        "import_chunk_budget": 0,
         "embed_rate_limit": 120,
         "extraction_model": "",
         "extraction_pool_size": 3
@@ -1956,6 +1957,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 500
+    },
+    {
+      "path": "knowledge.import_chunk_budget",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Explicit Import Chunk Budget",
+      "help": "Maximum chunks ingested through the EXPLICIT one-shot import paths (a single-file add, an agent-driven add, a direct text ingest, and remote sync) within a rolling ~60s window -- the cross-file cost ceiling those paths lack, since they are many independent calls with no scan boundary the way a watcher sweep has. Each chunk costs an LLM extraction call. When the window is exhausted the next import is REFUSED with a reason rather than silently truncated, so a deliberate import never loses part of a file. A single file stays bounded by the 50-chunk per-file cap independently. 0 (the default) removes the bound -- opt in by setting it (e.g. 500, matching sweep_chunk_budget) so this changes nothing until you choose it. LIMITATION if you enable it: reservation is worst-case -- each in-flight import books the 50-chunk per-file maximum up front and reconciles to the real count only when it finishes, so several concurrent imports throttle below the nominal number you set here until that accounting is refined. Set it with that headroom in mind.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 0
     },
     {
       "path": "knowledge.embed_rate_limit",
@@ -5895,6 +5910,7 @@
         "chat_entry_cache_max_entries": 4096,
         "chat_entry_cache_max_bytes": 33554432,
         "cautious_boot": true,
+        "default_memory_mode": "persistent",
         "widget_density": "more",
         "use_builtin_browser": true,
         "browser_view_port": 0,
@@ -6253,6 +6269,24 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": true
+    },
+    {
+      "path": "dashboard.default_memory_mode",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Default Memory Mode",
+      "help": "Memory mode for new dashboard chat sessions. 'persistent' reads and writes memory; 'incognito' reads but does not write; 'temporary' neither reads nor writes. Explicit per-session choices still win.",
+      "hasChildren": false,
+      "enumValues": [
+        "persistent",
+        "incognito",
+        "temporary"
+      ],
+      "defaultValue": "persistent"
     },
     {
       "path": "dashboard.widget_density",

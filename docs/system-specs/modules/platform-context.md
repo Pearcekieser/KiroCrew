@@ -63,7 +63,35 @@ interface, the public edition is complete standalone.
 | `dashboard` | adapter | `DefaultDashboardContributor` (no routes/services, no login handler) | secretary/taskkeeper routes + enterprise SSO PTY login |
 | `jail` | adapter | `DefaultJailProvider` (no-op, never jails) | enterprise process isolation |
 | `mobile_connect` | adapter | `DefaultMobileConnectProvider` (personal-install pair: `tailnet_qr` + `login_link` (id == kind by design)) | edition-specific phone-connection methods (descriptor-only `{id, kind}`; minting stays on each method's own endpoint; an empty list hides the dashboard entry; list + mint governed by `capabilities.mobile_connect`) |
+| `remote_provisioners` | adapter | `DefaultRemoteProvisionerProvider` (the single built-in `aws_ec2` lane, backed by `RealLaunchEngine`; id == kind by design) | edition-specific ways to CREATE a remote instance (a managed dev environment, a container task): descriptor-only `{id, kind, label, posix_only, step_labels}` plus a `LaunchEngine` per id; the core's durable launch job still drives every launch, so cancel, rollback and orphan reaping are inherited rather than reimplemented |
 | `feature_apps` | tuple | **RESERVED** — `()`; apps register via `apps_loader` (provenance record only) | — (slot inert) |
+
+> `remote_provisioners` note — the Set-up tab under Settings → Remote Instances
+> could only ever create an EC2 instance in the user's own AWS account, because
+> `handlers_cloud._engine()` constructed `RealLaunchEngine` directly (the
+> `state.cloud_launch_engine` hook next to it is a test seam, not a contract). A
+> deployment whose users have no AWS account of their own, or whose machines come
+> from a managed dev-environment service, had no way to offer a second lane
+> without shadowing the 1500-line panel. The seam follows `mobile_connect`
+> exactly: the backend contributes descriptors (`GET /api/cloud/provisioners`),
+> the frontend draws each `kind` through `registerRemoteProvisionerRenderer()`
+> (the `aws_ec2` kind is drawn by the core's own form and cannot be claimed), and
+> `POST /api/cloud/launch` resolves the requested `provider_id` against the same
+> seam before a job file exists. What the seam deliberately does NOT hand out is
+> the launch loop itself: an edition supplies the five-method `LaunchEngine` and
+> `cloud/launch_job.py::run_launch` drives it, so one-launch-at-a-time, cancel,
+> the two rollback paths and `reap_orphans` apply to every lane. The four step
+> KEYS are therefore fixed (rollback branches on them); a descriptor may only
+> relabel them. `size_key`, `profile` and `region` are the generic wires: for the
+> built-in they are the EC2 ladder, an AWS profile and an AWS region; another
+> provisioner reads them as its own shape, credential selector and placement,
+> which is why `LaunchJobStore.create()` validates `size_key` against
+> `sizes.py` for the built-in id only. The stop/start/delete lifecycle routes
+> (`/api/cloud/{tag}/...`) remain EC2-specific: a lane that needs them
+> contributes its own through `dashboard.contribute_routes`. No governance scope
+> is added here; the existing EC2 lane carries none today, and a
+> `capabilities.remote_provisioners` row mirroring `capabilities.mobile_connect`
+> is the natural follow-up once a second lane exists to narrow on.
 
 > `external_access` note — three surfaces the core offers unconditionally, none of
 > which had a composition point. Two are installable-content registries: skill
@@ -175,9 +203,9 @@ once loaded.
 
 ## Level-1 governance ceiling and distribution
 
-`PlatformContext.governance` is the optional Level-1 `GovernanceCeiling` that enforcement chokepoints read through `current_context()`. `governance.load_security_policy` selects the first available source: an explicit local policy, a centrally distributed policy, a companion-bundled policy, then the data-home policy; no source leaves editable standalone defaults. The local source remains first so an operator can roll back a bad fleet-wide publication without waiting for the central control plane.
+`PlatformContext.governance` is the optional Level-1 `GovernanceCeiling` that enforcement chokepoints read through `current_context()`. `governance.load_security_policy` composes a **tier ladder**, highest first: the centrally distributed document, then exactly one of the local sources (an explicit `KIROCREW_SECURITY_POLICY` path, a companion-bundled policy, or the data-home policy). The central document is the authority; every tier below it may only **tighten** it, through the same per-scope AND the profile layer uses. There is no local rollback lever above the fleet: recovery from a bad publication is re-publishing a good document at the source (`governance.md` → "Loading + precedence"). No source leaves editable standalone defaults.
 
-`policy_distribution.resolve_distribution` accepts the central source from fleet environment settings or the `distribution` declaration of an already-selected lower-tier policy, with environment settings taking precedence individually. A declared distribution source cannot carry credentials; request headers remain host-local and `cache_only()` prevents child processes from receiving the means to contact the fleet control plane.
+`policy_distribution.resolve_distribution` takes the central source from the `distribution` declaration of the highest tier that made one, or from fleet environment settings when none did, with environment settings taking precedence individually. A declared distribution source cannot carry credentials; request headers remain host-local and `cache_only()` prevents child processes from receiving the means to contact the fleet control plane.
 
 `governance._parse_controls` rejects every unknown governed key, including an unrecognised `sandbox` child. Only documented non-governed sandbox flags are accepted in the reserved internal scope. This fails closed instead of recording a misspelled sandbox floor as a valid but unenforced policy control.
 
