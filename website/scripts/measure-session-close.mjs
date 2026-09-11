@@ -7,15 +7,18 @@
 //   npm run build
 //   SESSIONS=163 ITER=8 OUT_DIR="$KIROCREW_SCRATCH/session-close-perf" \
 //     node scripts/measure-session-close.mjs
+//   # Optional: RECORD_OUT=<dir> records the first middle-row sample as WebM.
 import { chromium } from 'playwright'
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdirSync, renameSync, writeFileSync } from 'fs'
 import { serveDist } from './lib/serve-dist.mjs'
 import { json, stubDashboardApi } from './lib/stub-dashboard-api.mjs'
 
 const OUT = process.env.OUT_DIR || `${process.env.TMPDIR || '.'}/session-close-perf`
 const SESSIONS = Number(process.env.SESSIONS || 163)
 const ITER = Number(process.env.ITER || 8)
+const RECORD_OUT = process.env.RECORD_OUT || ''
 mkdirSync(OUT, { recursive: true })
+if (RECORD_OUT) mkdirSync(RECORD_OUT, { recursive: true })
 
 const mkSlots = (n) => Array.from({ length: n }, (_, i) => ({
   key: `chat-1-${String(i).padStart(3, '0')}`,
@@ -45,9 +48,11 @@ const samples = []
 
 for (const [position, index] of Object.entries(positions)) {
   for (let iteration = 0; iteration < ITER; iteration++) {
+    const recordThis = RECORD_OUT !== '' && position === 'middle' && iteration === 0
     const ctx = await browser.newContext({
       viewport: { width: 1440, height: 900 },
       reducedMotion: process.env.REDUCED_MOTION === '1' ? 'reduce' : 'no-preference',
+      ...(recordThis ? { recordVideo: { dir: RECORD_OUT, size: { width: 1440, height: 900 } } } : {}),
     })
     const page = await ctx.newPage()
     const slots = mkSlots(SESSIONS)
@@ -111,7 +116,9 @@ for (const [position, index] of Object.entries(positions)) {
       styleRecalcs: after.recalc - before.recalc,
       layouts: after.layout - before.layout,
     })
+    const video = recordThis ? page.video() : null
     await ctx.close()
+    if (video) renameSync(await video.path(), `${RECORD_OUT}/session-close-middle.webm`)
   }
 }
 

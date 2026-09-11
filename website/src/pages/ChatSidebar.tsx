@@ -144,12 +144,6 @@ const RENAME_MAX_H = 120
  * Which is what buys the meta line its 12px box: the tightest of the three,
  * spent on the least important line.
  */
-/** Above this many rendered rows, per-row layout animation (and its group-wide
- *  rect measurement) is disabled. This shares the displacement window's
- *  two-viewport budget: browser measurements showed 163-row middle closes
- *  performing 36 layouts with projection versus 6 without it. */
-export const SIDEBAR_ANIM_CAP = 48
-
 /** Rows at or past this paint ordinal share ONE `orderStamp`, so an insertion
  *  or reorder above them does not re-render them: they snap into their new
  *  position instead of springing there.
@@ -1444,9 +1438,10 @@ interface SessionRowProps {
    *  of animating. Rows above the change keep their stamp and still bail out;
    *  so do rows past the window, which snap by design. */
   orderStamp: number
-  /** False above SIDEBAR_ANIM_CAP rows or under prefers-reduced-motion:
-   *  the shell computes the gate once so every row's layout spring,
-   *  layoutId registration and entrance animation switch off together. */
+  /** True only inside the first SIDEBAR_DISPLACEMENT_WINDOW paint positions;
+   *  false outside that window, under prefers-reduced-motion, or in staticRows.
+   *  The shell derives the gate so layout spring, layoutId registration, and
+   *  entrance animation switch together for each row. */
   rowAnimEnabled: boolean
   showDivider: boolean
   scope: string
@@ -4283,9 +4278,10 @@ function ChatSidebar({
   useEffect(() => {
     if (listNarrowed) staleNarrowBridgeRef.current = filteredSlots
   }, [listNarrowed, filteredSlots])
-  // False above SIDEBAR_ANIM_CAP rows (or under prefers-reduced-motion):
-  // gates layout/layoutId/layoutScroll/entrance on every session row.
-  const rowAnimEnabled = !reduceMotion && filteredSlots.length <= SIDEBAR_ANIM_CAP
+  // Reduced motion disables every row. Otherwise renderSessionRow enrolls only
+  // the first SIDEBAR_DISPLACEMENT_WINDOW paint positions in layout projection,
+  // bounding Framer's measurement set without a total-list-size cliff.
+  const rowAnimEnabled = !reduceMotion
   useEffect(() => {
     if (listNarrowed) return
     const shown = staleNarrowBridgeRef.current
@@ -5535,8 +5531,10 @@ function ChatSidebar({
         // staticRows (the compositor drawer) folds into the one row-animation
         // gate: projection under a WAAPI-driven ancestor mis-attributes the
         // panel's motion to the rows, so the drawer disables row animation
-        // wholesale rather than growing SessionRow a second switch.
-        rowAnimEnabled={rowAnimEnabled && !staticRows}
+        // wholesale. Outside it, enroll only the first two-viewport paint
+        // window: every later row shares the clamped stamp and snaps, keeping
+        // Framer's projection registry bounded at every total list size.
+        rowAnimEnabled={rowAnimEnabled && orderStamp < SIDEBAR_DISPLACEMENT_WINDOW && !staticRows}
         defaultAgent={defaultAgent} mode={mode} isMobile={isMobile} colorMode={colorMode}
         installedAgents={installedAgents} tagById={tagById}
         paletteColors={paletteColors} boost={boost} boostFor={boostFor}
