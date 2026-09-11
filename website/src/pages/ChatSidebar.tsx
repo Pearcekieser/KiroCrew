@@ -4074,13 +4074,11 @@ function ChatSidebar({
   // stale list against new deps, so clearing a ref would invalidate nothing.
   const [dragFrozen, setDragFrozen] = useState(false)
   const frozenSlotsRef = useRef<Slot[]>([])
-  // Layout-animation gate (the IssueList/PrList ANIM_CAP pattern): every
-  // session row is a layout-projection node in one LayoutGroup, and framer
-  // measures getBoundingClientRect for EVERY enrolled node on each commit —
-  // a forced-reflow pass that scales linearly with row count and runs on the
-  // frequent streaming-driven sidebar renders. Above the cap the rows render
-  // as plain (non-layout) motion divs: reorder/entrance animation is a
-  // deliberate casualty at a scale where each animated commit costs frames.
+  // Layout-projection budget: every enrolled session row belongs to one
+  // LayoutGroup, and Framer measures getBoundingClientRect for each enrolled
+  // node on a commit. renderSessionRow therefore enrolls only the first
+  // SIDEBAR_DISPLACEMENT_WINDOW paint positions; later rows stay ordinary
+  // motion divs and snap. Reduced motion disables even that bounded window.
   // matchMedia rather than framer's useReducedMotion: the sidebar test files
   // mock framer-motion per-file, and the PipelineView precedent reads the
   // media query directly.
