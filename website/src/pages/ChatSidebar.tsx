@@ -145,8 +145,10 @@ const RENAME_MAX_H = 120
  * spent on the least important line.
  */
 /** Above this many rendered rows, per-row layout animation (and its group-wide
- *  rect measurement) is disabled — the IssueList/PrList ANIM_CAP pattern. */
-const SIDEBAR_ANIM_CAP = 200
+ *  rect measurement) is disabled. This shares the displacement window's
+ *  two-viewport budget: browser measurements showed 163-row middle closes
+ *  performing 36 layouts with projection versus 6 without it. */
+export const SIDEBAR_ANIM_CAP = 48
 
 /** Rows at or past this paint ordinal share ONE `orderStamp`, so an insertion
  *  or reorder above them does not re-render them: they snap into their new

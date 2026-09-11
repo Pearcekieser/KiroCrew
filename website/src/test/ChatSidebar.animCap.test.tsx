@@ -64,7 +64,7 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 })
 
-import ChatSidebar from '../pages/ChatSidebar'
+import ChatSidebar, { SIDEBAR_ANIM_CAP } from '../pages/ChatSidebar'
 
 function mkSlots(n: number) {
   return Array.from({ length: n }, (_, i) => ({
@@ -110,26 +110,22 @@ const rowWrappers = () => Array.from(document.querySelectorAll<HTMLElement>('[da
 
 describe('SIDEBAR_ANIM_CAP layout-animation gate', () => {
   it('keeps layout projection at or below the cap', () => {
-    renderSidebar(mkSlots(5))
+    renderSidebar(mkSlots(SIDEBAR_ANIM_CAP))
     const rows = rowWrappers()
-    expect(rows.length).toBe(5)
+    expect(rows.length).toBe(SIDEBAR_ANIM_CAP)
     for (const el of rows) {
       expect(el.getAttribute('data-layout-id')).toMatch(/^slot-/)
       expect(el.getAttribute('data-layout')).toBe('position')
     }
   })
 
-  // Synchronous CPU, not a wait: this mounts 201 REAL sidebar rows through the
-  // sidebar's row component in one render, which is the only way to observe the
-  // gate flipping above the cap. Measured 4.1s / 9.8s / 8.6s / 17.6s across four
-  // full runs on a shared host under coverage -- past the file-wide 15s ceiling
-  // once. Nothing here awaits a timer or a promise, so no waitFor change helps;
-  // the work is bounded by the row count, and the ceiling is sized for a loaded
-  // host (website/docs/testing.md, "a synchronous simulation is CPU time").
+  // Synchronous CPU, not a wait: this mounts the first list size that must
+  // drop projection, keeping the test tied to the production threshold.
   it('drops layout projection above the cap', { timeout: 60_000 }, () => {
-    renderSidebar(mkSlots(201))
+    const overCap = SIDEBAR_ANIM_CAP + 1
+    renderSidebar(mkSlots(overCap))
     const rows = rowWrappers()
-    expect(rows.length).toBe(201)
+    expect(rows.length).toBe(overCap)
     for (const el of rows) {
       expect(el.getAttribute('data-layout-id')).toBeNull()
       expect(el.getAttribute('data-layout')).toBe('false')
