@@ -416,6 +416,10 @@ def test_stop_waits_for_the_supervised_pid_before_deleting_anything(cfg, monkeyp
 
     monkeypatch.setattr(win, "schtasks", lambda *a: _cp())
     monkeypatch.setattr(win, "time", _FakeClock())
+    # The pid under test is this pytest process. Its real descendants are not the
+    # subject here (the sensitive-path resolver keeps a helper child alive for the
+    # life of the process), so the scan is stubbed as the sibling tests do.
+    monkeypatch.setattr(win, "attributed_descendants", lambda pid, token: [])
     seen = {"n": 0}
 
     def dying(_cfg, _name):
