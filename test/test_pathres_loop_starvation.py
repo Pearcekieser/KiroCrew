@@ -58,11 +58,16 @@ class TestIsSensitiveResolvedPath:
         calls = []
         generation = ["one"]
 
-        def resolve(path):
-            calls.append(path)
-            return path + generation[0]
+        # The anchor rebuild resolves its ~60 anchors in ONE helper request, so the
+        # primitive it funnels through is the batched one. Same invariant either
+        # way: each identical spelling is asked for once per build (the duplicate
+        # is removed BEFORE the request, not collapsed after it), and nothing is
+        # carried across builds.
+        def resolve(paths):
+            calls.extend(paths)
+            return [path + generation[0] for path in paths]
 
-        monkeypatch.setattr(security.paths, "_realpath_or_none", resolve)
+        monkeypatch.setattr(security.paths, "_realpaths_or_none", resolve)
         leaves = [".kiro/crew/token_signing.key", ".kirocrew/token_signing.key"]
         first = security.paths._home_dir_targets_uncached(leaves, roots)
         target = os.path.join(roots.crew_home, "token_signing.key")

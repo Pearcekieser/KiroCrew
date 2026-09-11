@@ -29,6 +29,7 @@ import stat
 import subprocess as subprocess_mod
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections import deque
@@ -257,7 +258,13 @@ from kiro_crew.sandbox import (
     wrap_argv_async,
     wrapped_by_crew_sandbox,
 )
-from kiro_crew.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
+from kiro_crew.security import (
+    PathResolutionStalled,
+    is_sensitive_path,
+    pathres_client,
+    redact_credentials,
+    redact_exfiltration_urls,
+)
 from kiro_crew.sel import sel
 from kiro_crew.session_token_sig import schedule_session_token_publish
 from kiro_crew.skill_usage import get_global_skill_read_observer
@@ -4799,17 +4806,57 @@ async def _run_preflight_bounded(
     Takes the preflight as a parameter so the deadline is testable without a
     spawn; ``_spawn`` passes :func:`_sandbox_preflight`.
     """
+    worker_tid: list[int] = []
+    # Bound for exactly this preflight, the way the read gate bounds each of its
+    # resolutions: once the loop side stops waiting, a worker still QUEUED for the
+    # helper returns at promotion instead of sending its request with no owner
+    # left to abort it. Without this, two bunched preflights on a wedged home
+    # mount could leave the second holding the helper's process-wide lock after
+    # both deadlines had passed -- the gateway-wide pin ``owner()`` exists to stop.
+    abandoned = threading.Event()
+
+    def _on_worker() -> tuple[str, ...]:
+        worker_tid.append(threading.get_native_id())
+        with pathres_client.owner(abandoned):
+            return preflight(backend, mode)
+
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(preflight, backend, mode), timeout=_SANDBOX_PREFLIGHT_TIMEOUT
+            asyncio.to_thread(_on_worker), timeout=_SANDBOX_PREFLIGHT_TIMEOUT
         )
     except asyncio.TimeoutError:
+        abandoned.set()
+        # If the expired worker is the one blocked inside the resolver helper's
+        # request, it holds the helper's process-wide request lock while it is:
+        # left alone, every other path check in the gateway queues behind it, times
+        # out without being able to attribute the helper's stall (it is not theirs),
+        # and takes the load arm -- a wedged anchor mount would turn into a
+        # gateway-wide refusal until restart. Killing the helper makes the worker
+        # read EOF and unwind (a fault for THIS resolution, already refused below);
+        # the next request respawns. The read gate does the same at its deadline.
+        # Attributed: a worker merely queued behind ANOTHER request's wedge leaves
+        # that request to its own deadline rather than faulting a healthy helper.
+        pathres_client.helper().abort_if_inflight(worker_tid[0] if worker_tid else None)
         raise AcpError(
             f"Could not start the {backend} adapter: computing its sandbox credential "
             "mask needs the home and credential roots resolved on disk, and that did "
             f"not finish within {_SANDBOX_PREFLIGHT_TIMEOUT:.0f} s (a stalled or very "
             "slow filesystem). The adapter is not started without its mask; retry "
             "once the disk responds."
+        ) from None
+    except PathResolutionStalled as exc:
+        abandoned.set()
+        # The mask's anchors are canonicalised by the sensitive-path resolver, and a
+        # root it could not resolve -- its helper faulted, or the mount under it is
+        # in a stall cooldown -- must not degrade to a lexical spelling: the mask does
+        # no per-candidate canonicalisation, so a symlinked credential home would stay
+        # reachable through its unmasked canonical path for the sandbox's lifetime.
+        # Same retryable refusal as the timeout above: a transient resolution failure
+        # (a helper transport fault or a stall cooldown), not a configuration fact.
+        raise AcpError(
+            f"Could not start the {backend} adapter: computing its sandbox credential "
+            f"mask needs the home and credential roots resolved on disk, and {exc}. "
+            "The adapter is not started without its mask; retry shortly."
         ) from None
 
 
