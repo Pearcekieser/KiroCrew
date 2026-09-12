@@ -3409,6 +3409,7 @@ class _ChatSlot:
         "_queue_repository",
         "_source_links_cache",
         "_source_links_revision",
+        "_closing",
         "key",
         "title",
         "agent",
@@ -3657,6 +3658,8 @@ class _ChatSlot:
         # (content revision, links) cache for the sidebar PR chips scan.
         self._source_links_revision = 0
         self._source_links_cache: tuple[tuple[int, int], list[dict]] | None = None
+        # Admission fence while slot deletion spans monitor retirement and history I/O.
+        self._closing = False
         self.total_messages: int = 0  # lifetime count (survives trimming)
         self._task: asyncio.Task[Any] | None = None
         # Monotonic publication history for turn ownership. ``task`` returns to
@@ -4332,6 +4335,19 @@ class _ChatSlot:
         return self.tags_revision
 
     @property
+    def is_closing(self) -> bool:
+        """Whether slot teardown currently fences new monitor admission."""
+        return self._closing
+
+    def begin_close(self) -> None:
+        """Fence new monitor admission before teardown reaches its first await."""
+        self._closing = True
+
+    def cancel_close(self) -> None:
+        """Release the admission fence when teardown leaves this slot live."""
+        self._closing = False
+
+    @property
     def _dirty(self) -> bool:
         """True while this slot holds state not yet confirmed on disk.
 
@@ -4785,6 +4801,7 @@ class _ChatSlot:
         meta: dict | None = None,
         *,
         directive_user_origin: bool = False,
+        directive_channel_origin: bool = False,
     ) -> str:
         return self._queue_repository.queue_append(
             self,
@@ -4792,6 +4809,7 @@ class _ChatSlot:
             kind,
             meta,
             directive_user_origin=directive_user_origin,
+            directive_channel_origin=directive_channel_origin,
         )
 
     def _note_enqueue(self) -> None:
@@ -4807,6 +4825,7 @@ class _ChatSlot:
         on_consumed: Callable[[bool], None] | None = None,
         on_irreversibly_consumed: Callable[[], Awaitable[None] | None] | None = None,
         directive_user_origin: bool = False,
+        directive_channel_origin: bool = False,
     ) -> str:
         return self._queue_repository.queue_insert(
             self,
@@ -4818,6 +4837,7 @@ class _ChatSlot:
             on_consumed,
             on_irreversibly_consumed,
             directive_user_origin,
+            directive_channel_origin,
         )
 
     def queue_pop(self, index: int = 0) -> dict[str, Any]:
@@ -4841,12 +4861,14 @@ class _ChatSlot:
         content: str,
         *,
         directive_user_origin: bool = False,
+        directive_channel_origin: bool = False,
     ) -> bool:
         return self._queue_repository.queue_edit_by_id(
             self,
             queue_id,
             content,
             directive_user_origin=directive_user_origin,
+            directive_channel_origin=directive_channel_origin,
         )
 
     def queue_promote_by_id(self, queue_id: str) -> bool:
