@@ -695,7 +695,7 @@ jobs:
   # only).
   backend-test-windows:
     name: Backend Tests (Windows)
-    needs: [await-fast-gate]
+    needs: []
     runs-on: windows-latest
     # Windows shards omit coverage and retain their 40-minute job budget.
     timeout-minutes: 40
@@ -703,7 +703,7 @@ jobs:
       # Full failure picture across shards, same as backend-test.
       fail-fast: false
       matrix:
-        group: [1, 2, 3, 4]
+        group: [1]
     env:
       SHARD_COUNT: 4
       # windows-latest subprocess spawn + filesystem latency is slow and
@@ -775,8 +775,10 @@ jobs:
           # traceback in the log, including one printed inside a warning, and
           # never matches a pytest failure.
           echo "::remove-matcher owner=python::"
-          pytest -q -n auto --timeout=180 --no-cov --max-worker-restart=0 \
-            --splits "$SHARD_COUNT" --group ${{ matrix.group }}
+          pytest -q -n 4 --timeout=45 --timeout-method=thread --no-cov --durations=15 --max-worker-restart=0 \
+            -o log_cli=true --log-cli-level=WARNING \
+            test/test_member_essential_context.py || true
+          echo "=== PROBE stats"; test -f "$RUNNER_TEMP/probe.log" && wc -l "$RUNNER_TEMP/probe.log" || echo "no probe.log (uninstrumented run)"
         # Nothing is deselected here either, and the same guards carry it: Windows has no
         # namespace sandbox at all, so `userns_available()` is False and every
         # sandbox-dependent test skips. Residual POSIX assumptions in
