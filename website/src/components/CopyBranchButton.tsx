@@ -17,15 +17,19 @@ import { copyToClipboard } from '../utils/clipboard'
  *
  * ``label`` overrides the accessible name's noun for callers where "branch" is
  * not accurate — the project chip shows a short commit on a detached HEAD.
+ * ``preserveFocusOnClick`` keeps a pointer click from moving focus away from a
+ * nearby input; keyboard focus and activation remain unchanged.
  */
 export default function CopyBranchButton({
   branch,
   label = 'branch name',
   className = '',
+  preserveFocusOnClick = false,
 }: {
   branch: string
   label?: string
   className?: string
+  preserveFocusOnClick?: boolean
 }) {
   const [copied, setCopied] = useState(false)
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -50,6 +54,7 @@ export default function CopyBranchButton({
   return (
     <button
       type="button"
+      onMouseDown={preserveFocusOnClick ? event => event.preventDefault() : undefined}
       onClick={handleCopy}
       className={`group/branch min-w-0 inline-flex items-center gap-1 truncate rounded px-1 -mx-1 border-none bg-transparent text-inherit hover:bg-bg-hover cursor-pointer ${className}`}
       aria-label={copied ? i18nT('components.copyBranchButton.copied', { label, branch }) : i18nT('components.copyBranchButton.copy', { label, branch })}

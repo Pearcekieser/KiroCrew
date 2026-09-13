@@ -4802,6 +4802,7 @@ function ChatInput({
               <CopyBranchButton
                 branch={projectBranch}
                 label={projectDetached ? 'commit' : 'branch name'}
+                preserveFocusOnClick
                 className="max-w-[220px] font-mono opacity-70 hover:opacity-100 hover:text-text"
               />
             </>
