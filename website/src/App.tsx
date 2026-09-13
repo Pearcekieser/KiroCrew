@@ -1395,7 +1395,7 @@ export default function App() {
     return setArtifactNavIntentHandler((intent) =>
       applyNavIntentInMain(intent, {
         navigate,
-        switchSlot: (slotKey) => { dispatch(switchSlot(slotKey)) },
+        switchSlot: (slotKey) => { dispatch(switchSlot({ key: slotKey, announceOnMissing: true })) },
       }),
     )
   }, [isPopout, isEmbed, navigate, dispatch])
@@ -2721,7 +2721,7 @@ export default function App() {
           // NavIntent carries no query string, and ChatPage writes `?sid=` back
           // into the URL itself once the session is active.
           { path: '/chat', slotKey },
-          { navigate, switchSlot: (key) => { dispatch(switchSlot(key)) } },
+          { navigate, switchSlot: (key) => { dispatch(switchSlot({ key, announceOnMissing: true })) } },
         )
         return
       }
