@@ -1,0 +1,16 @@
+{
+  "sessions": 120,
+  "before": {
+    "scrollTop": 4800,
+    "scrollHeight": 5803,
+    "clientHeight": 715,
+    "firstVisible": "chat-1-099"
+  },
+  "after": {
+    "scrollTop": 6788,
+    "scrollHeight": 7791,
+    "clientHeight": 715,
+    "firstVisible": "chat-1-099"
+  },
+  "restored": true
+}
