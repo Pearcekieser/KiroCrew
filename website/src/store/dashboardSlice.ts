@@ -26,6 +26,13 @@ interface DashboardState {
   slotsGeneration: number
   /** Per-key optimistic/reconciliation pin writes, independent of other slot fields. */
   slotPinGenerations: Record<string, number>
+  /** Keys whose close is in flight or just confirmed, held out of `slots` until an
+   *  authoritative list omits them. See `applySlots` for why membership alone is
+   *  not enough: the server still lists a slot whose DELETE has not finished.
+   *  Value `CLOSE_IN_FLIGHT` while the request is pending (held unconditionally —
+   *  the request itself bounds it); after the 200 it is the number of further
+   *  frames that may still list the key before the hold gives up. */
+  closingSlots: Record<string, number>
   // Slot keys in the order the session sidebar actually DISPLAYS them
   // (pinned-first + the user's sort, flat-view aware). Published by
   // ChatSidebar; consumed by the chat-jump / chat-cycle keyboard shortcuts so
@@ -215,6 +222,7 @@ const initialState: DashboardState = {
   slots: [],
   slotsGeneration: 0,
   slotPinGenerations: {},
+  closingSlots: {},
   sidebarOrder: [],
   approvalMode: 'normal',
   channelTrusted: false,
@@ -346,8 +354,52 @@ const evictSlotSubagents = (state: DashboardState, slotKey: string): void => {
  *  Skipping the assignment (rather than assigning an equal array) is the half
  *  that matters most: it leaves the array reference alone, which lets a
  *  downstream `useMemo` skip its filter and sort entirely instead of recomputing
- *  an equal result. */
-const applySlots = (state: DashboardState, next: ChatSlot[]): void => {
+ *  an equal result.
+ *
+ *  Membership has ONE exception: a key in `closingSlots`. `deleteSlot` removes
+ *  the row before its DELETE round-trips, but the server keeps the slot in its
+ *  registry across several awaits (nudge-loop retirement, the app hook, the
+ *  history save) before popping it, and slot pushes coalesce on a 200 ms window
+ *  that re-serializes at delivery time — so a frame listing the closing slot as
+ *  live is ordinary, not rare, and an HTTP `/api/chat/slots` reply can predate
+ *  the click outright. Taking membership at face value put the row back, and
+ *  the first post-pop frame removed it again: the disappear / reappear /
+ *  disappear flicker of #11224. A closing key is held out of `slots` until an
+ *  authoritative list finally omits it, which is the server's own confirmation
+ *  and releases the tombstone. Everything else about the frame — the other
+ *  rows, the generation bump, the unread drain — still applies, so the hold
+ *  never delays anything but the one row being dismissed.
+ *
+ *  The hold is unconditional only while the DELETE is in flight, where the
+ *  request itself bounds it (a failure refetches and releases). Once the server
+ *  has answered 200, a frame that still lists the key can only be a straggler
+ *  serialized before the pop, so the hold survives a small, fixed number of
+ *  those and then yields: a server that keeps listing a slot it claims to have
+ *  closed is a server bug, and hiding its row indefinitely would turn that bug
+ *  into a session the user can no longer see. */
+const CLOSE_IN_FLIGHT = -1
+/** Post-confirmation frames a close tombstone survives before yielding to membership. */
+const CLOSE_CONFIRMED_GRACE_FRAMES = 3
+const applySlots = (state: DashboardState, incomingRows: ChatSlot[]): void => {
+  let next = incomingRows
+  const closing = state.closingSlots ?? {}
+  const closingKeys = Object.keys(closing)
+  if (closingKeys.length) {
+    const incomingKeys = new Set(incomingRows.map(s => s.key))
+    const held = new Set<string>()
+    for (const key of closingKeys) {
+      if (!incomingKeys.has(key)) {
+        // Released, not held: the server no longer lists it, so the close landed.
+        delete closing[key]
+        continue
+      }
+      const budget = closing[key]
+      if (budget === CLOSE_IN_FLIGHT) { held.add(key); continue }
+      if (budget > 0) { closing[key] = budget - 1; held.add(key); continue }
+      delete closing[key]
+    }
+    if (held.size) next = incomingRows.filter(s => !held.has(s.key))
+  }
   const prev = state.slots ?? []
   const byKey = new Map(prev.map(s => [s.key, s]))
   let changed = prev.length !== next.length
@@ -495,6 +547,9 @@ const dashboardSlice = createSlice({
       if (slot) slot.title = action.payload.title
     },
     addSlotOptimistic(state, action: PayloadAction<ChatSlot>) {
+      // A resume or fork under a key that was closing supersedes the tombstone:
+      // the caller has a fresh server acknowledgement that the key is live.
+      delete state.closingSlots?.[action.payload.key]
       if (!state.slots.find(s => s.key === action.payload.key)) {
         state.slots.push(action.payload)
       }
@@ -783,9 +838,40 @@ const dashboardSlice = createSlice({
       .addMatcher(
         (action): action is PayloadAction<ChatSlot> => action.type === 'chat/createSlot/fulfilled',
         (state, action) => {
+          // A same-key recreation supersedes any tombstone (idempotent otherwise).
+          delete state.closingSlots?.[action.payload.key]
           if (!state.slots.find(s => s.key === action.payload.key)) {
             state.slots.push(action.payload)
           }
+        },
+      )
+      // Close tombstone lifecycle (see `applySlots`). Matched by type string for
+      // the same import-cycle reason as `createSlot` above. `pending` fires
+      // BEFORE the thunk body's `removeSlotOptimistic`, so the hold is armed by
+      // the time the row leaves the list and no frame can slip between the two.
+      .addMatcher(
+        (action): action is { type: string; meta: { arg: string } } => action.type === 'chat/deleteSlot/pending',
+        (state, action) => {
+          if (!state.closingSlots) state.closingSlots = {}
+          state.closingSlots[action.meta.arg] = CLOSE_IN_FLIGHT
+        },
+      )
+      .addMatcher(
+        (action): action is PayloadAction<string> => action.type === 'chat/deleteSlot/fulfilled',
+        (state, action) => {
+          // Confirmed: from here only a straggler frame can list it, so bound
+          // the hold. Untouched when a frame already released it.
+          if (state.closingSlots?.[action.payload] === CLOSE_IN_FLIGHT) {
+            state.closingSlots[action.payload] = CLOSE_CONFIRMED_GRACE_FRAMES
+          }
+        },
+      )
+      .addMatcher(
+        (action): action is { type: string; meta: { arg: string } } => action.type === 'chat/deleteSlot/rejected',
+        (state, action) => {
+          // The close did not take; the thunk's own `fetchSlots` puts the row
+          // back, and it must not be filtered out when it does.
+          delete state.closingSlots?.[action.meta.arg]
         },
       )
   },
