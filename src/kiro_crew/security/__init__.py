@@ -357,6 +357,7 @@ from .paths import (
     _path_resolve_lock,
     _path_resolve_wedged,
     _realpath_or_none,
+    _realpaths_or_none,
     _rebuild_targets_bounded,
     _resolve_root_anchors,
     _resolved_env_root,

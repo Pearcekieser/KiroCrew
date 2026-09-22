@@ -56,6 +56,7 @@ from kiro_crew.identity_stores import (
 )
 from kiro_crew.memory_stores import MEMORY_STORES_DIR_NAME
 
+from . import pathres_client
 from .diagnostics import annotate_refusal, refusal_diagnostic
 
 if TYPE_CHECKING:
@@ -1352,23 +1353,20 @@ _path_resolve_clock: Callable[[], float] = time.monotonic  # tests advance this
 
 
 def _resolved_spellings(expanded: str) -> set[str]:
-    """Symlink-resolved spellings of *expanded*; runs on the ``mc-pathres`` pool."""
-    out: set[str] = set()
-    try:
-        out.add(os.path.realpath(expanded))
-    except (OSError, ValueError):
-        pass
-    try:
-        # Guarded false-positive: this resolve() is INSIDE is_sensitive_path — the
-        # sanitizer itself — building candidate forms to CHECK a path against the
-        # sensitive denylist. It performs no read/write. CodeQL surfaces
-        # py/path-injection here only because a new caller (artifact relocate)
-        # reaches it with user input; the function's whole purpose is to vet that
-        # input, so suppress the alert on the resolution step.
-        out.add(str(Path(expanded).resolve()))  # lgtm[py/path-injection]
-    except (OSError, ValueError, RuntimeError):
-        pass
-    return out
+    """Symlink-resolved spellings of *expanded*; runs on the ``mc-pathres`` pool.
+
+    The ``realpath``/``Path.resolve`` work happens in the resolver child
+    (:mod:`pathres_client`), so this worker pays one pipe round-trip rather than
+    a GIL re-acquisition per path component. A transport fault -- the child died
+    or answered the wrong shape -- raises :class:`PathResolutionStalled`: an
+    empty set would read as "resolved, no other spelling" and leave only the
+    lexical form, which for a workspace symlink into a credential store is a
+    pass. No cooldown is charged for it; the disk did not stall.
+    """
+    answers = pathres_client.helper().resolve(expanded)
+    if answers is None:
+        raise PathResolutionStalled(expanded, _stall_prefix(expanded))
+    return {spelling for spelling in answers if spelling is not None}
 
 
 class PathResolutionStalled(RuntimeError):
@@ -1513,9 +1511,18 @@ def _worker_blocked_in_filesystem(tid: int | None) -> bool:
     exited, an architecture whose syscall numbers are not mapped -- by returning True, so the
     caller still charges the prefix rather than silently withholding an escalation the gate
     would otherwise make.
+
+    When the worker's request is in flight in the resolver child, the CHILD's syscall
+    is the sample that matters: the worker itself is parked in a pipe ``read`` whether
+    the mount is wedged or healthy. The thread sample remains the fallback (in-process
+    fallback, test stubs, a worker still queued for the helper).
     """
     if tid is None or not _FS_BLOCKING_SYSCALLS:
         return True
+    from_child = pathres_client.helper().blocked_in_filesystem(_FS_BLOCKING_SYSCALLS, tid)
+    if from_child is not None:
+        logger.debug("resolver child blocked_in_filesystem=%s (worker tid=%s)", from_child, tid)
+        return from_child
     try:
         with open(f"/proc/self/task/{tid}/syscall", "rb") as fh:
             head = fh.read().split()
@@ -1836,6 +1843,8 @@ def _run_resolution_bounded(
                 late.append(_wait_for_result(granted_grace))
         except FutureTimeoutError:
             pass
+        except PathResolutionStalled:
+            raise
         except Exception:
             logger.debug("sensitive-path symlink resolution failed", exc_info=True)
             return None
@@ -1872,7 +1881,15 @@ def _run_resolution_bounded(
             tid,
         )
         _mark_stalled(prefix, requested_budget)
+        # The resolver child is wedged on this worker's path: kill it so the worker's
+        # pipe read returns EOF and the worker is freed rather than pinned for the
+        # life of the process. The next request respawns a fresh child.
+        pathres_client.helper().abort_if_inflight(tid)
         raise PathResolutionStalled(expanded, prefix) from None
+    except PathResolutionStalled:
+        # The worker itself refused (a transport fault to the resolver child):
+        # fail-closed, exactly like a stall, and never the lexical forms.
+        raise
     except Exception:
         # The worker's own exceptions are already swallowed inside the worker;
         # anything else here is a pool fault, and the gate's contract is to keep
@@ -1904,12 +1921,24 @@ def _resolved_forms_bounded(expanded: str) -> set[str]:
     return set() if forms is None else forms
 
 
+def _realpaths_or_none(paths: list[str]) -> list[str | None]:
+    """``os.path.realpath`` for every anchor in *paths*, in order, in ONE child round-trip.
+
+    ``None`` per entry where ``realpath`` raised. Runs on the ``mc-pathres`` pool.
+    A transport fault to the resolver child raises :class:`PathResolutionStalled`
+    for the first anchor: the target set is never rebuilt from lexical spellings
+    (see :func:`_resolved_root_key` for the fallbacks review found open), and no
+    cooldown is charged, because a helper fault is not a stalled mount.
+    """
+    answers = pathres_client.helper().realpaths(paths)
+    if answers is None:
+        raise PathResolutionStalled(paths[0], _stall_prefix(paths[0]))
+    return answers
+
+
 def _realpath_or_none(path: str) -> str | None:
-    """``os.path.realpath`` for a target anchor; runs on the ``mc-pathres`` pool."""
-    try:
-        return os.path.realpath(path)
-    except (OSError, ValueError):
-        return None
+    """``os.path.realpath`` for one target anchor; see :func:`_realpaths_or_none`."""
+    return _realpaths_or_none([path])[0]
 
 
 def _candidate_forms(
@@ -1994,15 +2023,18 @@ class _BuiltTargets(set[str]):
 def _home_dir_targets_uncached(
     home_dirs: list[str],
     roots: _ResolvedRoots | None = None,
+    *,
+    _answers: dict[str, str | None] | None = None,
 ) -> set[str]:
     """Anchor the ``$HOME``-relative *home_dirs* entries into absolute, casefolded
     on-disk targets.
 
-    Every per-anchor resolved form comes from :func:`_realpath_or_none`, looked
+    Every per-anchor resolved form comes from :func:`_realpaths_or_none`, looked
     up at call time so a test can stand in a recording or wedged resolver at
     module level.  It touches the filesystem, so in production this function
     runs on the ``mc-pathres`` pool via :func:`_home_dir_targets` (see there
-    for why); only direct callers and tests run it inline.
+    for why); only direct callers and tests run it inline. *_answers* is the
+    enumeration pass's own recursion argument (below), not for callers.
 
     *roots* optionally supplies the already-resolved :class:`_ResolvedRoots`
     already resolved by the caller. The TTL cache in :func:`_home_dir_targets` MUST pass
@@ -2029,14 +2061,22 @@ def _home_dir_targets_uncached(
     # Both supported Crew home prefixes map to the same override leaves.
     # Resolve each identical spelling once within this build; never carry these
     # answers across builds or cache keys, so root and leaf freshness is unchanged.
-    resolved_paths: dict[str, str | None] = {}
+    resolved = roots if roots is not None else _resolved_root_key()
+    if _answers is None:
+        # Two passes over the same anchoring logic so the ~130 per-leaf ``realpath``
+        # calls travel as ONE resolver-child round-trip instead of one each: the
+        # first pass runs with no answers and only records which paths it asks
+        # for (every anchor derives from *roots* and *home_dirs*, never from an
+        # earlier answer, so the set is complete), then the batch is resolved and
+        # the second pass builds the real set from it.
+        wanted: dict[str, str | None] = {}
+        _home_dir_targets_uncached(home_dirs, resolved, _answers=wanted)
+        _answers = dict(zip(wanted, _realpaths_or_none(list(wanted))))
+    resolved_paths = _answers
 
     def resolve_target(path: str) -> str | None:
-        if path not in resolved_paths:
-            resolved_paths[path] = _realpath_or_none(path)
-        return resolved_paths[path]
+        return resolved_paths.setdefault(path, None)
 
-    resolved = roots if roots is not None else _resolved_root_key()
     home = resolved.home
     crew_home = resolved.crew_home
     kiro_home_override = resolved.kiro_home
@@ -2570,20 +2610,29 @@ def _resolve_root_anchors(logical_home: str) -> _ResolvedRoots:
 
     One worker call resolves ``$HOME`` and all six override roots together,
     so :func:`_resolved_root_key` -- which runs once per ``is_sensitive_path``
-    call, on the event loop -- pays a single thread hop rather than seven.  The
-    stall bookkeeping is charged to the logical home's prefix: that is the
-    mount every root ordinarily lives under, and it is the one the crash dumps
-    named.
+    call, on the event loop -- pays a single thread hop rather than seven, and
+    ONE resolver-child round-trip (:func:`_realpaths_or_none`) rather than
+    seven. Each failed root keeps its lexical form, exactly as
+    :func:`_resolved_env_root` does. The stall bookkeeping is charged to the
+    logical home's prefix: that is the mount every root ordinarily lives under,
+    and it is the one the crash dumps named.
     """
-    home = _realpath_or_none(logical_home) or logical_home
-    overrides = {field: _resolved_env_root(env) for field, env in _OVERRIDE_ROOT_ENVS}
-    # Resolved in the SAME worker call as the host's own roots, for the reason
-    # above: one thread hop for every anchor, rather than one more per harness.
-    adapter_roots = tuple(
-        (env, _resolved_env_root(env)) for env in host_auth.home_override_env_vars()
-    )
+    overrides = {field: _expanded_env_root(env) for field, env in _OVERRIDE_ROOT_ENVS}
+    adapters = tuple((env, _expanded_env_root(env)) for env in host_auth.home_override_env_vars())
+    wanted = [logical_home, *overrides.values(), *(root for _env, root in adapters)]
+    distinct = list(dict.fromkeys(p for p in wanted if p is not None))
+    answers = dict(zip(distinct, _realpaths_or_none(distinct)))
+
+    def _root(expanded: str | None) -> str | None:
+        if expanded is None:
+            return None
+        return answers[expanded] or _lexical_root(expanded)
+
     return _ResolvedRoots(
-        home=home, logical_home=logical_home, adapter_roots=adapter_roots, **overrides
+        home=answers[logical_home] or logical_home,
+        logical_home=logical_home,
+        adapter_roots=tuple((env, _root(root)) for env, root in adapters),
+        **{field: _root(root) for field, root in overrides.items()},
     )
 
 

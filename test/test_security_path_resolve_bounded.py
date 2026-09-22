@@ -1068,19 +1068,19 @@ def test_a_run_of_slow_but_completing_waits_still_exhausts_the_allowance(monkeyp
 
 
 class _StalledRealpath:
-    """Stands in for ``os.path.realpath`` on a slow-to-stat home: blocks until
-    released, raises nothing, and records what it was asked to resolve."""
+    """Stands in for the anchors' batched ``realpath`` on a slow-to-stat home:
+    blocks until released, raises nothing, and records what it was asked to resolve."""
 
     def __init__(self) -> None:
         self.release = threading.Event()
         self.calls: list[str] = []
         self._lock = threading.Lock()
 
-    def __call__(self, path: str) -> str | None:
+    def __call__(self, paths: list[str]) -> list[str | None]:
         with self._lock:
-            self.calls.append(path)
+            self.calls.extend(paths)
         self.release.wait()
-        return path
+        return list(paths)
 
 
 def _clear_override_roots(monkeypatch) -> None:
@@ -1102,7 +1102,7 @@ def test_a_stalled_root_anchor_refuses_within_the_budget(monkeypatch, tmp_path) 
     security._home_targets_cache.clear()
     security._resolved_root_key()  # a warm, canonical resolution must NOT be served later
     stalled = _StalledRealpath()
-    monkeypatch.setattr(security, "_realpath_or_none", stalled)
+    monkeypatch.setattr(security, "_realpaths_or_none", stalled)
     try:
         started = time.monotonic()
         with pytest.raises(security.PathResolutionStalled):
@@ -1130,7 +1130,7 @@ def test_a_stalled_anchor_is_not_reprobed_until_the_cooldown_lapses(monkeypatch)
     monkeypatch.setattr(security, "_path_resolve_clock", lambda: clock[0])
     security._home_targets_cache.clear()
     stalled = _StalledRealpath()
-    monkeypatch.setattr(security, "_realpath_or_none", stalled)
+    monkeypatch.setattr(security, "_realpaths_or_none", stalled)
     logical_home = str(security.Path.home())
     try:
         with pytest.raises(security.PathResolutionStalled):
@@ -1212,7 +1212,7 @@ def test_a_stalled_rebuild_refuses_even_with_a_warm_cache(monkeypatch, tmp_path)
     clock[0] += security._home_targets_ttl(0.0) + 0.01  # the slot expires
     logical_home = str(security.Path.home())
     stalled = _StalledRealpath()
-    monkeypatch.setattr(security, "_realpath_or_none", stalled)
+    monkeypatch.setattr(security, "_realpaths_or_none", stalled)
     try:
         with pytest.raises(security.PathResolutionStalled):
             security._home_dir_targets(security._SENSITIVE_HOME_DIRS)
@@ -1221,11 +1221,11 @@ def test_a_stalled_rebuild_refuses_even_with_a_warm_cache(monkeypatch, tmp_path)
     finally:
         stalled.release.set()
         security._home_targets_cache.clear()
-    # One paid probe -- the root key's -- then everything under the home's
-    # prefix (the rebuild included) is refused without touching the filesystem
-    # for the cooldown: the ~40 leaves cost nothing, and the expired slot is
-    # never handed back.
-    assert stalled.calls == [logical_home]
+    # One paid probe -- the root key's, home and override root in one batch --
+    # then everything under the home's prefix (the rebuild included) is refused
+    # without touching the filesystem for the cooldown: the ~40 leaves cost
+    # nothing, and the expired slot is never handed back.
+    assert stalled.calls == [logical_home, str(crew_home)]
 
 
 def test_the_rebuild_is_one_pool_job(monkeypatch, tmp_path) -> None:
@@ -1276,9 +1276,9 @@ def test_a_repointed_override_root_is_never_served_stale_through_a_stall(
     clock[0] += security._home_targets_ttl(0.0) + 0.01
     link.unlink()
     link.symlink_to(real_b, target_is_directory=True)  # repointed...
-    real_resolver = security._realpath_or_none
+    real_resolver = security._realpaths_or_none
     stalled = _StalledRealpath()
-    monkeypatch.setattr(security, "_realpath_or_none", stalled)  # ...under a stall
+    monkeypatch.setattr(security, "_realpaths_or_none", stalled)  # ...under a stall
     try:
         # Only the anchors stall; the candidate resolves through the real
         # resolver on its own healthy prefix, exactly as in the review scenario.
@@ -1288,7 +1288,7 @@ def test_a_repointed_override_root_is_never_served_stale_through_a_stall(
         stalled.release.set()
         security._home_targets_cache.clear()
     # And once the disk answers again, B is anchored canonically.
-    monkeypatch.setattr(security, "_realpath_or_none", real_resolver)
+    monkeypatch.setattr(security, "_realpaths_or_none", real_resolver)
     for _ in range(500):  # the clock is frozen, so bound the wait by iterations
         if not security._wedged_workers():
             break
@@ -1315,11 +1315,11 @@ def test_a_unc_home_still_has_its_anchors_resolved(monkeypatch) -> None:
     monkeypatch.setenv("USERPROFILE", unc_home)
     calls: list[str] = []
 
-    def canonicalising(path: str) -> str:
-        calls.append(path)
-        return path + "\\canonical"  # stands in for the junction's target
+    def canonicalising(paths: list[str]) -> list[str | None]:
+        calls.extend(paths)
+        return [p + "\\canonical" for p in paths]  # stands in for the junction's target
 
-    monkeypatch.setattr(security, "_realpath_or_none", canonicalising)
+    monkeypatch.setattr(security, "_realpaths_or_none", canonicalising)
     security._home_targets_cache.clear()
     try:
         roots = security._resolved_root_key()
