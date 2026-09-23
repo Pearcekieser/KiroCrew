@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from aiohttp import web
 
@@ -18,6 +18,7 @@ from kiro_crew.dashboard.chat_utils import (
     history_corpus_unreadable,
     slot_history_key,
 )
+from kiro_crew.dashboard.handlers.memory import _store_unavailable_response
 from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
 from kiro_crew.dashboard.state import (
     MAX_LIVE_SLOTS,
@@ -105,14 +106,19 @@ FORK_AUDIT_OPERATION = "chat.slot_fork"
 class ForkSource:
     """A fork parent with its memory identity frozen at the moment it was checked.
 
-    ``identity`` is the five-tuple :func:`fork_slot` re-compares the live slot
+    ``identity`` is the six-tuple :func:`fork_slot` re-compares the live slot
     against before binding and again before copying, so a parent whose agent,
-    store or mode moved under the fork is refused rather than copied.
+    store, mode or WORKSPACE moved under the fork is refused rather than copied.
+    Workspace is in the tuple because the child is born in ``slot.workspace``
+    read live: an agent caller's containment check (``authorize_target``) ran
+    against the workspace the source had at the time, and a concurrent owner
+    switch of the source (``api_chat_slot_workspace``) would otherwise carry the
+    transcript into a workspace that check never admitted.
     """
 
     slot: "_ChatSlot"
     execution: Any
-    identity: tuple[str, str, str, str, str]
+    identity: tuple[str, str, str, str, str, str]
 
 
 @dataclass(frozen=True)
@@ -121,9 +127,7 @@ class ForkResult:
 
     slot: "_ChatSlot"
     messages: int
-    at_index: int | None
     direction: str
-    head_count: int
 
 
 async def resolve_fork_source(
@@ -170,9 +174,8 @@ async def resolve_fork_source(
         slot.memory_store,
         slot.memory_mode,
         slot_history_key(slot),
+        str(getattr(slot, "workspace", "default") or "default"),
     )
-
-    from kiro_crew.dashboard.handlers.memory import _store_unavailable_response
 
     try:
         inherited_execution = await asyncio.to_thread(
@@ -390,6 +393,8 @@ async def fork_slot(
     jev_route_allowed: bool,
     audit_caller: str,
     audit_operation: str = FORK_AUDIT_OPERATION,
+    stamp: "Callable[[_ChatSlot], None] | None" = None,
+    recheck: "Callable[[], None] | None" = None,
 ) -> "ForkResult | web.Response":
     """Copy *source*'s transcript up to (or after) the fork point into a new slot.
 
@@ -402,6 +407,29 @@ async def fork_slot(
     (``request_app``, ``origin``, ``count_user_session``, ``jev_route_allowed``,
     ``audit_caller``) are passed in, so ``session_control.fork_session`` can run
     the identical copy for an agent caller with its own answers to them.
+
+    ``stamp``, when given, is called on the child once it is fully shaped
+    (title, folder, tags, inherited memory identity) and BEFORE the transcript
+    copy is saved -- so whatever it sets rides the child's own birth save and is
+    on disk before ``push_slots_update`` broadcasts the slot. This is how
+    ``session_control.fork_session`` lands creator attribution and its optional
+    title/folder in the same write as the transcript, with no second persistence
+    window in which a persisted, broadcast child exists unattributed. It must
+    only assign in-memory fields; it is not awaited and must not raise for
+    ordinary input (a raise here is treated as fork finalisation failing, and
+    the child is withdrawn).
+
+    ``recheck``, when given, is a SYNCHRONOUS re-assertion of whatever the caller
+    decided before handing over: it runs immediately before the child is minted
+    and again immediately before the transcript is copied into it, adjacent to
+    the two points where this function re-compares the source's own frozen
+    identity (when no memory bind runs, nothing suspends after the mint, so the
+    first call covers the copy too). It may raise; a raise before the mint
+    leaves nothing behind, and a raise after the bind withdraws the empty child. This is how
+    ``session_control.fork_session`` keeps its containment answers -- caller
+    eligibility, the source's addressability, the folder's existence -- true at
+    the act rather than at the moment they were first read, across the
+    suspensions this function takes for the transcript read and the memory bind.
 
     Returns a :class:`ForkResult` on success. A refusal is returned as the
     finished ``web.Response`` -- this module's refusal shape, kept so its coded
@@ -1029,7 +1057,6 @@ async def fork_slot(
     else:
         fork_mode = slot.mode
 
-    from kiro_crew.dashboard.handlers.memory import _store_unavailable_response
     from kiro_crew.memory_stores import UnknownMemoryStore
 
     def _source_identity_unchanged() -> bool:
@@ -1039,6 +1066,7 @@ async def fork_slot(
             slot.memory_store,
             slot.memory_mode,
             slot_history_key(slot),
+            str(getattr(slot, "workspace", "default") or "default"),
         )
 
     try:
@@ -1048,6 +1076,10 @@ async def fork_slot(
             raise UnknownMemoryStore("The fork source changed while its memory was verified")
     except (OSError, ValueError) as exc:
         return _store_unavailable_response(source_memory_identity[2], exc)
+    if recheck is not None:
+        # Adjacent to the mint: nothing suspends between here and
+        # `get_or_create_slot`, so what this asserts is true of the child's birth.
+        recheck()
 
     new_slot = state.get_or_create_slot(
         name=None,
@@ -1075,6 +1107,13 @@ async def fork_slot(
                 effective_session_key(new_slot),
                 inherited_execution,
             )
+            if recheck is not None:
+                # The bind suspended; re-assert the caller's containment answers
+                # first, so a source that became unaddressable meanwhile is
+                # refused with ITS code rather than as an identity drift. A raise
+                # here takes the withdrawal path below (no rows copied yet), and
+                # nothing suspends between here and the copy.
+                recheck()
             if not _source_identity_unchanged():
                 raise UnknownMemoryStore("The fork source changed before its history was copied")
             new_slot.memory_store = inherited_store
@@ -1120,6 +1159,8 @@ async def fork_slot(
     new_slot._titled = True
 
     try:
+        if stamp is not None:
+            stamp(new_slot)
         for m in visible:
             role = m.get("role", "assistant")
             content = m.get("content", "")
@@ -1243,10 +1284,4 @@ async def fork_slot(
     )
     _sync_dashboard_slots(state)
     state.push_slots_update()
-    return ForkResult(
-        slot=new_slot,
-        messages=len(visible),
-        at_index=at_index,
-        direction=direction,
-        head_count=len(head_messages),
-    )
+    return ForkResult(slot=new_slot, messages=len(visible), direction=direction)
