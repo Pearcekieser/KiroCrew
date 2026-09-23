@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
@@ -27,6 +29,9 @@ from kiro_crew.history import carry_provenance
 from kiro_crew.history_projection import drop_persisted_tail_prefix as _drop_persisted_tail_prefix
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
+
+if TYPE_CHECKING:
+    from kiro_crew.dashboard.state import _ChatSlot
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +94,93 @@ def _bind_fork_execution(source, child_key: str, execution) -> None:
     if _fork_execution_context(*source) != execution:
         raise UnknownMemoryStore("The fork source's execution changed")
     bind_session_execution(child_key, execution)
+
+
+#: SEL operation name the human fork route records under. The session-control
+#: route passes its own so the two entry points stay distinguishable in the audit.
+FORK_AUDIT_OPERATION = "chat.slot_fork"
+
+
+@dataclass(frozen=True)
+class ForkSource:
+    """A fork parent with its memory identity frozen at the moment it was checked.
+
+    ``identity`` is the five-tuple :func:`fork_slot` re-compares the live slot
+    against before binding and again before copying, so a parent whose agent,
+    store or mode moved under the fork is refused rather than copied.
+    """
+
+    slot: "_ChatSlot"
+    execution: Any
+    identity: tuple[str, str, str, str, str]
+
+
+@dataclass(frozen=True)
+class ForkResult:
+    """What :func:`fork_slot` hands back once the child is persisted and acknowledged."""
+
+    slot: "_ChatSlot"
+    messages: int
+    at_index: int | None
+    direction: str
+    head_count: int
+
+
+async def resolve_fork_source(
+    slot: "_ChatSlot", *, audit_caller: str, audit_operation: str = FORK_AUDIT_OPERATION
+) -> "ForkSource | web.Response":
+    """Freeze the source's memory identity before anything else is read.
+
+    The first half of a fork, split from :func:`fork_slot` so the human route
+    keeps its refusal precedence (a source refused here is refused before the
+    request body is even parsed) and the session-control route can run the same
+    check without a request. A refusal is returned as the finished response,
+    which is the shape every refusal in this module has; callers that are not
+    HTTP handlers translate it (``session_control.fork_session``).
+    """
+    # The child inherits the parent's mode, so the parent's value is what the
+    # slot constructor validates against ``VALID_MEMORY_MODES``. The API checks
+    # the field on the way in, but rehydration copies the transcript header's
+    # ``memory_mode`` onto the slot as written, so a hand-edited or partially
+    # written header can leave an unrecognised value on a live parent. That
+    # value is refused HERE, with a code and before any child exists, rather
+    # than raising out of ``_ChatSlot.__init__`` as a 500. Fail closed: a mode
+    # this code cannot read is a memory boundary it cannot honour.
+    inherited_memory_mode = slot.memory_mode
+    if inherited_memory_mode not in VALID_MEMORY_MODES:
+        sel().log_api_access(
+            caller=audit_caller,
+            operation=audit_operation,
+            outcome="denied",
+            source="dashboard",
+            resources=f"slot={slot.key},memory_mode={inherited_memory_mode!r}",
+            error="source slot memory_mode is not a recognised mode",
+        )
+        return web.json_response(
+            {
+                "error": "the source session's memory mode is not recognised",
+                "code": "fork_source_memory_mode_invalid",
+            },
+            status=409,
+        )
+
+    source_memory_identity = (
+        effective_session_key(slot),
+        slot.agent,
+        slot.memory_store,
+        slot.memory_mode,
+        slot_history_key(slot),
+    )
+
+    from kiro_crew.dashboard.handlers.memory import _store_unavailable_response
+
+    try:
+        inherited_execution = await asyncio.to_thread(
+            _fork_execution_context, *source_memory_identity[:4]
+        )
+    except (OSError, ValueError) as exc:
+        return _store_unavailable_response(source_memory_identity[2], exc)
+    return ForkSource(slot=slot, execution=inherited_execution, identity=source_memory_identity)
 
 
 async def api_chat_slot_fork(request: web.Request) -> web.Response:
@@ -158,48 +250,9 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
             # (CWE-204). The true reason is recorded server-side via SEL above.
             return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
 
-    # The child inherits the parent's mode, so the parent's value is what the
-    # slot constructor validates against ``VALID_MEMORY_MODES``. The API checks
-    # the field on the way in, but rehydration copies the transcript header's
-    # ``memory_mode`` onto the slot as written, so a hand-edited or partially
-    # written header can leave an unrecognised value on a live parent. That
-    # value is refused HERE, with a code and before any child exists, rather
-    # than raising out of ``_ChatSlot.__init__`` as a 500. Fail closed: a mode
-    # this code cannot read is a memory boundary it cannot honour.
-    inherited_memory_mode = slot.memory_mode
-    if inherited_memory_mode not in VALID_MEMORY_MODES:
-        sel().log_api_access(
-            caller=request_app or "dashboard",
-            operation="chat.slot_fork",
-            outcome="denied",
-            source="dashboard",
-            resources=f"slot={name},memory_mode={inherited_memory_mode!r}",
-            error="source slot memory_mode is not a recognised mode",
-        )
-        return web.json_response(
-            {
-                "error": "the source session's memory mode is not recognised",
-                "code": "fork_source_memory_mode_invalid",
-            },
-            status=409,
-        )
-
-    source_memory_identity = (
-        effective_session_key(slot),
-        slot.agent,
-        slot.memory_store,
-        slot.memory_mode,
-        slot_history_key(slot),
-    )
-
-    from kiro_crew.dashboard.handlers.memory import _store_unavailable_response
-
-    try:
-        inherited_execution = await asyncio.to_thread(
-            _fork_execution_context, *source_memory_identity[:4]
-        )
-    except (OSError, ValueError) as exc:
-        return _store_unavailable_response(source_memory_identity[2], exc)
+    source = await resolve_fork_source(slot, audit_caller=request_app or "dashboard")
+    if isinstance(source, web.Response):
+        return source
 
     # Restricted forks copy only the live conversation and inherit the parent's
     # mode before any row is copied. Neither branch persists restricted bodies,
@@ -284,6 +337,81 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
             status=400,
         )
 
+    result = await fork_slot(
+        state,
+        source,
+        at_index=at_index,
+        at_message_id=at_message_id,
+        direction=direction,
+        prompt=prompt,
+        mode_override=mode_override,
+        request_app=request_app,
+        origin=request_slot_origin(request_app),
+        # Human request-layer path: a person forking a conversation. The
+        # origin conjunct in state.py still excludes app-token callers.
+        count_user_session=True,
+        # Inheriting is arming a SECOND routed session, so it answers to the
+        # same owner predicate as the arm itself: this route is gated on app
+        # ownership, which an allow-listed non-owner passes for a slot the
+        # owner armed.
+        jev_route_allowed=is_owner_dashboard_request(request),
+        audit_caller=request_app or "dashboard",
+    )
+    if isinstance(result, web.Response):
+        return result
+    return web.json_response(
+        {
+            "ok": True,
+            "key": result.slot.key,
+            "title": result.slot.title,
+            "messages": result.messages,
+            "prompt": prompt,
+            "folder_id": result.slot.folder_id or None,
+            "direction": result.direction,
+            # The mode the child was born with (always the parent's), so the tab
+            # can render the incognito/temporary badge before the slots refresh.
+            "memory_mode": result.slot.memory_mode,
+        }
+    )
+
+
+async def fork_slot(
+    state: DashboardState,
+    source: "ForkSource",
+    *,
+    at_index: Any,
+    at_message_id: str | None,
+    direction: str,
+    prompt: str,
+    mode_override: str | None,
+    request_app: str,
+    origin: str,
+    count_user_session: bool,
+    jev_route_allowed: bool,
+    audit_caller: str,
+    audit_operation: str = FORK_AUDIT_OPERATION,
+) -> "ForkResult | web.Response":
+    """Copy *source*'s transcript up to (or after) the fork point into a new slot.
+
+    The second half of a fork: everything from the transcript snapshot to the
+    acknowledged, persisted child. ``source`` is what :func:`resolve_fork_source`
+    returned for the parent, and every argument is already validated -- this
+    function checks only what it can check against the transcript it reads
+    (``at_index`` against the visible-row count, ``at_message_id`` against the
+    rows' ids). It has no request: the pieces the human route derives from one
+    (``request_app``, ``origin``, ``count_user_session``, ``jev_route_allowed``,
+    ``audit_caller``) are passed in, so ``session_control.fork_session`` can run
+    the identical copy for an agent caller with its own answers to them.
+
+    Returns a :class:`ForkResult` on success. A refusal is returned as the
+    finished ``web.Response`` -- this module's refusal shape, kept so its coded
+    error sites stay where the error-code ratchet pins them -- and a failure
+    that is not a refusal raises. On success the child is already saved,
+    ``_sync_dashboard_slots`` has run and the slots update is pushed.
+    """
+    slot = source.slot
+    inherited_execution = source.execution
+    source_memory_identity = source.identity
     # Read disk FIRST (full history). Stable message IDs are resolved against this
     # complete corpus; the legacy index fallback also has to use the same chained
     # view the fully-loaded frontend renders. Without the chained read, an archived
@@ -905,7 +1033,7 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     from kiro_crew.memory_stores import UnknownMemoryStore
 
     def _source_identity_unchanged() -> bool:
-        return state._slots.get(name) is slot and source_memory_identity == (
+        return state._slots.get(slot.key) is slot and source_memory_identity == (
             effective_session_key(slot),
             slot.agent,
             slot.memory_store,
@@ -935,10 +1063,8 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
         # validated above, so the constructor cannot raise on it.
         memory_mode=inherited_memory_mode,
         app=request_app,
-        origin=request_slot_origin(request_app),
-        # Human request-layer path: a person forking a conversation. The
-        # origin conjunct in state.py still excludes app-token callers.
-        count_user_session=True,
+        origin=origin,
+        count_user_session=count_user_session,
     )
     if inherited_execution is not None:
         try:
@@ -968,9 +1094,8 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     # "Auto (Jev)" session that arrived pinned would run the parent's next turns
     # on a model the parent had explicitly stopped choosing by hand.
     # Inheriting is arming a SECOND routed session, so it answers to the same owner
-    # predicate as the arm itself: this route is gated on app ownership, which an
-    # allow-listed non-owner passes for a slot the owner armed.
-    new_slot.jev_route = slot.jev_route and is_owner_dashboard_request(request)
+    # predicate as the arm itself; the caller says whether it passed that predicate.
+    new_slot.jev_route = slot.jev_route and jev_route_allowed
     # Inherit the active project directory so the fork keeps the parent's working
     # context (agent resolution, steering files, CWD) instead of falling back to
     # the config/workspace default on first message.
@@ -1015,8 +1140,8 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     except Exception:
         state._slots.pop(new_slot.key, None)
         sel().log_api_access(
-            caller=request_app or "dashboard",
-            operation="chat.slot_fork",
+            caller=audit_caller,
+            operation=audit_operation,
             outcome="error",
             source="dashboard",
             resources=f"from={slot.key},to={new_slot.key}",
@@ -1085,8 +1210,8 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
                 new_slot.key,
             )
         sel().log_api_access(
-            caller=request_app or "dashboard",
-            operation="chat.slot_fork",
+            caller=audit_caller,
+            operation=audit_operation,
             outcome="denied",
             source="dashboard",
             resources=(
@@ -1103,8 +1228,8 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
             status=409,
         )
     sel().log_api_access(
-        caller=request_app or "dashboard",
-        operation="chat.slot_fork",
+        caller=audit_caller,
+        operation=audit_operation,
         outcome="allowed",
         source="dashboard",
         resources=(
@@ -1118,17 +1243,10 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     )
     _sync_dashboard_slots(state)
     state.push_slots_update()
-    return web.json_response(
-        {
-            "ok": True,
-            "key": new_slot.key,
-            "title": new_slot.title,
-            "messages": len(visible),
-            "prompt": prompt,
-            "folder_id": new_slot.folder_id or None,
-            "direction": direction,
-            # The mode the child was born with (always the parent's), so the tab
-            # can render the incognito/temporary badge before the slots refresh.
-            "memory_mode": new_slot.memory_mode,
-        }
+    return ForkResult(
+        slot=new_slot,
+        messages=len(visible),
+        at_index=at_index,
+        direction=direction,
+        head_count=len(head_messages),
     )
