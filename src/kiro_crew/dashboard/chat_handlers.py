@@ -70,6 +70,9 @@ from kiro_crew.dashboard.chat_persistence import (
     _TRANSIENT_ROLES,
     COLOR_HEX_RE,
     _attach_variants,
+    _local_turn_generation,
+    _local_turn_prompt,
+    _reconcile_local_turn_marker,
     _rehydrate_slot_title,
     _restored_agent_name,
     _restored_mode,
@@ -11139,7 +11142,12 @@ def _hydrate_slot_from_history(
     # by variant count).
     for m in messages:
         role = m.get("role", "assistant")
-        cls = "msg msg-u" if role == "user" else "msg msg-a"
+        # Carry the persisted ``cls`` like the startup restore paths do: a Stop
+        # card's discriminator lives only in that JSON string (see
+        # ``is_stop_event_row``), so a resumed session dropping it reads the
+        # user's deliberate Stop as an interrupted turn. Import rows carry none
+        # and fall through to the role default as before.
+        cls = m.get("cls") or ("msg msg-u" if role == "user" else "msg msg-a")
         content = m.get("content", "")
         slot.append(
             role,
@@ -11162,6 +11170,10 @@ def _hydrate_slot_from_history(
     # _disk_older_count above) are the frozen prefix saves never rewrite,
     # so older on-disk turns are preserved.
     slot._disk_window_len = len(slot.messages)
+    # After the window boundary, like the startup restore: a local turn the
+    # previous process admitted and never tore down becomes the interruption
+    # row here, so a session pulled up off disk and one restored at boot agree.
+    _reconcile_local_turn_marker(slot, _local_turn_generation(meta), _local_turn_prompt(meta))
 
 
 async def api_chat_slot_resume(request: web.Request) -> web.Response:
@@ -11563,7 +11575,10 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
         # Restore the protected choice read before construction, not the
         # editable transcript's provisional agent name.
         slot.agent = restored_agent
-    total = len(all_messages)
+    # Hydrated length, not the raw disk count: materialisation may append one
+    # unsaved interruption row, and the paging cursor below has to account for
+    # it or the next older page repeats a row.
+    total = slot._disk_older_count + len(slot.messages)
     recent = slot.messages[-200:] if len(slot.messages) > 200 else slot.messages
     # The slot was registered throughout hydration (so a concurrent same-key
     # resume resolved it and hit the idempotency guard) but hidden from the
@@ -11577,8 +11592,9 @@ async def api_chat_slot_resume(request: web.Request) -> web.Response:
         {
             "ok": True,
             "key": slot.key,
-            # `total` is the full on-disk length here, so this already is the
-            # raw index the next older page starts from.
+            # `total` is the effective hydrated length (durable rows plus a
+            # recovered interruption row when one was appended), so this is
+            # the raw index the next older page starts from.
             "next_before": total - len(recent),
             "messages": _prepare_messages(
                 recent, slot.running, live_child=_live_child_instance(state, slot)
