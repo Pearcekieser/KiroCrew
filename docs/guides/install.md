@@ -228,7 +228,10 @@ release tree and `UV_PYTHON_INSTALL_MIRROR` at a mirror of the interpreter
 archives — the pinned SHA-256 digests are enforced either way. The signed
 installer never pipes an unsigned third-party script into a shell: uv is
 fetched as a tarball and verified against pinned digests, exactly like the
-wheel itself. When it finishes it prints the next step: `kirocrew gateway` to
+wheel itself. On a terminal the slow steps (wheel download, venv creation,
+pip) draw a single live progress line; `KIROCREW_INSTALL_PLAIN=1` turns that
+off and prints one line per step instead, which is also what a piped or
+logged run gets. When it finishes it prints the next step: `kirocrew gateway` to
 start now, or `kirocrew service install` to run it as a service.
 
 Dependencies are installed from **prebuilt wheels only** (`pip
