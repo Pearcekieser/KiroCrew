@@ -14191,6 +14191,11 @@
         "zoom_level": "缩放级别",
         "font_family_option_opendyslexic": "OpenDyslexic",
         "config_load_failed": "无法加载已保存的显示设置。加载完成前，Shell、最近会话和命令补全设置不可用。",
+        "installed_themes_load_failed": "无法加载主题列表，正在自动重试。在加载完成前，无法选择或应用已安装的主题。",
+        "installed_themes_refresh_failed": "无法刷新主题列表。列表已过期。",
+        "installed_themes_refresh_failed_after_install": "主题已安装，但无法刷新主题列表。请点击“重试”以刷新列表并应用它，或在主题列表刷新后从列表中选择它。",
+        "retry_theme_list": "重试",
+        "retrying_theme_list": "正在重试…",
         "recent_tint_save_failed": "无法保存最近会话的高亮数量。"
       },
       "importPanel": {

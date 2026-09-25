@@ -6224,6 +6224,11 @@
         "terminal_completion_desc": "Show the completion popup while typing in the Terminal. Enter runs the line you typed; to take a suggestion, press ↑/↓ then Enter, or Tab. Off hides the popup; your shell's own Tab completion still works.",
         "terminal_completion_save_failed": "Could not save the command completion setting",
         "config_load_failed": "Could not load the saved display settings. The shell, recent-session and command completion settings are unavailable until it loads.",
+        "installed_themes_load_failed": "Could not load the theme list; retrying automatically. Until it loads, an installed theme cannot be selected or applied.",
+        "installed_themes_refresh_failed": "Could not refresh the theme list. It is out of date.",
+        "installed_themes_refresh_failed_after_install": "The theme was installed, but the theme list could not be refreshed. Press Retry to refresh the list and apply it, or pick it from the theme list once it refreshes.",
+        "retry_theme_list": "Retry",
+        "retrying_theme_list": "Retrying…",
         "recent_tint_save_failed": "Could not save the recent-session highlight count."
       },
       "instancesPanel": {

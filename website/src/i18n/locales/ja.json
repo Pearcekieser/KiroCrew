@@ -14191,6 +14191,11 @@
         "zoom_level": "ズームレベル",
         "font_family_option_opendyslexic": "OpenDyslexic",
         "config_load_failed": "保存された表示設定を読み込めませんでした。読み込まれるまで、シェル、最近のセッション、コマンド補完の設定は使用できません。",
+        "installed_themes_load_failed": "テーマ一覧を読み込めませんでした。自動的に再試行しています。読み込まれるまで、インストール済みテーマは選択も適用もできません。",
+        "installed_themes_refresh_failed": "テーマ一覧を更新できませんでした。一覧が最新ではありません。",
+        "installed_themes_refresh_failed_after_install": "テーマはインストールされましたが、テーマ一覧を更新できませんでした。「再試行」を押して一覧を更新して適用するか、テーマ一覧が更新されたら一覧から選んでください。",
+        "retry_theme_list": "再試行",
+        "retrying_theme_list": "再試行中…",
         "recent_tint_save_failed": "最近のセッションのハイライト数を保存できませんでした。"
       },
       "importPanel": {

@@ -14603,6 +14603,11 @@
         "zoom_level": "Nível de zoom",
         "font_family_option_opendyslexic": "OpenDyslexic",
         "config_load_failed": "Não foi possível carregar as configurações de exibição salvas. As configurações de shell, sessões recentes e conclusão de comandos ficam indisponíveis até que elas carreguem.",
+        "installed_themes_load_failed": "Não foi possível carregar a lista de temas; tentando novamente automaticamente. Até que seja carregada, um tema instalado não pode ser selecionado nem aplicado.",
+        "installed_themes_refresh_failed": "Não foi possível atualizar a lista de temas. Ela está desatualizada.",
+        "installed_themes_refresh_failed_after_install": "O tema foi instalado, mas a lista de temas não pôde ser atualizada. Pressione Tentar novamente para atualizar a lista e aplicá-lo, ou escolha-o na lista de temas quando ela for atualizada.",
+        "retry_theme_list": "Tentar novamente",
+        "retrying_theme_list": "Tentando novamente…",
         "recent_tint_save_failed": "Não foi possível salvar a quantidade de sessões recentes destacadas."
       },
       "importPanel": {

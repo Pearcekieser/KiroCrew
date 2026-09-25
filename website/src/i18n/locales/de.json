@@ -14397,6 +14397,11 @@
         "zoom_level": "Zoomstufe",
         "font_family_option_opendyslexic": "OpenDyslexic",
         "config_load_failed": "Die gespeicherten Anzeigeeinstellungen konnten nicht geladen werden. Die Einstellungen für Shell, letzte Sitzungen und Befehlsvervollständigung sind nicht verfügbar, bis sie geladen sind.",
+        "installed_themes_load_failed": "Die Theme-Liste konnte nicht geladen werden; es wird automatisch erneut versucht. Bis sie geladen ist, kann ein installiertes Theme weder ausgewählt noch angewendet werden.",
+        "installed_themes_refresh_failed": "Die Theme-Liste konnte nicht aktualisiert werden. Sie ist nicht mehr aktuell.",
+        "installed_themes_refresh_failed_after_install": "Das Theme wurde installiert, aber die Theme-Liste konnte nicht aktualisiert werden. Klicke auf „Erneut versuchen“, um die Liste zu aktualisieren und es anzuwenden, oder wähle es aus der Theme-Liste, sobald sie aktualisiert wurde.",
+        "retry_theme_list": "Erneut versuchen",
+        "retrying_theme_list": "Wird erneut versucht…",
         "recent_tint_save_failed": "Die Anzahl hervorgehobener letzter Sitzungen konnte nicht gespeichert werden."
       },
       "importPanel": {
