@@ -283,6 +283,8 @@ def _run(
 
     namespace = {
         "_libc": libc,
+        # Set in Step 2, above the extracted region.
+        "_launcher_nondumpable": False,
         "_HARNESS_VERIFY": verify or _no_op_verify,
         "_MS_BIND": 4096,
         "_MS_REC": 16384,
@@ -434,6 +436,8 @@ def _run_with_libc(tmp_path: Path, bed: _Bed, libc: _FakeLibc) -> str | None:
 
     namespace = {
         "_libc": libc,
+        # Set in Step 2, above the extracted region.
+        "_launcher_nondumpable": False,
         "_MS_BIND": 4096,
         "_MS_REC": 16384,
         "_MS_PRIVATE": 1 << 18,

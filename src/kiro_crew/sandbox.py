@@ -551,6 +551,21 @@ _CREW_HIDDEN_LEAVES: tuple[str, ...] = (
     *(f"{AUTH_SQLITE_DB}{suffix}" for suffix in AUTH_SQLITE_SIDECAR_SUFFIXES),
 )
 
+#: Hidden leaves whose Linux mask must refuse the read instead of answering it empty.
+#:
+#: The Linux mask is an empty file bound over the real one, so a sandboxed ``rsync``,
+#: ``cp -a`` or ``tar`` of the data home reads zero bytes and copies them as the file's
+#: contents. For ``token_signing.key`` that copy is permanent damage: the gateway never
+#: overwrites an existing key (``token_secret._load_or_create_secret`` only creates one
+#: with ``O_EXCL`` or a non-clobbering link), so a destination that receives the empty
+#: copy signs with an ephemeral secret on every boot. An unreadable mask makes the copy
+#: fail loudly instead: rsync reports ``Permission denied``, leaves the destination's
+#: key untouched and exits 23. The macOS backend already denies this read, so this is
+#: the same answer on Linux. Nothing in a sandbox reads the key; the gateway, which
+#: does, runs outside it.
+_CREW_UNREADABLE_MASK_LEAVES: frozenset[str] = frozenset({"token_signing.key"})
+assert _CREW_UNREADABLE_MASK_LEAVES <= set(_CREW_HIDDEN_LEAVES)
+
 #: Crew-home ceilings and gateway-managed data: readable by sandboxed code,
 #: never writable by it. See the READONLY note above for why hiding a ceiling
 #: inverts its effect; named memory stores need write integrity, not secrecy.
@@ -8248,6 +8263,7 @@ def _build_launcher_script(
         }
     )
     expose_json = json.dumps(expose_pairs)
+    unreadable_masks_json = json.dumps(sorted(_CREW_UNREADABLE_MASK_LEAVES))
     env_prefixes_json = json.dumps(env_prefixes)
     ssh_dir = json.dumps(os.path.join(home, ".ssh"))
     ssh_known_hosts = json.dumps(os.path.join(home, ".ssh", "known_hosts"))
@@ -9097,6 +9113,21 @@ def main():
         os.close(p2c_r)
 
         # Step 2: enter mount namespace (now we have a mapped UID)
+        #
+        # Non-dumpable BEFORE the namespace exists, not just around the
+        # unreadable mask's stage: a same-uid process that opened
+        # /proc/<pid>/root after unshare(CLONE_NEWNS) would keep a descriptor
+        # into this namespace's tree, reach the stage tmpfs through it later
+        # and chmod the mode-0 stand-in readable. Opened before the unshare, the
+        # same descriptor names the host tree, which never sees these mounts.
+        # Restored once the sensitive-file masks are in place and the stage is
+        # detached; exec resets it for the payload in any case. The parent has
+        # already written the uid/gid maps, which is the one thing that needed
+        # this process to be dumpable.
+        _PR_SET_DUMPABLE = 4
+        _launcher_nondumpable = bool(_libc.prctl) and (
+            _libc.prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) == 0)
+
         if _libc.unshare(_CLONE_NEWNS) != 0:
             sys.exit(f"sandbox: unshare(NEWNS) failed: errno {{ctypes.get_errno()}}")
 
@@ -9589,24 +9620,128 @@ def main():
                     "link, then retry." % (f, _alias_st.st_mode)
                 )
 
+        # A leaf in _unreadable_masks gets a mode-0 stand-in, so a copy made inside
+        # the sandbox fails on it rather than carrying zero bytes out as its content.
+        #
+        # Mode 0 only holds while nobody can chmod the inode back, and the
+        # sandboxed uid owns it. So that stand-in is not created in the shared
+        # tmpfs, where any same-uid writer could chmod it, swap it or aim a
+        # symlink through its name. It is created mode 0 (never chmodded) in a
+        # tmpfs mounted over a fresh stage directory in THIS mount namespace
+        # only: outside the namespace the stage is an empty host directory. The
+        # launcher has been non-dumpable since before unshare(CLONE_NEWNS) (Step
+        # 2), so no other same-uid process holds or can open a way into it
+        # through /proc/<pid>/root or /proc/<pid>/fd. The
+        # kernel only binds a file that still has a name, which rules out an
+        # O_TMPFILE inode. After the bind, a read-only remount makes chmod through
+        # the masked name fail with EROFS, and the stage tmpfs is detached, so the
+        # read-only bind is the only way left to the inode.
+        _unreadable_masks = {unreadable_masks_json}
+
+        def _stage_is_fresh_mount(dfd, parent):
+            """Whether the pinned stage now sits on a device other than its parent's."""
+            return os.fstat(dfd).st_dev != os.stat(parent).st_dev
+
+        def _mount_private_tmpfs(target):
+            """Mount a small private tmpfs on *target*; 0 on success, else the errno.
+
+            Degrades open by design, unlike ``_mount_or_die``: a failure here costs
+            only the unreadable stand-in, and the caller falls back to the readable
+            empty mask main has always used.
+            """
+            if _libc.mount(b"tmpfs", target, b"tmpfs", _MS_NOSUID | _MS_NODEV | _MS_NOEXEC, b"mode=0700,size=16k") != 0:
+                return ctypes.get_errno() or -1
+            return 0
+
+        def _open_unreadable_stand_in(what):
+            """``(file_fd, stage_fd, stage)`` for a mode-0 stand-in, or None if unsupported."""
+            if not _launcher_nondumpable:
+                return None
+            _parent = _tmpfs_src or tempfile.gettempdir()
+            _stage = tempfile.mkdtemp(dir=_tmpfs_src, prefix=_src_prefix)
+            _pin = os.open(_stage, os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY)
+            try:
+                _err = _mount_private_tmpfs(("/proc/self/fd/%d" % _pin).encode())
+            finally:
+                os.close(_pin)
+            if _err:
+                try:
+                    os.rmdir(_stage)
+                except OSError:
+                    pass
+                sys.stderr.write(
+                    "sandbox: WARNING -- could not mount a private tmpfs for the "
+                    "unreadable mask over %s (errno %d); that mask reads as empty "
+                    "instead.\\n" % (what, _err))
+                return None
+            _sfd = os.open(_stage, os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY)
+            if not _stage_is_fresh_mount(_sfd, _parent):
+                sys.exit(
+                    "sandbox: BLOCKED -- the private stage for the unreadable mask "
+                    "over %s was replaced before it could be used. Lower "
+                    "sandbox_level to run without this mask deliberately." % what)
+            _ffd = os.open("stand-in", os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                           | os.O_NOFOLLOW | os.O_CLOEXEC, 0, dir_fd=_sfd)
+            return _ffd, _sfd, _stage
+
+        def _retire_unreadable_stage(sealed, what):
+            """Detach the stage tmpfs by its pinned root, then drop the descriptors."""
+            _ffd, _sfd, _stage = sealed
+            os.close(_ffd)
+            if _libc.umount2(("/proc/self/fd/%d" % _sfd).encode(), _MNT_DETACH) != 0:
+                _err = ctypes.get_errno()
+                sys.exit(
+                    "sandbox: BLOCKED -- could not retire the private stage for the "
+                    "unreadable mask over %s: errno %d (%s). It is a second, writable "
+                    "path to the mask, so the agent could make it readable. Lower "
+                    "sandbox_level to run without this mask deliberately."
+                    % (what, _err, os.strerror(_err)))
+            os.close(_sfd)
+            try:
+                os.rmdir(_stage)
+            except OSError:
+                pass
+
         for f in SENSITIVE_FILES:
             _file_fd, _file_target = _pin_mount_path(
                 f.encode(), stat.S_ISREG, require_present=_mask_required(f))
             if _file_target is None:
                 continue
+            _sealed = None
             try:
-                fd, empty_path = tempfile.mkstemp(dir=_tmpfs_src, prefix=_src_prefix)
-                # ``mkstemp`` hands back the descriptor of the file it created, which
-                # is the stand-in's identity pinned already; no second resolution.
-                _empty_st = os.fstat(fd)
+                if os.path.basename(f) in _unreadable_masks:
+                    _sealed = _open_unreadable_stand_in(f)
+                if _sealed is not None:
+                    _empty_st = os.fstat(_sealed[0])
+                    _empty_src = ("/proc/self/fd/%d" % _sealed[0]).encode()
+                else:
+                    fd, empty_path = tempfile.mkstemp(dir=_tmpfs_src, prefix=_src_prefix)
+                    # ``mkstemp`` hands back the descriptor of the file it created,
+                    # which is the stand-in's identity pinned already; no second
+                    # resolution.
+                    _empty_st = os.fstat(fd)
+                    _empty_src = empty_path.encode()
+                    os.close(fd)
                 _empty_id = (_empty_st.st_dev, _empty_st.st_ino)
                 _register_stand_in(_empty_id, _file_fd)
-                os.close(fd)
-                _mount_or_die(empty_path.encode(), _file_target, _MS_BIND,
+                _mount_or_die(_empty_src, _file_target, _MS_BIND,
                               "hiding sensitive file %s" % f)
+                if _sealed is not None:
+                    # The remount names the NAME, not the pinned descriptor: that
+                    # descriptor still refers to the mount underneath the bind.
+                    # _verify_masked_name runs after it, so a name swapped before
+                    # the remount still refuses the spawn.
+                    _mount_or_die(f.encode(), f.encode(),
+                                  _MS_REMOUNT | _MS_BIND | _MS_RDONLY
+                                  | _locked_mount_flags(f.encode()),
+                                  "sealing unreadable mask %s" % f)
             finally:
                 os.close(_file_fd)
             _verify_masked_name(f.encode(), _empty_id, f)
+            if _sealed is not None:
+                _retire_unreadable_stage(_sealed, f)
+        if _launcher_nondumpable:
+            _libc.prctl(_PR_SET_DUMPABLE, 1, 0, 0, 0)
 
         # .ssh: hide keys but expose known_hosts content (strict only)
         #
