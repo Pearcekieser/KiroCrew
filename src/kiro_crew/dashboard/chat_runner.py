@@ -12497,6 +12497,13 @@ async def _run_chat(
             return
         if monitor_completion is not None:
             monitor_completion.mark_accepted()
+        # Past every dispatch gate, with no await since the stop-generation read:
+        # from here Stop must cancel the PROVIDER's turn, not this task. Before
+        # this line the provider has no turn, stop_turn answers "idle", and the
+        # Stop handler cancels this task instead of waiting for the preparation
+        # above to reach the stop gate (which can take tens of seconds on a cold
+        # start). Cleared in the finally.
+        slot._turn_dispatched = True
         # Append-only the session's log (flag-gated, fail-soft). Emitted HERE, after
         # every gate above has passed, because ``turn/started`` asserts that the
         # turn RAN: a start written before authorization leaves an orphan for each
@@ -19055,6 +19062,9 @@ async def _run_chat(
         if _dispatch_lock_held:
             _dispatch_lock_held = False
             _dispatch_lock.release()
+        # The turn is over (dispatched or not), so a later Stop must not treat
+        # this slot as mid-dispatch. See ``_ChatSlot._turn_dispatched``.
+        slot._turn_dispatched = False
         # The turn's crew log closers, in the one order a reader can trust: every
         # `message/sent` for this turn has now been flushed, so the tool closer,
         # the last step's completion and the turn's own completion land after the

@@ -18918,6 +18918,114 @@ class TestStopDuringSessionPrep:
             len(stream_calls) == 1
         ), "a stale stop generation from a previous turn aborted a fresh turn"
 
+    @pytest.mark.asyncio
+    async def test_dispatch_flag_tracks_preparation_and_dispatch(self, tmp_path: Path) -> None:
+        """``_turn_dispatched`` is False while preparing, True once streaming, False after.
+
+        The Stop handler reads this flag to decide whether an "idle" provider
+        answer means "nothing running" or "still preparing, cancel the task".
+        """
+        from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        state, slot, _run_chat = self._make_state_and_slot(tmp_path)
+        seen: dict[str, bool] = {}
+        client = MagicMock()
+        client.shutdown = AsyncMock()
+
+        async def _stream(msg):
+            seen["streaming"] = slot._turn_dispatched
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text="ok")
+            yield LLMEvent(kind=EVENT_COMPLETE, stop_reason="end_turn")
+
+        client.stream = _stream
+        client.stream_command = _stream
+
+        async def _create(*args, **kwargs):
+            seen["preparing"] = slot._turn_dispatched
+            return client, True, False
+
+        state.sessions.get_or_create = AsyncMock(side_effect=_create)
+
+        await _run_chat(state, slot, "hello")
+
+        assert seen == {"preparing": False, "streaming": True}
+        assert slot._turn_dispatched is False
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_slow_cold_start_ends_the_turn(self, tmp_path: Path) -> None:
+        """Cancelling a turn stuck in ``get_or_create`` ends it without streaming.
+
+        This is what the Stop handler now does when the provider answers
+        "idle" for a preparing turn: rather than wait for the cold start to
+        reach the dispatch gate, it cancels the task. The turn must still close
+        out (done row, chat_done, slot idle) and never open the stream.
+        """
+        state, slot, _run_chat = self._make_state_and_slot(tmp_path)
+        stream_calls: list[str] = []
+        client = self._make_client(stream_calls)
+        entered = asyncio.Event()
+
+        async def _hung_create(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()  # a cold start that never returns
+            return client, True, False
+
+        state.sessions.get_or_create = AsyncMock(side_effect=_hung_create)
+        turn = asyncio.create_task(_run_chat(state, slot, "hello"))
+        slot.task = turn
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert slot._turn_dispatched is False
+
+        turn.cancel()
+        await asyncio.wait({turn}, timeout=5)
+
+        assert turn.done()
+        assert stream_calls == []
+        assert slot.task is None
+        assert slot._turn_dispatched is False
+        assert slot.messages[-1]["role"] == "done"
+        assert any(call.args[0] == "chat_done" for call in state.broadcast_ws.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_stop_button_during_slow_cold_start_frees_the_slot(self, tmp_path: Path) -> None:
+        """End to end: the real Stop handler against a real preparing turn.
+
+        Before the fix the card settled "stopped" while the turn kept waiting on
+        its cold start, so the slot stayed busy (the reported "[Stopped] but
+        still running" delay). Now the same press leaves the slot idle.
+        """
+        from kiro_crew.dashboard.chat_handlers import stop_slot_turn
+
+        state, slot, _run_chat = self._make_state_and_slot(tmp_path)
+        stream_calls: list[str] = []
+        client = self._make_client(stream_calls)
+        entered = asyncio.Event()
+
+        async def _hung_create(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+            return client, True, False
+
+        state.sessions.get_or_create = AsyncMock(side_effect=_hung_create)
+        # What SessionManager.stop_turn answers when no provider turn exists yet.
+        state.sessions.stop_turn = AsyncMock(return_value="idle")
+        turn = asyncio.create_task(_run_chat(state, slot, "hello"))
+        slot.task = turn
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert slot.running
+
+        await stop_slot_turn(state, slot)
+
+        assert turn.done()
+        assert not slot.running
+        assert stream_calls == []
+        cards = [
+            json.loads(m["cls"])
+            for m in slot.messages
+            if isinstance(m.get("cls"), str) and '"stop_event"' in m["cls"]
+        ]
+        assert [c["state"] for c in cards] == ["stopped"]
+
 
 class TestAcpProcessDiedRecovery:
     """Verify _run_chat handles AcpProcessDied with retry logic, redaction, and session reset."""

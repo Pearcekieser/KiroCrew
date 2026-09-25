@@ -4904,6 +4904,44 @@ async def _cancel_stage_controller(slot: "_ChatSlot") -> None:
         pass
 
 
+#: How long a Stop waits for a cancelled, still-preparing turn to unwind before
+#: settling its card. Preparation awaits are cancellation-aware (the allocation
+#: path hard-kills a half-started provider on CancelledError), so the unwind is
+#: normally sub-second; the bound only keeps a wedged await from holding the
+#: Stop request open.
+_PREPARATION_CANCEL_WAIT_SECS = 5.0
+
+
+async def _cancel_turn_preparation(slot: "_ChatSlot") -> bool:
+    """Cancel a turn that is still being prepared; return whether one was.
+
+    ``SessionManager.stop_turn`` answers ``"idle"`` whenever the provider has
+    no turn open, which is also true for the whole preparation phase of
+    ``_run_chat``: memory admission, the session cold start, prompt assembly.
+    The stop is recorded (``note_stop``) and ``_run_chat``'s stop-before-
+    dispatch gate honours it, but only once preparation reaches that gate.
+    Until then the card read "Stopped" while the slot stayed busy, and every
+    further press was another no-op "idle" stop that could never escalate.
+
+    The preparing turn has sent nothing to the model, so cancelling its task is
+    the cooperative stop for that phase. ``_run_chat``'s CancelledError arm and
+    finally run the same teardown the gate's ``return`` does. A turn that has
+    already dispatched (``_turn_dispatched``) is left to the provider cancel.
+    """
+    task = getattr(slot, "task", None)
+    if not isinstance(task, asyncio.Task) or task.done() or task is asyncio.current_task():
+        return False
+    if not getattr(slot, "running", False) or getattr(slot, "_turn_dispatched", False):
+        return False
+    logger.info("Stop: cancelling turn preparation for slot %s (no provider turn yet)", slot.key)
+    task.cancel()
+    # asyncio.wait never raises the task's CancelledError and never cancels the
+    # task if THIS request is cancelled, so a dropped HTTP request cannot turn
+    # into a second, unintended cancel.
+    await asyncio.wait({task}, timeout=_PREPARATION_CANCEL_WAIT_SECS)
+    return True
+
+
 async def stop_slot_turn(
     state: "DashboardState",
     slot: "_ChatSlot",
@@ -5117,6 +5155,9 @@ async def stop_slot_turn(
     await _cancel_stage_controller(slot)
     # Resolve orphaned card when provider reports no active turn
     if outcome == "idle" and slot._stop_event_id:
+        # No provider turn can still mean a turn mid-preparation: cancel it so
+        # the slot is actually idle when the card says "stopped".
+        await _cancel_turn_preparation(slot)
         _resolve_stop_event(slot, "soft")
         slot._stop_state = "idle"
         state.push_slots_update()
@@ -5771,6 +5812,9 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
     )
     # Resolve orphaned card when provider reports no active turn
     if outcome == "idle" and slot._stop_event_id:
+        # Same preparation-phase cancel as /stop: without it the promoted
+        # message waits behind a turn that is still cold-starting.
+        await _cancel_turn_preparation(slot)
         _resolve_stop_event(slot, "soft")
         slot._stop_state = "idle"
         state.push_slots_update()
