@@ -334,6 +334,7 @@ import { loadChatConfig, CONTENT_WIDTH, type ChatConfig } from './chat/ChatSetti
 import { scaleContentWidth } from './chat/contentWidth'
 import SessionFlyout, { TOGGLE_RECT } from './chat/SessionFlyout'
 import { focusComposer, focusComposerAfter, revealComposer } from './chat/composerFocus'
+import { isStaleProjectDirError, resolveFolderAgent, resolveFolderProjectDir } from '../utils/folderAgent'
 import { useHoverIntent } from '../hooks/useHoverIntent'
 import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from './chat/useKnowledgeFetch'
 import { KnowledgePicker } from './chat/KnowledgePicker'
@@ -3536,6 +3537,14 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // future payload change) can resolve to a non-array, and `= []` only covers
   // undefined — which crashed the whole chat page on `.find`.
   const chatFolders: ChatFolder[] = Array.isArray(chatFoldersRaw) ? chatFoldersRaw : NO_CHAT_FOLDERS
+  // Folder data is usable whenever the cache holds it: a failed background
+  // refetch sets `error` but keeps the last good `data`, and the mobile
+  // new-chat button must keep resolving against that data.
+  const chatFoldersLoaded = chatFoldersRaw !== undefined
+  // One create at a time from the mobile new-chat button: the ref blocks a
+  // second tap synchronously, the state disables the button until it settles.
+  const mobileNewSessionInFlightRef = useRef(false)
+  const [mobileNewSessionBusy, setMobileNewSessionBusy] = useState(false)
   // The sidebar's folder sort mode, for the folder-suggestion card's option list:
   // the card draws the same tree the sidebar draws and must list it in the same
   // order. Read here (shared kirocrewConfig query) so the card stays pure. The
@@ -7452,6 +7461,77 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     </button>
   )
 
+  // Mobile "new session here" (session menu item): creates a session in the SAME folder as
+  // the one on screen, so starting a sibling chat does not require opening the
+  // sessions drawer. Resolves agent and project like the drawer's folder "+"
+  // (createChatInFolderMutation): nearest folder default_agent, then the global
+  // default; nearest folder project_dir; the defaultAutopilot preference picks
+  // the mode; a stale folder project dir gets the drawer's own message
+  // (isStaleProjectDirError). The create itself stays here rather than in
+  // createChatInFolderMutation on purpose: that mutation lives inside
+  // ChatSidebar with board-column, tab and attempt state this button has none
+  // of. An unfiled session creates an unfiled sibling, like the flyout's
+  // New. A filed session waits for the folder list: resolving against a
+  // pending or failed query would silently drop the folder's agent and project.
+  const mobileNewFolderId = currentSlot?.folder_id || null
+  const mobileNewFolder = mobileNewFolderId ? chatFolders.find(f => f.id === mobileNewFolderId) : undefined
+  // Disabled only while the folder list is still loading, so a tap cannot
+  // create the session before the folder's agent and project are known. Once
+  // the list has settled the button is live: a failed load is reported on tap
+  // (instead of leaving a dead button a touch user gets no tooltip for), and a
+  // folder id that no longer names a folder is treated as unfiled, the way the
+  // drawer files such a session.
+  const mobileNewSessionReady = !mobileNewFolderId || chatFoldersLoaded || !!chatFoldersError
+  const mobileNewSessionHere = async () => {
+    if (!mobileNewSessionReady || mobileNewSessionInFlightRef.current) return
+    // One notice for both failures below. The body stays the raw error text,
+    // which is the key the error journal matches for the notice's ask-agent
+    // hand-off; the title names what failed.
+    const fail = (error: unknown, title = i18nT('pages.chatPage.could_not_start_a_new_session')) =>
+      showActionError(errMessage(error) || i18nT('pages.chatPage.unknown_error'), title)
+    if (mobileNewFolderId && !chatFoldersLoaded) return fail(chatFoldersError)
+    const folderId = mobileNewFolder ? mobileNewFolderId : ''
+    const effectiveMode = loadChatConfig().defaultAutopilot ? 'orchestrator' : (mode || '')
+    const agent = folderId
+      ? resolveFolderAgent(chatFolders, folderId, defaultAgent)
+      : (defaultAgent || undefined)
+    const project = folderId ? resolveFolderProjectDir(chatFolders, folderId) : undefined
+    mobileNewSessionInFlightRef.current = true
+    setMobileNewSessionBusy(true)
+    try {
+      await dispatch(createSlot({
+        agent,
+        mode: effectiveMode,
+        ...(folderId ? { folder_id: folderId } : {}),
+        ...(project ? { project } : {}),
+      })).unwrap()
+    } catch (error) {
+      // Same stale-project-dir sentence as the drawer's folder `+`, as the
+      // notice title: it is the one create failure the user can fix, so name
+      // the missing path.
+      return fail(error, folderId && isStaleProjectDirError(error)
+        ? i18nT('pages.chatSidebar.folder_project_dir_missing', { path: project ?? '' })
+        : undefined)
+    } finally {
+      mobileNewSessionInFlightRef.current = false
+      setMobileNewSessionBusy(false)
+    }
+    // Touch devices skip focus by design (no keyboard pop); this only matters
+    // for a narrow desktop window, where the caret should follow the create.
+    focusComposer()
+  }
+  const mobileNewSessionLabel = mobileNewFolder
+    ? i18nT('pages.chatSidebar.new_chat_in_name', { name: mobileNewFolder.name })
+    : i18nT('pages.chat.sessionFlyout.new_chat')
+  // The item leads the session (chevron) menu on the phone. It is not a third
+  // control beside the sessions toggle: the bar's centre cell holds two
+  // (AUTOSDE `max-two-buttons-per-row`, narrow-viewport.md).
+  const mobileNewSessionItem = {
+    label: mobileNewSessionLabel,
+    disabled: !mobileNewSessionReady || mobileNewSessionBusy,
+    onSelect: () => { void mobileNewSessionHere() },
+  }
+
   // Unchanged from the inline WelcomeView handler; shared with the composer memory chip.
   const switchMemoryMode = async (newMode: MemoryMode) => {
     if (!activeSlot) return
@@ -7878,6 +7958,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   // trailing ⋯ menu (below), the phone's window menu; the same
                   // row in two adjacent menus read as two different actions.
                   omitPopout
+                  newSessionHere={embedMode !== 'chat' ? mobileNewSessionItem : undefined}
                   triggerLabel={
                     <>
                       {currentSlot?.memory_mode === 'incognito' && <EyeOff size={13} className="lucide-inline shrink-0 text-warn" aria-label={i18nT('pages.chatPage.incognito_memory_writes_disabled')} />}
@@ -8276,6 +8357,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   onRename={activeSlot ? () => setEditingTitleSlot(activeSlot) : undefined}
                   mode={effectiveMode}
                   sidebarOnScreen={sidebarOnScreen}
+                  newSessionHere={embedMode !== 'chat' && isMobile ? mobileNewSessionItem : undefined}
                 />
                 </div>
                 {/* Shared with every split-view pane header (#9727). The editor
