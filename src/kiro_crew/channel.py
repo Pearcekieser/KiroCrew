@@ -147,6 +147,12 @@ CHANNEL_AGENT_BLOCKED_TOOLS: tuple[str, ...] = (
     # whole subtree under another one.
     "session_adopt",
     "session_release",
+    # Pinning belongs with the tree verbs: it moves another session to or from
+    # the top of the person's sidebar, and a channel agent names that session
+    # from thread text other people wrote. This entry covers the permission
+    # prompt; the chat_session_pin handler in mcp_dashboard.py refuses a
+    # ``channel:`` caller at dispatch, which is what holds for auto-approval.
+    "chat_session_pin",
     # The four work-ledger tools, blocked for the same containment reason and not
     # for a new one: a channel agent has no dispatch relationship, so it is
     # neither a conductor nor a bound worker and has no business holding one.

@@ -333,7 +333,7 @@ async def test_pin_reaches_a_capable_tab_as_a_patch_and_an_old_tab_as_a_list(
             f"/api/chat/slots/{_SLOT}/pin", params={"token": token}, json={"pinned": True}
         )
         assert response.status == 200
-        assert await response.json() == {"ok": True, "pinned": True}
+        assert await response.json() == {"ok": True, "pinned": True, "changed": True}
         app_frame = await asyncio.wait_for(app_tab.receive_json(), timeout=5)
         while app_frame["type"] not in ("slots", "slot_patch"):
             app_frame = await asyncio.wait_for(app_tab.receive_json(), timeout=5)
