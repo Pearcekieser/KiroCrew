@@ -1598,13 +1598,18 @@ ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION = frozenset(
 # Backends whose ADVERTISED model ids are ``<model>[<effort>]`` pairs that the
 # ``model`` config option does not accept whole. codex-acp is the member: its
 # ``models.availableModels`` is one entry per model x reasoning effort (the
-# legacy ``session/set_model`` vocabulary, and what the picker shows), while its
-# ``model`` select takes only the bare model and the effort travels down the
-# separate ``reasoning_effort`` option. A member's exhausted spelling ladder falls
-# through to that two-write split; a non-member's refused bracketed id stays
-# refused. Opt-in (harness-parity H13): claude-agent-acp's ``[1m]`` suffix is a
-# context window and must reach the wire intact, and opencode's ``provider/model``
-# ids carry no suffix at all -- neither may inherit a split it never advertised.
+# legacy ``session/set_model`` vocabulary), while its ``model`` select takes only
+# the bare model and the effort travels down the separate ``reasoning_effort``
+# option. A member's select is therefore its captured model list
+# (``session_models_envelope``), so the picker shows one row per model beside the
+# effort control. A stored pair pin keeps its effort: ``resolve_pin_spelling``
+# resolves the pair's base against the bare list and returns the pair, and the
+# member's exhausted spelling ladder falls through to the two-write split (bare
+# model, then the effort option).
+# A non-member's refused bracketed id stays refused. Opt-in (harness-parity
+# H13): claude-agent-acp's ``[1m]`` suffix is a context window and must reach the
+# wire intact, and opencode's ``provider/model`` ids carry no suffix at all --
+# neither may inherit a split it never advertised.
 ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS = frozenset({ACP_BACKEND_CODEX})
 
 # The ``configId`` each backend spells its reasoning-effort option with. One home

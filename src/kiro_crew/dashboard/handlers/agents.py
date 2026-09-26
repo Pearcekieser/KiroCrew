@@ -2241,6 +2241,17 @@ def _codex_models(request: web.Request, configured_default: str = "") -> list[di
     seen: set[str] = {"auto"}
     for entry in advertised:
         name = str(entry.get("model_name", "") or "").strip()
+        # A cache written while the legacy ``models`` list was codex's advertised
+        # list holds one ``<model>[<effort>]`` row per effort level. The picker
+        # offers the model once; effort is the separate control beside it. The
+        # fold matters only until the next codex ``session/new`` on this install:
+        # ``_capture_available_models`` then rewrites the cache with the bare
+        # ids of the ``model`` select and every row here arrives without a
+        # suffix.
+        base, effort = model_registry.split_effort_suffix(name)
+        if effort:
+            name = base
+            entry = {**entry, "display_name": base}
         if not name or _normalize_model_key(name) == "auto" or name in seen:
             continue
         seen.add(name)

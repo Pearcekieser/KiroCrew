@@ -1343,8 +1343,12 @@ class AcpProvider(LLMProvider):
                     # so chip and wire agree. Try the fold FIRST, against the
                     # snapshot we already have: a qualifier-only miss resolves
                     # here with no wire traffic and must not pay a throwaway
-                    # session/new on every cold start.
-                    _send_model = resolve_pin_spelling(configured_model, _advertised)
+                    # session/new on every cold start. On a pair-id harness a
+                    # stored ``<model>[<effort>]`` pin resolves to the pair, so
+                    # the handle's split applies its effort.
+                    _send_model = resolve_pin_spelling(
+                        configured_model, _advertised, backend=self._client.backend
+                    )
                     if not _send_model:
                         # The fold found nothing, so this looks like a genuine
                         # miss — but the snapshot was captured seconds ago at
@@ -1370,7 +1374,9 @@ class AcpProvider(LLMProvider):
                         except Exception:
                             pass
                         if model_is_unusable(configured_model, _advertised):
-                            _send_model = resolve_pin_spelling(configured_model, _advertised)
+                            _send_model = resolve_pin_spelling(
+                                configured_model, _advertised, backend=self._client.backend
+                            )
                         else:
                             _send_model = configured_model
                 if not _send_model and not _foreign_scope:

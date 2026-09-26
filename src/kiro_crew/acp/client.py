@@ -211,6 +211,7 @@ from kiro_crew.constants import (
     KIROCREW_SPAWNED_VALUE,
 )
 from kiro_crew.credential_errors import is_credential_propagation_delay
+from kiro_crew.effort import is_valid_effort
 from kiro_crew.env import (
     augmented_path,
     describe_search_path,
@@ -4054,8 +4055,25 @@ def model_is_unusable(model_id: str, advertised: Sequence[str] | None) -> bool:
     return wanted not in {m.strip().lower() for m in advertised if m and m.strip()}
 
 
-def resolve_pin_spelling(model_id: str, advertised: Sequence[str] | None) -> str:
+def resolve_pin_spelling(
+    model_id: str, advertised: Sequence[str] | None, *, backend: str = ""
+) -> str:
     """The advertised spelling *model_id* resolves to, or ``""`` when none.
+
+    *backend* names the harness the pin is judged for. On an
+    ``ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS`` member a stored pin can be a
+    ``<model>[<effort>]`` pair (the spelling its legacy ``models`` list
+    advertises) while the session advertises the BARE model (its ``model``
+    select). There a pair with a valid concrete effort resolves its base through
+    the fold below and puts the suffix back on the answer, so the pin keeps its
+    effort: the caller's spelling ladder refuses the pair and falls through to
+    the two-write split (``_push_model_via_effort_split``), which writes the bare
+    model and the effort as two options. An invalid suffix follows the plain
+    spelling fold and never reaches the effort write. A base the member does not
+    serve still resolves to ``""``. Every other backend, and a call without
+    *backend*, never re-attaches a suffix: a bracketed id such a harness did not
+    advertise is a spelling it refuses, and claude's ``[1m]`` is a context
+    window rather than an effort (``split_effort_suffix`` leaves it whole).
 
     The companion to :func:`model_is_unusable` for values that arrive from
     storage rather than from the live picker: a persisted pin can carry a
@@ -4110,6 +4128,21 @@ def resolve_pin_spelling(model_id: str, advertised: Sequence[str] | None) -> str
     wanted = model_id.strip().lower()
     if wanted in by_key:
         return by_key[wanted]
+    if backend in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS:
+        # A pair the member advertises verbatim (legacy list kept because the
+        # select was empty) matched above; this is the pair judged against the
+        # BARE list. The base takes the whole fold, and a valid concrete effort
+        # suffix rides back on it. Other suffixes continue through the plain fold.
+        # The base can also fold onto an advertised PAIR (the legacy list, a
+        # different effort of the same model): that answer already carries a
+        # suffix, and a second one would not split, so it takes the plain fold.
+        base, effort = model_registry.split_effort_suffix(model_id)
+        if is_valid_effort(effort):
+            resolved_base = resolve_pin_spelling(base, ids)
+            if not resolved_base:
+                return ""
+            if not model_registry.split_effort_suffix(resolved_base)[1]:
+                return f"{resolved_base}[{effort}]"
     namespace, sep, bare = wanted.partition("::")
     if sep and namespace and bare in by_key:
         return by_key[bare]
@@ -4152,9 +4185,18 @@ def catalog_row_would_drop(model_id: str, advertised: Sequence[str] | None) -> b
     return not resolve_pin_spelling(model_id or "", advertised)
 
 
-def resolve_usable_model(preferred: str, advertised: Sequence[str] | None) -> str:
+def resolve_usable_model(
+    preferred: str, advertised: Sequence[str] | None, *, backend: str = ""
+) -> str:
     """Resolve a SUBSTITUTE (non-explicit) model choice to what the account can
     run, mirroring the interactive path's reset-to-default (``_wire_model_id``).
+
+    *backend* is handed to :func:`resolve_pin_spelling`: on an
+    ``ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS`` member a stored ``<model>[<effort>]``
+    pin judged against the bare advertised list resolves to the PAIR, so the
+    caller's spelling ladder falls through to the two-write split and the pin's
+    effort is applied. Elsewhere, and without *backend*, the answer is the plain
+    fold.
 
     Returns ``""`` to mean **"do NOT override — inherit the session's backend
     default"** (the served model ``session/new`` already assigned), so the wire
@@ -4198,7 +4240,7 @@ def resolve_usable_model(preferred: str, advertised: Sequence[str] | None) -> st
     # qualifier. The fold answers with the advertised spelling on a hit and
     # ``""`` when the model is absent under both spellings — exactly the
     # inherit-the-default answer this path wants.
-    return resolve_pin_spelling(preferred, ids)
+    return resolve_pin_spelling(preferred, ids, backend=backend)
 
 
 def pick_served_default(current: str, advertised: Sequence[str] | None) -> str:
@@ -7636,9 +7678,14 @@ class AcpClient:
         """
         # Imported lazily: acp.session_handle imports this module at module
         # level, so a top-level import here would be a cycle.
-        from kiro_crew.acp.session_handle import models_from_config_options
+        from kiro_crew.acp.session_handle import (
+            models_from_config_options,
+            session_models_envelope,
+        )
 
-        models = session_resp.get("models")
+        # Where the list lives is ``session_models_envelope``'s answer, shared
+        # with the shared-runtime driver; the dict-only gate is this call site's.
+        models = session_models_envelope(session_resp, self.backend)
         if not isinstance(models, dict):
             # Adapters that omit `models` still advertise via configOptions. One
             # authoring, shared with the shared-runtime driver's own capture.

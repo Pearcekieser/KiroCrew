@@ -112,7 +112,9 @@ class AllocationDeps:
     #: would make the pool's scope rule the only one a test cannot swap.
     model_pin_applies: Callable[[str, str, Sequence[str] | None], bool]
     provider_model_namespace: Callable[[LLMProvider], str]
-    resolve_pin_spelling: Callable[[str, list[str]], str]
+    #: ``(model, advertised, provider)``: the provider names the harness, so a
+    #: pair-id backend keeps a stored ``<model>[<effort>]`` pin's effort.
+    resolve_pin_spelling: Callable[[str, list[str], LLMProvider], str]
     to_provider_id: Callable[[str, str], str]
     to_acp_id: Callable[[str], str]
     inc_session_created: Callable[[], None]
@@ -1831,9 +1833,11 @@ class SessionAllocationService:
                                 # and the display verdict use, so a warm claim
                                 # runs exactly what a cold start of the same pin
                                 # runs. A pin absent under either spelling still
-                                # takes the withhold below.
+                                # takes the withhold below. The provider rides
+                                # along so the fold knows the harness: a pair-id
+                                # harness keeps a stored pin's effort suffix.
                                 _send_model = self._deps.resolve_pin_spelling(
-                                    switch_model, advertised
+                                    switch_model, advertised, provider
                                 )
                             if not _send_model:
                                 self._deps.logger.warning(

@@ -6,11 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from kiro_crew.acp.client import AcpProcessDied
+from kiro_crew.acp.client import AcpModelUnavailable, AcpProcessDied
 from kiro_crew.acp.runtime import AcpRuntimeDead
 from kiro_crew.acp.session_handle import WatchdogSettings
 from kiro_crew.acp.session_provider import AcpSessionProvider
-from kiro_crew.acp.types import AcpEvent, AcpPromptStats
+from kiro_crew.acp.types import ACP_BACKEND_CODEX, ACP_BACKEND_KIRO, AcpEvent, AcpPromptStats
 from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK
 
 
@@ -854,6 +854,66 @@ class TestAcpSessionProviderRound4Parity:
         provider = AcpSessionProvider(handle, runtime)
         assert await provider.cancel_session(grace_secs=1.0) is None  # no raise
         handle.cancel.assert_awaited_once_with(grace_secs=1.0)
+
+
+class TestAcpSessionProviderModelGuard:
+    @staticmethod
+    def _provider(backend: str, advertised: list[str]):
+        handle = _make_handle()
+        handle.available_models = [{"modelId": model} for model in advertised]
+        handle.refresh_available_models = AsyncMock(return_value=handle.available_models)
+        handle.set_model = AsyncMock()
+        provider = AcpSessionProvider(handle, _make_runtime(acp_backend=backend))
+        return provider, handle
+
+    @pytest.mark.asyncio
+    async def test_codex_pair_pin_with_advertised_base_reaches_handle(self):
+        provider, handle = self._provider(ACP_BACKEND_CODEX, ["openai.gpt-6-astra"])
+
+        await provider.set_model("openai.gpt-6-astra[max]")
+
+        handle.refresh_available_models.assert_not_awaited()
+        handle.set_model.assert_awaited_once_with("openai.gpt-6-astra[max]")
+
+    @pytest.mark.asyncio
+    async def test_codex_pair_pin_with_fresh_advertised_base_reaches_handle(self):
+        provider, handle = self._provider(ACP_BACKEND_CODEX, ["openai.gpt-5.5-codex"])
+        handle.refresh_available_models.return_value = [{"modelId": "openai.gpt-6-astra"}]
+
+        await provider.set_model("openai.gpt-6-astra[max]")
+
+        handle.refresh_available_models.assert_awaited_once()
+        handle.set_model.assert_awaited_once_with("openai.gpt-6-astra[max]")
+
+    @pytest.mark.asyncio
+    async def test_codex_pair_pin_with_unknown_base_is_refused(self):
+        provider, handle = self._provider(ACP_BACKEND_CODEX, ["openai.gpt-6-astra"])
+
+        with pytest.raises(AcpModelUnavailable):
+            await provider.set_model("openai.gpt-9[max]")
+
+        handle.refresh_available_models.assert_awaited_once()
+        handle.set_model.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_pair_pin_with_invalid_effort_is_refused(self):
+        provider, handle = self._provider(ACP_BACKEND_CODEX, ["openai.gpt-6-astra"])
+
+        with pytest.raises(AcpModelUnavailable):
+            await provider.set_model("openai.gpt-6-astra[bogus]")
+
+        handle.refresh_available_models.assert_awaited_once()
+        handle.set_model.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_kiro_bracketed_pin_with_advertised_base_is_refused(self):
+        provider, handle = self._provider(ACP_BACKEND_KIRO, ["openai.gpt-6-astra"])
+
+        with pytest.raises(AcpModelUnavailable):
+            await provider.set_model("openai.gpt-6-astra[max]")
+
+        handle.refresh_available_models.assert_awaited_once()
+        handle.set_model.assert_not_awaited()
 
 
 class TestAcpSessionProviderRuntimeDeadTranslation:

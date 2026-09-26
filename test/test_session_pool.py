@@ -875,6 +875,38 @@ class TestModelMatchesPoolDefault:
         pooled.client.set_model.assert_awaited_once_with("z-ai/glm-5.3-flash")
         assert provider is pooled
 
+    @pytest.mark.asyncio
+    async def test_codex_pair_pin_keeps_its_effort_on_claim(self):
+        """A codex pooled session advertises BARE models (its ``model`` select);
+        the pin is the ``<model>[<effort>]`` pair stored while the pairs were
+        advertised. The claim must hand the handle the PAIR -- the same answer the
+        cold start gives -- so the two-write split applies the pin's effort
+        rather than folding it away to the bare model."""
+        from kiro_crew.acp.types import ACP_BACKEND_CODEX
+        from kiro_crew.providers.acp import AcpProvider
+
+        mgr, factory = _make_manager(pool_agent="kirocrew")
+        pooled = _make_provider()
+        pooled.__class__ = AcpProvider
+        pooled.client = MagicMock()
+        pooled.client.backend = ACP_BACKEND_CODEX
+        pooled.client.set_model = AsyncMock()
+        pooled.client.resumed = False
+        pooled.client._session_id = "fake-sid"
+        pooled.available_models = MagicMock(
+            return_value=[{"modelId": "openai.gpt-6-astra"}, {"modelId": "openai.gpt-5.5-codex"}]
+        )
+        mgr._drain_and_claim = AsyncMock(return_value=pooled)
+        mgr._schedule_replenish = MagicMock()
+
+        with patch.object(type(mgr), "_resolve_agent_model", return_value="openai.gpt-5.5-codex"):
+            provider, _is_new, _resumed = await mgr.get_or_create(
+                "test-key", agent="kirocrew", model="openai.gpt-6-astra[max]"
+            )
+
+        pooled.client.set_model.assert_awaited_once_with("openai.gpt-6-astra[max]")
+        assert provider is pooled
+
 
 # ---------------------------------------------------------------------------
 # Stateless sessions must not claim from pool

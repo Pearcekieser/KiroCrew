@@ -1203,7 +1203,11 @@ class SessionManager:
             provider_model_namespace=lambda provider: model_registry_namespace(
                 getattr(getattr(provider, "client", provider), "backend", "") or ""
             ),
-            resolve_pin_spelling=lambda model, advertised: resolve_pin_spelling(model, advertised),
+            resolve_pin_spelling=lambda model, advertised, provider: resolve_pin_spelling(
+                model,
+                advertised,
+                backend=getattr(getattr(provider, "client", provider), "backend", "") or "",
+            ),
             to_provider_id=lambda model, provider: model_registry.to_provider_id(model, provider),
             to_acp_id=lambda model: model_registry.to_acp_id(model),
             inc_session_created=lambda: Stats().inc_session_created(),

@@ -3,9 +3,9 @@
 codex-acp 1.11 puts TWO spellings of one selection on the ``session/new`` wire:
 
 * ``models.availableModels`` -- one entry per model x reasoning effort, spelled
-  ``gpt-6-astra[max]`` (the legacy ``session/set_model`` vocabulary). This is the
-  list ``_capture_available_models`` prefers, so it is what the picker shows and
-  what ``AcpModelUnavailable`` quotes as "Available models".
+  ``gpt-6-astra[max]`` (the legacy ``session/set_model`` vocabulary). Crew does
+  not capture it while the select below has options, because it lists every
+  model once per effort level beside the separate effort control.
 * ``configOptions[model]`` -- the BARE ids ``gpt-6-astra``; the only vocabulary
   ``session/set_config_option("model", ...)`` accepts. The effort travels down a
   separate ``reasoning_effort`` option.
@@ -33,8 +33,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kiro_crew import model_registry
-from kiro_crew.acp.client import AcpClient, AcpError, AcpModelUnavailable
-from kiro_crew.acp.session_handle import AcpSessionHandle
+from kiro_crew.acp.client import (
+    AcpClient,
+    AcpError,
+    AcpModelUnavailable,
+    model_is_unusable,
+    resolve_pin_spelling,
+    resolve_usable_model,
+)
+from kiro_crew.acp.session_handle import AcpSessionHandle, session_models_envelope
 from kiro_crew.acp.types import (
     ACP_BACKEND_CLAUDE,
     ACP_BACKEND_CODEX,
@@ -175,11 +182,145 @@ def test_the_effort_option_id_is_resolved_per_backend() -> None:
 
 class TestAdvertisedPairSwitch:
     @pytest.mark.asyncio
-    async def test_the_advertised_pair_is_what_the_picker_offers(self, tmp_path) -> None:
-        """Premise of the bug: the picker list IS the bracketed list."""
+    async def test_the_picker_offers_the_bare_models_not_the_pairs(self, tmp_path) -> None:
+        """The ``model`` select is codex's vocabulary: one row per model, with the
+        effort left to the separate effort control. The legacy pairs put every
+        model into the picker once per effort level."""
         client = _codex_client(tmp_path)
+        assert client._advertised_model_ids() == ["openai.gpt-6-astra", "openai.gpt-5.5-codex"]
+        assert [m["name"] for m in client.available_models()] == ["GPT-6 Astra", "GPT-5.5 Codex"]
+
+    def test_a_stored_pair_pin_keeps_its_effort_on_codex(self, tmp_path) -> None:
+        """A ``[max]`` pin saved while the pairs were advertised is a literal miss
+        against the bare list. Judged FOR codex, the fold resolves the pair's base
+        and hands the pair back, so the pin's effort survives to the two-write
+        split. A pair whose base the account does not serve resolves to nothing,
+        and a bare pin is the plain fold."""
+        advertised = _codex_client(tmp_path)._advertised_model_ids()
+        assert model_is_unusable("openai.gpt-6-astra[max]", advertised)
+        assert (
+            resolve_pin_spelling("openai.gpt-6-astra[max]", advertised, backend=ACP_BACKEND_CODEX)
+            == "openai.gpt-6-astra[max]"
+        )
+        # Base spelled in another case still folds to the ADVERTISED base.
+        assert (
+            resolve_pin_spelling(" OPENAI.GPT-6-ASTRA[max] ", advertised, backend=ACP_BACKEND_CODEX)
+            == "openai.gpt-6-astra[max]"
+        )
+        assert (
+            resolve_pin_spelling("openai.gpt-9-unknown[max]", advertised, backend=ACP_BACKEND_CODEX)
+            == ""
+        )
+        invalid = resolve_pin_spelling(
+            "openai.gpt-6-astra[bogus]", advertised, backend=ACP_BACKEND_CODEX
+        )
+        assert invalid == "openai.gpt-6-astra"
+        assert "[" not in invalid
+        assert (
+            resolve_pin_spelling("openai.gpt-6-astra", advertised, backend=ACP_BACKEND_CODEX)
+            == "openai.gpt-6-astra"
+        )
+
+    def test_a_pair_advertised_verbatim_is_returned_whole(self, tmp_path) -> None:
+        """With an empty select the legacy pairs ARE the list; a pair on it is a
+        literal hit and must not be split and re-suffixed."""
+        pairs = [m["modelId"] for m in CODEX_1_11_SESSION_NEW["models"]["availableModels"]]
+        assert (
+            resolve_pin_spelling("openai.gpt-6-astra[max]", pairs, backend=ACP_BACKEND_CODEX)
+            == "openai.gpt-6-astra[max]"
+        )
+
+    def test_a_pair_pin_missing_from_the_legacy_list_takes_the_plain_fold(self, tmp_path) -> None:
+        """Against the legacy pair list the pin's BASE folds onto an advertised
+        PAIR of another effort. That answer already carries a suffix, so the
+        pin's effort is not stacked on it (``[medium][max]`` would not split)
+        and the answer is the plain fold's advertised pair."""
+        pairs = [m["modelId"] for m in CODEX_1_11_SESSION_NEW["models"]["availableModels"]]
+        assert "openai.gpt-5.5-codex[max]" not in pairs
+        got = resolve_pin_spelling("openai.gpt-5.5-codex[max]", pairs, backend=ACP_BACKEND_CODEX)
+        assert got.count("[") == 1
+        assert got == resolve_pin_spelling("openai.gpt-5.5-codex[max]", pairs)
+        assert got == "openai.gpt-5.5-codex[medium]"
+        # A base the list does not serve at any effort still resolves to nothing.
+        assert (
+            resolve_pin_spelling("openai.gpt-9-unknown[max]", pairs, backend=ACP_BACKEND_CODEX)
+            == ""
+        )
+
+    def test_the_suffix_is_kept_only_for_a_pair_id_harness(self, tmp_path) -> None:
+        """Without a backend, and for kiro, the answer is today's fold: the bare
+        model the catalog advertises. A harness that did not advertise a
+        bracketed id never receives one."""
+        advertised = _codex_client(tmp_path)._advertised_model_ids()
+        assert resolve_pin_spelling("openai.gpt-6-astra[max]", advertised) == "openai.gpt-6-astra"
+        assert (
+            resolve_pin_spelling("openai.gpt-6-astra[max]", advertised, backend=ACP_BACKEND_KIRO)
+            == "openai.gpt-6-astra"
+        )
+        kiro_catalog = ["claude-opus-4.8", "claude-sonnet-4.6"]
+        for backend in ("", ACP_BACKEND_KIRO, ACP_BACKEND_CLAUDE):
+            got = resolve_pin_spelling("claude-opus-4.8[max]", kiro_catalog, backend=backend)
+            assert got == "claude-opus-4.8", backend
+            assert "[" not in got
+        # A WINDOW suffix is part of the id and never splits, on any backend.
+        assert (
+            resolve_pin_spelling(
+                "global.anthropic.claude-opus-4-8[1m]", kiro_catalog, backend=ACP_BACKEND_CODEX
+            )
+            == "claude-opus-4.8"
+        )
+
+    def test_resolve_usable_model_keeps_the_pair_on_codex_only(self, tmp_path) -> None:
+        """The substitute path the handle's ``set_model`` takes: on codex the
+        stored pair stays a pair; on kiro and without a backend it is the bare
+        model, exactly as today."""
+        advertised = _codex_client(tmp_path)._advertised_model_ids()
+        assert (
+            resolve_usable_model("openai.gpt-6-astra[max]", advertised, backend=ACP_BACKEND_CODEX)
+            == "openai.gpt-6-astra[max]"
+        )
+        assert resolve_usable_model("openai.gpt-6-astra[max]", advertised) == "openai.gpt-6-astra"
+        assert (
+            resolve_usable_model("openai.gpt-6-astra[max]", advertised, backend=ACP_BACKEND_KIRO)
+            == "openai.gpt-6-astra"
+        )
+        assert (
+            resolve_usable_model("openai.gpt-9-unknown[max]", advertised, backend=ACP_BACKEND_CODEX)
+            == ""
+        )
+        # Unchanged contracts around the pair case.
+        assert resolve_usable_model("", advertised, backend=ACP_BACKEND_CODEX) == ""
+        assert resolve_usable_model("auto", advertised, backend=ACP_BACKEND_CODEX) == ""
+        assert resolve_usable_model("openai.gpt-6-astra[max]", [], backend=ACP_BACKEND_CODEX) == (
+            "openai.gpt-6-astra[max]"
+        )
+
+    def test_the_pairs_stay_the_list_when_the_select_is_empty(self, tmp_path) -> None:
+        """codex-acp with a cold catalog sends an empty ``model`` select; the
+        legacy list is then the only evidence and is kept."""
+        resp = {
+            **CODEX_1_11_SESSION_NEW,
+            "configOptions": [{"id": "model", "type": "select", "currentValue": "", "options": []}],
+        }
+        client = AcpClient(work_dir=tmp_path, acp_backend=ACP_BACKEND_CODEX)
+        client._capture_available_models(resp)
         assert "openai.gpt-6-astra[max]" in client._advertised_model_ids()
-        assert "openai.gpt-6-astra" not in client._advertised_model_ids()
+
+    def test_a_non_member_keeps_its_models_object(self) -> None:
+        """Only a pair-id harness prefers the select; claude's ``models`` list
+        (with its ``[1m]`` window ids) stays authoritative."""
+        resp = {
+            "models": {"availableModels": [{"modelId": "claude-opus-5[1m]"}]},
+            "configOptions": [
+                {"id": "model", "type": "select", "options": [{"value": "claude-opus-5"}]}
+            ],
+        }
+        env = session_models_envelope(resp, ACP_BACKEND_CLAUDE)
+        assert env == resp["models"]
+        codex_env = session_models_envelope(CODEX_1_11_SESSION_NEW, ACP_BACKEND_CODEX)
+        assert [m["modelId"] for m in codex_env["availableModels"]] == sorted(
+            BARE_MODELS, key=["openai.gpt-6-astra", "openai.gpt-5.5-codex"].index
+        )
 
     @pytest.mark.asyncio
     async def test_an_advertised_pair_pick_switches_model_then_effort(self, tmp_path) -> None:
@@ -534,6 +675,61 @@ class TestTheSessionHandleTakesTheSameSplit:
         assert applied_id == "openai.gpt-6-astra[max]"
 
     @pytest.mark.asyncio
+    async def test_set_model_applies_a_stored_pair_pin_against_the_bare_list(self) -> None:
+        """The shared-runtime substitute path a stored pin takes at startup and on
+        a warm claim: the handle advertises the BARE models (its ``model``
+        select), the pin is the ``[max]`` pair saved while the pairs were
+        advertised. ``set_model`` must resolve to the pair, walk the ladder to
+        exhaustion, and land the two writes -- and record the pair, so the
+        per-model effort overrides keyed on the recorded id keep matching."""
+        handle = MagicMock()
+        handle._runtime = MagicMock()
+        handle._runtime.acp_backend = ACP_BACKEND_CODEX
+        handle._runtime.send_request = AsyncMock()
+        handle._session_id = "codex-sess-2"
+        handle._config_options = CODEX_1_11_SESSION_NEW["configOptions"]
+        handle._advertised_model_ids = MagicMock(
+            return_value=["openai.gpt-6-astra", "openai.gpt-5.5-codex"]
+        )
+        applied: list[tuple[str, str]] = []
+        handle.set_config_option = _codex_acp_1_11(applied)
+        handle.supports_config_option = lambda config_id: any(
+            opt["id"] == config_id for opt in CODEX_1_11_SESSION_NEW["configOptions"]
+        )
+        handle._push_model_config_option = lambda model_id, *, strict: (
+            AcpSessionHandle._push_model_config_option(handle, model_id, strict=strict)
+        )
+
+        await AcpSessionHandle.set_model(handle, "openai.gpt-6-astra[max]")
+
+        assert applied == [
+            ("model", "openai.gpt-6-astra[max]"),
+            ("model", "openai.gpt-6-astra"),
+            (CODEX_EFFORT, "max"),
+        ]
+        assert handle._model == "openai.gpt-6-astra[max]"
+        assert handle._resolved_model_id == "openai.gpt-6-astra[max]"
+        handle._runtime.send_request.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_set_model_on_kiro_never_re_suffixes_a_pin(self) -> None:
+        """The same stored pair on a non-member: the fold sends the bare model it
+        advertises, and no bracketed id it did not advertise reaches the wire."""
+        handle = MagicMock()
+        handle._runtime = MagicMock()
+        handle._runtime.acp_backend = ACP_BACKEND_KIRO
+        handle._runtime.send_request = AsyncMock()
+        handle._session_id = "kiro-sess-1"
+        handle._advertised_model_ids = MagicMock(return_value=["claude-opus-4.8"])
+
+        await AcpSessionHandle.set_model(handle, "claude-opus-4.8[max]")
+
+        handle._runtime.send_request.assert_awaited_once()
+        sent = handle._runtime.send_request.await_args.args[1]
+        assert sent["modelId"] == "claude-opus-4.8"
+        assert handle._model == "claude-opus-4.8"
+
+    @pytest.mark.asyncio
     async def test_a_non_member_handle_never_takes_the_split(self) -> None:
         handle = MagicMock()
         handle._runtime = MagicMock()
@@ -663,7 +859,7 @@ def test_an_advertised_id_alone_does_not_earn_the_mismatch_wording() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_codex_refusal_of_an_advertised_pair_reports_the_mismatch(tmp_path) -> None:
+async def test_a_codex_refusal_of_an_advertised_model_reports_the_mismatch(tmp_path) -> None:
     """The caller supplies the verdict, so the wording follows membership rather
     than the mere presence of the id in the list."""
     client = _codex_client(tmp_path)
@@ -675,7 +871,7 @@ async def test_a_codex_refusal_of_an_advertised_pair_reports_the_mismatch(tmp_pa
     client.set_config_option = _refuse_all  # type: ignore[method-assign]
 
     with pytest.raises(AcpModelUnavailable) as caught:
-        await client.set_model("openai.gpt-6-astra[max]")
+        await client.set_model("openai.gpt-6-astra")
 
     assert "not an account restriction" in str(caught.value)
     assert "not available on your account" not in str(caught.value)

@@ -649,12 +649,23 @@ def session_models_envelope(resp: dict[str, Any], backend: str) -> Any:
     """The ``models`` payload of a session response, with the select folded in.
 
     One home for "where does this host's model list live", so a reader cannot know
-    about the ``models`` object and not about the ``configOptions`` select. Returns
-    whatever shape the response carried when it carried one, the synthesized
-    envelope when it did not and the host advertises a ``model`` select, and the
-    original absent value when neither applies -- so a caller's own shape branches
-    stay exactly as they were.
+    about the ``models`` object and not about the ``configOptions`` select. On a
+    host in ``ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS`` a ``model`` select with options
+    wins even when a ``models`` object is present. Otherwise it returns whatever
+    shape the response carried when it carried one, the synthesized envelope when
+    it did not and the host advertises a ``model`` select, and the original absent
+    value when neither applies.
     """
+    if backend in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS:
+        # A pair-id host (codex-acp) carries BOTH shapes, and they disagree: the
+        # legacy ``models`` list is one ``<model>[<effort>]`` entry per model x
+        # effort, while the ``model`` select holds the bare ids its
+        # ``set_config_option`` accepts, with effort on its own option. The select
+        # is the vocabulary; the pairs would put every effort into the model
+        # picker a second time beside the effort control.
+        select = models_from_config_options(resp, backend)
+        if select is not None:
+            return select
     models = resp.get("models") or resp.get("availableModels")
     if models is None or models == {} or models == []:
         models = models_from_config_options(resp, backend) or models
@@ -2173,7 +2184,9 @@ class AcpSessionHandle:
         reset-to-default. Explicit user picks raise instead, upstream in
         ``AcpSessionProvider.set_model`` / ``AcpClient.set_model``.
         """
-        resolved = resolve_usable_model(model_id, self._advertised_model_ids())
+        resolved = resolve_usable_model(
+            model_id, self._advertised_model_ids(), backend=self._runtime.acp_backend
+        )
         if not resolved:
             # Inherit the backend default — nothing to send. For the ephemeral
             # _bg session the current model IS session/new's served default.
@@ -2881,12 +2894,11 @@ class AcpSessionHandle:
             self._config_options = config_options
             self._sync_effort_levels()
         # Where this host's model list lives is asked in ONE place
-        # (``session_models_envelope``): a host in
-        # ``ACP_BACKENDS_ADVERTISED_MODEL_SELECTION`` advertises no ``models`` object
-        # and puts the list in a ``configOptions`` ``model`` select, and a reader that
-        # knows about one shape and not the other is how the entitlement probe came to
-        # answer ``[]`` for codex while this path answered correctly. Absent stays
-        # absent, so the shape branches below are untaken exactly as before.
+        # (``session_models_envelope``): a host may carry its list as a ``models``
+        # object, as a ``configOptions`` ``model`` select, or both (codex-acp, whose
+        # select wins), and a reader that knows about one shape and not the other is
+        # how the entitlement probe came to answer ``[]`` for codex while this path
+        # answered correctly.
         models = session_models_envelope(resp, self._runtime.acp_backend)
         if isinstance(models, dict):
             # Record the resolved model id (kiro-cli's currentModelId) so

@@ -1197,8 +1197,10 @@ class TestWhatTheHandleAdvertisesForCodex:
         assert handle._advertised_model_ids() == []
 
     def test_a_models_object_still_wins_when_the_host_sends_one(self):
-        """The synthesis is a fallback, never an override of what was advertised."""
-        handle = _handle_on(ACP_BACKEND_CODEX)
+        """The synthesis is a fallback, never an override of what was advertised --
+        on every host except a pair-id one (next test)."""
+        assert ACP_BACKEND_CLAUDE in ACP_BACKENDS_ADVERTISED_MODEL_SELECTION
+        handle = _handle_on(ACP_BACKEND_CLAUDE)
         handle.store_session_config(
             {
                 "models": {
@@ -1215,6 +1217,33 @@ class TestWhatTheHandleAdvertisesForCodex:
             }
         )
         assert handle._advertised_model_ids() == ["gpt-5.6"]
+
+    def test_codex_reads_its_select_over_the_per_effort_pairs(self):
+        """codex-acp's ``models`` is one ``<model>[<effort>]`` row per effort level;
+        its ``model`` select holds the bare ids ``set_config_option`` accepts, so
+        the select is what the handle advertises."""
+        handle = _handle_on(ACP_BACKEND_CODEX)
+        handle.store_session_config(
+            {
+                "models": {
+                    "availableModels": [
+                        {"modelId": "gpt-5.6[low]"},
+                        {"modelId": "gpt-5.6[high]"},
+                    ],
+                    "currentModelId": "gpt-5.6[high]",
+                },
+                "configOptions": [
+                    {
+                        "id": "model",
+                        "type": "select",
+                        "currentValue": "gpt-5.6",
+                        "options": [{"value": "gpt-5.6", "name": "5.6"}],
+                    }
+                ],
+            }
+        )
+        assert handle._advertised_model_ids() == ["gpt-5.6"]
+        assert handle._resolved_model_id == "gpt-5.6"
 
     def test_the_entitlement_probe_reads_the_select_too(self):
         """The probe exists to HEAL a degraded snapshot, so [] is its worst answer.

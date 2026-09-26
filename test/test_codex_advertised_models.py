@@ -315,6 +315,20 @@ def test_codex_picker_reads_the_cross_session_cache_when_no_session_is_live() ->
     assert _names(rows) == ["auto", "gpt-5.4", "gpt-5.5"]
 
 
+def test_codex_picker_folds_a_stale_per_effort_cache_to_one_row_per_model() -> None:
+    """A cache written while codex-acp's ``<model>[<effort>]`` pairs were the
+    captured list offers each model once; effort is the control beside it."""
+    model_registry.refresh_advertised_models(
+        "codex",
+        ["openai.gpt-6-astra[low]", "openai.gpt-6-astra[max]", "openai.gpt-5.5[high]"],
+    )
+
+    rows = agents._codex_models(_request())
+
+    assert _names(rows) == ["auto", "openai.gpt-6-astra", "openai.gpt-5.5"]
+    assert rows[1]["display_name"] == "openai.gpt-6-astra"
+
+
 def test_codex_picker_never_reads_the_kiro_bucket() -> None:
     model_registry.refresh_advertised_models("acp", ["claude-opus-5", "gpt-5.6-sol"])
 

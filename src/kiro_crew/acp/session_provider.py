@@ -22,6 +22,7 @@ from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
+from kiro_crew import model_registry
 from kiro_crew.acp.client import (
     DEFAULT_MODEL,
     AcpAuthRequired,
@@ -32,6 +33,7 @@ from kiro_crew.acp.client import (
     model_is_unusable,
     registration_rate_limited_error,
     registration_throttle_line,
+    resolve_pin_spelling,
 )
 from kiro_crew.acp.mcp_session_report import McpSessionReport
 from kiro_crew.acp.runtime import AcpRuntime, AcpRuntimeDead, AcpRuntimeError, AcpSessionHandle
@@ -45,6 +47,7 @@ from kiro_crew.acp.types import (
 )
 from kiro_crew.acp.types import (
     ACP_BACKENDS_MEMBER_CAPABILITIES,
+    ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS,
     ACP_BACKENDS_SESSION_EVICTION,
     STOP_REASON_END_TURN,
 )
@@ -885,15 +888,31 @@ class AcpSessionProvider(LLMProvider):
         the fresh answer ALSO lacks the model. A failed probe keeps the stale
         verdict (fail-safe: no evidence, no entitlement granted).
         """
+        backend = self._runtime.acp_backend
+
+        def _is_unusable(ids: list[str]) -> bool:
+            if not model_is_unusable(model_id, ids):
+                return False
+            if backend not in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS:
+                return True
+            # A stored ``<model>[<effort>]`` pin is usable only when the shared
+            # resolver answers with a pair carrying the pin's own effort: the
+            # handle then applies it as a model write plus an effort write. An
+            # invalid suffix folds to the bare model and stays refused here.
+            _base, wanted_effort = model_registry.split_effort_suffix(model_id)
+            resolved = resolve_pin_spelling(model_id, ids, backend=backend)
+            _resolved_base, resolved_effort = model_registry.split_effort_suffix(resolved)
+            return not (wanted_effort and resolved_effort == wanted_effort)
+
         advertised = advertised_model_ids(self._handle.available_models)
-        if model_is_unusable(model_id, advertised):
+        if _is_unusable(advertised):
             # A user's explicit pick must earn a FRESH probe, not be refused on a
             # recent no-evidence failure the picker read path may have cached
             # (force=True skips the failure/empty attempt-clock replay).
             fresh = advertised_model_ids(
                 await self._guarded(self._handle.refresh_available_models(force=True))
             )
-            if model_is_unusable(model_id, fresh or advertised):
+            if _is_unusable(fresh or advertised):
                 raise AcpModelUnavailable(model_id, fresh or advertised)
         await self._guarded(self._handle.set_model(model_id))
 

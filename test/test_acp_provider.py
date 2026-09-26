@@ -12,6 +12,7 @@ import dataclasses
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from test_update_provider import _UNALLOCATABLE_PID
 
 from kiro_crew.acp.client import AcpAuthRequired
 from kiro_crew.acp.session_handle import AcpSessionHandle
@@ -1470,6 +1471,66 @@ class TestStartKiroRuntimeModelEntitlement:
         handle = await self._run("openrouter::z-ai/glm-5.3-flash", ["auto", "z-ai/glm-5.3-flash"])
         handle.refresh_available_models.assert_not_awaited()
         handle.set_model.assert_awaited_once_with("z-ai/glm-5.3-flash")
+
+    def _codex_provider(self, model):
+        from kiro_crew.acp.types import ACP_BACKEND_CODEX
+
+        provider = _build_provider(backend=ACP_BACKEND_CODEX)
+        provider._client._work_dir = "/tmp/ws"
+        provider._client._agent = "kirocrew"
+        provider._client._sandbox_mode = "auto"
+        provider._client._extra_env = {}
+        provider._client._mcp_gateway_overlay = None
+        provider._client._mcp_gateway_socket = None
+        provider._client._model = model
+        provider._client._resume_session_id = ""
+        return provider
+
+    async def _run_codex(self, model, advertised):
+        provider = self._codex_provider(model)
+        handle = MagicMock()
+        handle.session_id = "codex-sess-1"
+        handle.store_session_config = MagicMock()
+        handle.set_model = AsyncMock()
+        handle.available_models = [{"modelId": m, "name": m} for m in advertised]
+        runtime = MagicMock()
+        runtime.pid = _UNALLOCATABLE_PID
+        runtime.spawn = AsyncMock()
+        runtime.create_session = AsyncMock(return_value=handle)
+
+        with (
+            patch("kiro_crew.providers.acp.AcpRuntime", return_value=runtime),
+            patch(
+                "kiro_crew.providers.acp.AcpSessionProvider",
+                side_effect=lambda h, r, **kw: MagicMock(_handle=h, _runtime=r, resumed=False),
+            ),
+            patch("pathlib.Path.exists", return_value=False),
+        ):
+            await provider._start_kiro_runtime()
+        return handle
+
+    @pytest.mark.asyncio
+    async def test_codex_stored_pair_pin_reaches_set_model_as_the_pair(self):
+        """codex advertises BARE models on its ``model`` select; a pin stored as
+        the ``<model>[<effort>]`` pair is a literal miss. The fold must hand the
+        handle the PAIR, so its two-write split applies the pin's effort rather
+        than dropping it to the bare model."""
+        handle = await self._run_codex(
+            "openai.gpt-6-astra[max]", ["openai.gpt-6-astra", "openai.gpt-5.5-codex"]
+        )
+        handle.set_model.assert_awaited_once_with("openai.gpt-6-astra[max]")
+
+    @pytest.mark.asyncio
+    async def test_codex_pair_pin_of_an_unserved_model_is_withheld(self):
+        handle = await self._run_codex("openai.gpt-9-unknown[max]", ["openai.gpt-6-astra"])
+        handle.set_model.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_kiro_pair_spelled_pin_still_folds_to_the_bare_model(self):
+        """The non-member contract is byte-identical: a bracketed spelling kiro
+        did not advertise never reaches ``set_model``."""
+        handle = await self._run("claude-opus-4.8[max]", ["claude-sonnet-4.6", "claude-opus-4.8"])
+        handle.set_model.assert_awaited_once_with("claude-opus-4.8")
 
 
 def test_child_fidelity_aware_survives_client_replacement():

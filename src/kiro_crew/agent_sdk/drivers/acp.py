@@ -112,7 +112,7 @@ def provider_error_client() -> object | None:
     return acp_client
 
 
-def resolve_pin_spelling(model_id: str, advertised: object) -> str:
+def resolve_pin_spelling(model_id: str, advertised: object, *, backend: str = "") -> str:
     """The advertised spelling *model_id* resolves to, or ``""`` when none.
 
     Thin delegation to :func:`kiro_crew.acp.client.resolve_pin_spelling` — the
@@ -120,13 +120,15 @@ def resolve_pin_spelling(model_id: str, advertised: object) -> str:
     qualifier — so application code (``session.py``'s
     ``AllocationDeps`` wiring) reaches it through the SDK surface instead of
     importing the ACP layer (the agent-sdk-boundary gate refuses a new edge).
-    Plain data in, plain data out: a string and a sequence of strings, a string
-    back — no ACP type crosses the boundary. Function-local import for the same
-    reason as every other runtime-machinery import in this module.
+    Plain data in, plain data out: strings and a sequence of strings, a string
+    back — no ACP type crosses the boundary. *backend* names the harness the pin
+    is judged for (a pair-id member keeps a stored pin's effort suffix).
+    Function-local import for the same reason as every other runtime-machinery
+    import in this module.
     """
     from kiro_crew.acp.client import resolve_pin_spelling as _impl
 
-    return _impl(model_id, advertised)  # type: ignore[arg-type]
+    return _impl(model_id, advertised, backend=backend)  # type: ignore[arg-type]
 
 
 def catalog_row_would_drop(model_id: str, advertised: object) -> bool:

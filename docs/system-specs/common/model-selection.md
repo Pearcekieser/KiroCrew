@@ -19,12 +19,14 @@ partition that does not serve it makes it as unusable as any other unentitled id
 
 For a model chosen on the caller's behalf — background one-liners, tips, inherited or
 cold-start applies — route through
-`acp.client.resolve_usable_model(preferred, advertised)`. It answers with a served id,
-or `"auto"` only when the backend advertises it, or `""` meaning **inherit the
+`acp.client.resolve_usable_model(preferred, advertised, backend=...)`. It answers with a
+served id, or `"auto"` only when the backend advertises it, or `""` meaning **inherit the
 session's served backend default**. Returning `""` rather than substituting a guess is
-the whole point: the wire never receives a model the partition does not serve.
+the whole point: the wire never receives a model the partition does not serve. The
+optional `backend` names the harness the pin is judged for; `resolve_pin_spelling`
+takes the same argument.
 
-Two behaviours of the resolver are worth knowing before writing a call site:
+Three behaviours of the resolver are worth knowing before writing a call site:
 
 - An **unknown or empty advertised set** means entitlement is unknowable. `"auto"`
   degrades to `""` because it cannot be verified, while a concrete caller-supplied id
@@ -33,6 +35,13 @@ Two behaviours of the resolver are worth knowing before writing a call site:
   session advertises the bare id. The resolver retries the miss through
   `resolve_pin_spelling` and puts the **advertised** spelling on the wire, not the
   caller's, because the qualified spelling is one the backend never advertised.
+- On an `ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS` member (codex) a stored
+  `<model>[<effort>]` pin with a valid effort whose bare base is advertised resolves
+  to that pair, assembled from the advertised base and the pin's effort rather than
+  taken from the list verbatim. The wire applies it as a model write plus an effort
+  write (`_push_model_via_effort_split`). When the base itself folds onto an
+  advertised pair (the legacy list), the answer is that pair, as the plain fold
+  gives it. Any other backend, and a call without `backend`, is the plain fold.
 
 `run_bg_oneliner` adds a one-shot reactive retry on a wire rejection as a backstop.
 Treat it as a backstop, not as permission to skip the resolver.
