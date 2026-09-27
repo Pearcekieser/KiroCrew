@@ -137,6 +137,7 @@ from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.effort import EFFORT_LEVELS, EFFORT_VALUES
 from kiro_crew.executors import discovery_executor, maintenance_executor, subprocess_executor
 from kiro_crew.external_text import redact_external_text as _redact_external
+from kiro_crew.kiro_prerequisite import spawn_supervised_oneshot
 from kiro_crew.loop_lock import LoopBoundLock
 from kiro_crew.members import MemberNameError, validate_member_name
 from kiro_crew.memory_stores import (
@@ -150,12 +151,11 @@ from kiro_crew.memory_stores import (
     retire_unpublished_allocation,
 )
 from kiro_crew.platform.governance import sanitize_agent_config_governance
-from kiro_crew.platform_compat import is_link_or_junction
+from kiro_crew.platform_compat import is_link_or_junction, kill_and_reap
 from kiro_crew.sandbox import (
     SandboxUnavailableError,
     cgroup_scope_argv,
     configured_sandbox_mode,
-    create_subprocess_limited,
     scrub_agent_subprocess_env,
     wrap_argv,
 )
@@ -2403,11 +2403,15 @@ async def api_models(request: web.Request) -> web.Response:
             # the protected .env read off the gateway loop.
             await asyncio.to_thread(inject_kiro_cli_api_key, env)
             env = scrub_agent_subprocess_env(env)
-            proc = await create_subprocess_limited(
-                *argv,
+            # Supervised so the call ends whatever it leaves behind. A kiro-cli
+            # launcher wrapper can start a ~140-thread credential helper for each
+            # call and leave it running; this endpoint re-polls every 8s while
+            # degraded, so on a gateway on that path every poll leaked one until
+            # the agent cgroup ran out of pids.
+            proc = await spawn_supervised_oneshot(
+                argv,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                start_new_session=True,
                 env=env,
             )
             try:
@@ -2415,11 +2419,9 @@ async def api_models(request: web.Request) -> web.Response:
                     proc.communicate(), timeout=_LIST_MODELS_SUBPROCESS_TIMEOUT_SECS
                 )
             except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                await proc.communicate()
+                # The whole group, while the supervisor still leads it: killing
+                # only the leader would leave the command and its helpers running.
+                await kill_and_reap(proc)
                 # A cold CLI spawn exceeded the timeout. This is the common
                 # cause of the "picker is empty until I refresh" symptom: a
                 # slow first `--list-models` spawn returning [] (HTTP 200) would

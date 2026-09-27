@@ -52,7 +52,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from kiro_crew import hooks, identity_stores, platform_compat
+from kiro_crew import _process_group_supervisor, hooks, identity_stores, platform_compat
 from kiro_crew._sqlite_compat import sqlite3
 from kiro_crew.agent_files import AGENT_FILENAME, LITE_AGENT_FILENAME
 from kiro_crew.atomic_write import atomic_write
@@ -63,6 +63,7 @@ from kiro_crew.kiro_cli import find_kiro_cli_candidates, is_bundled_kiro_cli, kn
 from kiro_crew.sandbox import (
     SandboxUnavailableError,
     corroborate_launcher_refusal,
+    create_subprocess_limited,
     launcher_refusal,
     resource_limit_supervisor_argv,
     sandboxed_spawn_argv,
@@ -303,6 +304,82 @@ try:
     _PROCESS_GROUP_SUPERVISOR_CODE = Path(_PROCESS_GROUP_SUPERVISOR).read_text(encoding="utf-8")
 except OSError:
     _PROCESS_GROUP_SUPERVISOR_CODE = ""
+
+
+@functools.cache
+def _host_can_reap() -> bool:
+    """Whether the supervisor's ``--reap-survivors`` can act on this host.
+
+    Probed here, in the gateway, with the supervisor's own check: the child runs
+    on the same host and kernel, so the answer is the same there.
+    """
+    return platform_compat.IS_POSIX and _process_group_supervisor.can_reap()
+
+
+async def spawn_supervised_oneshot(argv: list[str], **kwargs: Any) -> asyncio.subprocess.Process:
+    """Spawn a one-shot ``kiro-cli`` call that cleans up what it leaves behind.
+
+    For fixed-argv calls that return (``--list-models``, ``whoami``, the
+    ``/usage`` scrape). A kiro-cli launcher wrapper can start a credential
+    helper of about 140 threads for such a call and leave it running when the
+    call returns. Here the call runs under the process-group supervisor in
+    ``--reap-survivors`` mode, in its own session: the supervisor stays the
+    group leader for the whole call and then ends what the command left in the
+    group. Pass the already sandbox- and cgroup-wrapped *argv*; the supervisor
+    goes outermost. Keyword arguments go to ``create_subprocess_limited``.
+
+    The supervisor execs its target without a PATH lookup, so a wrapper that is
+    not already absolute is resolved to a trusted system binary first, off the
+    loop since a miss walks all of PATH. Where the supervisor is unavailable
+    (Windows, or its source could not be captured) or the wrapper cannot be
+    resolved, the call runs unsupervised, still in its own session on POSIX
+    (Windows ignores ``start_new_session``). So does a
+    host that cannot reap (no pidfd, e.g. macOS): there the supervisor would only
+    wait for the leftovers instead of ending them, which would hold the call open.
+    """
+    supervised = False
+    if _PROCESS_GROUP_SUPERVISOR_CODE and argv and _host_can_reap():
+        target = argv
+        if not os.path.isabs(target[0]):
+            resolved = await asyncio.to_thread(platform_compat.trusted_system_bin, target[0])
+            target = [resolved, *target[1:]] if resolved else []
+            if not resolved:
+                logger.debug("%s is not a trusted system binary; spawning unsupervised", argv[0])
+        if target:
+            supervised = True
+            argv = [
+                sys.executable,
+                "-I",
+                "-c",
+                _PROCESS_GROUP_SUPERVISOR_CODE,
+                "--reap-survivors",
+                *target,
+            ]
+    if not supervised:
+        _note_unsupervised_once()
+    return await create_subprocess_limited(*argv, start_new_session=True, **kwargs)
+
+
+_unsupervised_noted = False
+
+
+def _note_unsupervised_once() -> None:
+    """Say once per process that one-shot calls run without leftover cleanup.
+
+    Debug-level detail stays per call; this single INFO line is what makes a
+    host that keeps leaking helpers diagnosable from the gateway log.
+    """
+    global _unsupervised_noted
+    if _unsupervised_noted:
+        return
+    _unsupervised_noted = True
+    logger.info(
+        "One-shot kiro-cli calls run without the reaping supervisor on this host "
+        "(no pidfd support, supervisor source unavailable, or wrapper not a trusted "
+        "system binary); helpers they leave behind are not cleaned up"
+    )
+
+
 _AUTH_STAGING_RELATIVE = Path(".kiro") / "crew-auth-staging"
 # Marker the offline E2E harness sets on the gateway it spawns. It grants NO
 # privilege: the packaged fake ACP backend is launched by the ordinary in-place
