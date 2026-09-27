@@ -202,7 +202,6 @@
     "manage_account": "অ্যাকাউন্ট পরিচালনা করুন",
     "mem": "MEM",
     "memory_unavailable": "মেমরি: জানা যাচ্ছে না",
-    "metrics_are_stale_latest_fetch_failed": "মেট্রিক পুরোনো, সর্বশেষ ফেচ ব্যর্থ হয়েছে",
     "metrics_unavailable": "মেট্রিক অনুপলভ্য",
     "nav_back": "পেছনে যান",
     "nav_back_title": "পেছনে যান · Ctrl+←",
@@ -245,7 +244,6 @@
     "signed_in_with": "{{provider}} দিয়ে সাইন ইন করা হয়েছে",
     "skip_to_content": "কনটেন্টে যান",
     "social_login": "সোশ্যাল লগইন",
-    "stale_fetch_failing": "(পুরনো: ফেচ ব্যর্থ হচ্ছে)",
     "star_kirocrew_on_github": "GitHub-এ Kiro Crew-কে স্টার দিন",
     "star_us": "আমাদের স্টার দিন",
     "starting_update": "আপডেট শুরু হচ্ছে…",
@@ -272,7 +270,9 @@
     "focus_mode_title_mac": "ফোকাস মোড · ⌥⇧M",
     "connect_your_phone": "ফোন সংযুক্ত করুন",
     "kiro_credit_usage_no_reading": "Kiro ক্রেডিট ব্যবহার — এখনো কোনো ব্যালেন্স রিডিং নেই; রিফ্রেশ করতে খোলো",
-    "kiro_credit_usage_config_unreadable": "Kiro ক্রেডিট ব্যবহার — ব্যাকএন্ড সেটিং পড়া যায়নি; আবার চেষ্টা করতে খোলো"
+    "kiro_credit_usage_config_unreadable": "Kiro ক্রেডিট ব্যবহার — ব্যাকএন্ড সেটিং পড়া যায়নি; আবার চেষ্টা করতে খোলো",
+    "metrics_card_old_data": "শেষ আপডেট ৯০ সেকেন্ডের বেশি আগে",
+    "metrics_card_fetch_failed": "শেষ মেট্রিক আপডেট ব্যর্থ হয়েছে"
   },
   "appSdk": {
     "chatEmbed": {

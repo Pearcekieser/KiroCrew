@@ -178,7 +178,6 @@
     "kiro_credit_usage_signin_required": "Kiro credit usage — no live Kiro sign-in could be read; sign in again to restore it",
     "kiro_credit_usage_unavailable": "Kiro credit usage — unavailable",
     "memory_unavailable": "Memory: unavailable",
-    "metrics_are_stale_latest_fetch_failed": "Metrics are stale, latest fetch failed",
     "n_more_one": "{{count}} more",
     "n_more_other": "{{count}} more",
     "notification_count_one": "{{count}} notification",
@@ -193,7 +192,6 @@
     "show_more_apps_one": "Show {{count}} more app",
     "show_more_apps_other": "Show {{count}} more apps",
     "social_login": "Social login",
-    "stale_fetch_failing": "(stale: fetch failing)",
     "starting_update": "Starting update…",
     "update_failed_2": "Update failed",
     "view_full_changelog": "▸ View Full Changelog",
@@ -220,7 +218,9 @@
     "connect_your_phone": "Connect your phone",
     "kiro_credit_usage_no_reading": "Kiro credit usage — no balance reading yet; open to refresh",
     "kiro_credit_usage_config_unreadable": "Kiro credit usage — could not read the backend setting; open to retry",
-    "notifications_ask_agent_help": "Leaves this page and opens a new chat with this error's report already filled in, ready for you to send"
+    "notifications_ask_agent_help": "Leaves this page and opens a new chat with this error's report already filled in, ready for you to send",
+    "metrics_card_old_data": "Last updated more than 90 seconds ago",
+    "metrics_card_fetch_failed": "The last metrics update failed"
   },
   "appSdk": {
     "chatEmbed": {

@@ -201,7 +201,6 @@
     "manage_account": "アカウントを管理",
     "mem": "MEM",
     "memory_unavailable": "メモリ: 利用不可",
-    "metrics_are_stale_latest_fetch_failed": "メトリクスが古く、最新の取得に失敗しました",
     "metrics_unavailable": "メトリクス利用不可",
     "nav_back": "戻る",
     "nav_back_title": "戻る · Ctrl+←",
@@ -241,7 +240,6 @@
     "signed_in_with": "{{provider}} でサインイン済み",
     "skip_to_content": "コンテンツにスキップ",
     "social_login": "ソーシャルログイン",
-    "stale_fetch_failing": "（古い情報：取得に失敗）",
     "star_kirocrew_on_github": "GitHub で Kiro Crew にスター",
     "star_us": "スターをください",
     "starting_update": "更新を開始中…",
@@ -268,7 +266,9 @@
     "focus_mode_title_mac": "フォーカスモード · ⌥⇧M",
     "connect_your_phone": "スマホを接続",
     "kiro_credit_usage_no_reading": "Kiro クレジット使用量 — 残高はまだ読み取れていません。開いて更新",
-    "kiro_credit_usage_config_unreadable": "Kiro クレジット使用量 — バックエンド設定を読み取れませんでした。開いて再試行"
+    "kiro_credit_usage_config_unreadable": "Kiro クレジット使用量 — バックエンド設定を読み取れませんでした。開いて再試行",
+    "metrics_card_old_data": "最終更新から90秒以上経過しています",
+    "metrics_card_fetch_failed": "前回のメトリクス更新に失敗しました"
   },
   "appSdk": {
     "chatEmbed": {

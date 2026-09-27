@@ -202,7 +202,6 @@
     "manage_account": "Konto verwalten",
     "mem": "SPEICHER",
     "memory_unavailable": "Arbeitsspeicher: nicht verfügbar",
-    "metrics_are_stale_latest_fetch_failed": "Metriken sind veraltet, letzter Abruf fehlgeschlagen",
     "metrics_unavailable": "Metriken nicht verfügbar",
     "nav_back": "Zurück",
     "nav_back_title": "Zurück · Strg+←",
@@ -245,7 +244,6 @@
     "signed_in_with": "Angemeldet mit {{provider}}",
     "skip_to_content": "Zum Inhalt springen",
     "social_login": "Social Login",
-    "stale_fetch_failing": "(veraltet: Abruf fehlgeschlagen)",
     "star_kirocrew_on_github": "Kiro Crew auf GitHub einen Stern geben",
     "star_us": "Stern geben",
     "starting_update": "Aktualisierung wird gestartet…",
@@ -272,7 +270,9 @@
     "focus_mode_title_mac": "Fokusmodus · ⌥⇧M",
     "connect_your_phone": "Telefon verbinden",
     "kiro_credit_usage_no_reading": "Kiro-Credit-Verbrauch — noch keine Guthabenanzeige; öffnen zum Aktualisieren",
-    "kiro_credit_usage_config_unreadable": "Kiro-Credit-Verbrauch — Backend-Einstellung konnte nicht gelesen werden; öffnen zum erneuten Versuch"
+    "kiro_credit_usage_config_unreadable": "Kiro-Credit-Verbrauch — Backend-Einstellung konnte nicht gelesen werden; öffnen zum erneuten Versuch",
+    "metrics_card_old_data": "Zuletzt vor mehr als 90 Sekunden aktualisiert",
+    "metrics_card_fetch_failed": "Die letzte Aktualisierung der Metriken ist fehlgeschlagen"
   },
   "appSdk": {
     "chatEmbed": {

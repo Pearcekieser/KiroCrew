@@ -204,7 +204,6 @@
     "manage_account": "Управление аккаунтом",
     "mem": "MEM",
     "memory_unavailable": "Память: недоступна",
-    "metrics_are_stale_latest_fetch_failed": "Метрики устарели, последний запрос не удался",
     "metrics_unavailable": "метрики недоступны",
     "nav_back": "Назад",
     "nav_back_title": "Назад · Ctrl+←",
@@ -253,7 +252,6 @@
     "signed_in_with": "Вход выполнен через {{provider}}",
     "skip_to_content": "Перейти к содержимому",
     "social_login": "Вход через соцсети",
-    "stale_fetch_failing": "(устарело: не удаётся получить данные)",
     "star_kirocrew_on_github": "Поставить Kiro Crew звезду на GitHub",
     "star_us": "Поставить звезду",
     "starting_update": "Запуск обновления...",
@@ -280,7 +278,9 @@
     "focus_mode_title_mac": "Режим фокусировки · ⌥⇧M",
     "connect_your_phone": "Подключить телефон",
     "kiro_credit_usage_no_reading": "Использование кредитов Kiro — показаний баланса пока нет; открой, чтобы обновить",
-    "kiro_credit_usage_config_unreadable": "Использование кредитов Kiro — не удалось прочитать настройку бэкенда; открой, чтобы повторить"
+    "kiro_credit_usage_config_unreadable": "Использование кредитов Kiro — не удалось прочитать настройку бэкенда; открой, чтобы повторить",
+    "metrics_card_old_data": "Последнее обновление более 90 секунд назад",
+    "metrics_card_fetch_failed": "Последнее обновление метрик не удалось"
   },
   "appSdk": {
     "chatEmbed": {

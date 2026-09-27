@@ -201,7 +201,6 @@
     "manage_account": "계정 관리",
     "mem": "MEM",
     "memory_unavailable": "메모리: 사용 불가",
-    "metrics_are_stale_latest_fetch_failed": "지표가 오래되었습니다. 최근 가져오기에 실패했습니다",
     "metrics_unavailable": "지표 사용 불가",
     "nav_back": "뒤로",
     "nav_back_title": "뒤로 · Ctrl+←",
@@ -241,7 +240,6 @@
     "signed_in_with": "{{provider}}(으)로 로그인됨",
     "skip_to_content": "본문으로 건너뛰기",
     "social_login": "소셜 로그인",
-    "stale_fetch_failing": "(오래됨: 가져오기 실패 중)",
     "star_kirocrew_on_github": "GitHub에서 Kiro Crew에 스타 주기",
     "star_us": "스타 주기",
     "starting_update": "업데이트 시작 중…",
@@ -268,7 +266,9 @@
     "focus_mode_title_mac": "집중 모드 · ⌥⇧M",
     "connect_your_phone": "휴대폰 연결",
     "kiro_credit_usage_no_reading": "Kiro 크레딧 사용량 — 아직 잔액 정보 없음. 열어서 새로 고침",
-    "kiro_credit_usage_config_unreadable": "Kiro 크레딧 사용량 — 백엔드 설정을 읽을 수 없음. 열어서 다시 시도"
+    "kiro_credit_usage_config_unreadable": "Kiro 크레딧 사용량 — 백엔드 설정을 읽을 수 없음. 열어서 다시 시도",
+    "metrics_card_old_data": "마지막 업데이트 후 90초 이상 지났습니다",
+    "metrics_card_fetch_failed": "마지막 메트릭 업데이트에 실패했습니다"
   },
   "appSdk": {
     "chatEmbed": {
