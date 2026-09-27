@@ -1580,7 +1580,9 @@ def test_unclaimed_turn_end_notice_is_tool_neutral():
     claimed cannot send the agent to one tool's inspector."""
     from kiro_crew.dashboard.chat_runner import UNCLAIMED_DIRECTIVE_NOTICE
 
-    assert UNCLAIMED_DIRECTIVE_NOTICE == "A request from this turn was not applied."
+    assert UNCLAIMED_DIRECTIVE_NOTICE == (
+        "A request from this turn was not applied. Check that your last request took effect."
+    )
     assert "monitor" not in UNCLAIMED_DIRECTIVE_NOTICE.lower()
 
 

@@ -158,7 +158,8 @@ cron-path kind still subclasses `irq.Probe`.
 ## Runtime bounds and activation evidence
 
 `monitoring.max_runtime_secs` supplies the operator's finite runtime ceiling,
-shared by MCP validation, API creation/update and persistence. The shipped
+shared by MCP validation and API creation/update and applied when a budget is
+written. The shipped
 ceiling is seven days; setting 2592000 permits a 30-day request without changing
 any stored deadline or unrelated arming default. Daily prompt maintenance uses
 `interval_secs=86400`, `gate=false`, and an explicitly bounded runtime and cycle
@@ -168,21 +169,19 @@ discovery on the gateway event loop skips config reads; descriptor read failures
 fall back to the shipped bound without weakening invocation-time validation.
 The runtime policy applies to structured budgets and legacy outer runtimes;
 legacy observation metadata has unused budgets and retains only structural bounds.
-Malformed or over-policy persisted runtime budgets are held inactive, and the
-load logs a warning naming the loop, its budget and the ceiling that refused it. An
-over-policy budget is a policy failure, not a malformed record: a well-formed legacy
-loop or structured monitor keeps its budget and typed state and carries the loop-level
-`invalid_runtime_budget` stop reason with no terminal outcome; only a record the model
-cannot parse is quarantined. A row held under `invalid_runtime_budget` is released on
-the first load whose ceiling admits its stored budget: it resumes on its stored deadline
-with its budget still measured from creation, so a budget spent during the hold expires
-under the ordinary runtime-budget stop instead, and any other stop reason is untouched.
-A resume
-rejected by the current policy returns an audited HTTP 400 with the valid range. Resume
-and other updates that keep a loop active validate the effective stored budget
-even when the request omits that field; a structured update re-checks the effective
-budget on every call and answers the same audited 400. API creation caps the shipped
-runtime default to the ceiling and bound-checks only a budget the caller supplied.
+The ceiling is enforced only where a budget is written: legacy and structured
+creation, a legacy or structured update that supplies a budget, the API handlers
+and the MCP arming tools. `_load` never rewrites a persisted budget against the
+ceiling: a stored budget above the current ceiling stays exactly as stored, the
+row keeps its stored `active` state and its deadline (creation time plus budget),
+and the budget is validated again only when it is next written. Lowering the
+ceiling therefore never deactivates a running loop, and raising it never resumes
+one. Only a record the model cannot parse is quarantined, which includes a
+structured budget above the absolute `MonitorBudgets` maximum (2592000). A
+create or update carrying a budget rejected by the current policy returns an
+audited HTTP 400 with the valid range; an update that omits the budget keeps the
+stored one and is not re-checked. API creation caps the shipped runtime default
+to the ceiling and bound-checks only a budget the caller supplied.
 Explicit stops remain available.
 Quarantine remains inspectable even below the ordinary four-hour default.
 

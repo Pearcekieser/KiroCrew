@@ -34,9 +34,9 @@ def coerce_runtime_ceiling(value: object) -> int:
 
     An unset key (``None``) is the ordinary default and is silent. A configured
     value this policy cannot honour is replaced by the shipped ceiling AND named
-    in a warning, because the replacement is what every monitor budget is then
-    validated against: a persisted loop above it is held inactive on load, and
-    the operator who typed the value is the one who can correct it.
+    in a warning, because the replacement is what every budget written from
+    then on is validated against, and the operator who typed the value is the
+    one who can correct it. Persisted budgets are not re-checked on load.
     """
     if type(value) is int and 1 <= value <= MAX_RUNTIME_CEILING_SECS:
         return value
@@ -54,6 +54,7 @@ def coerce_runtime_ceiling(value: object) -> int:
 
 def runtime_ceiling_secs() -> int:
     """Read the live policy without changing an existing monitor's deadline."""
+    # Local to avoid a cycle: config.sections imports this module.
     from kiro_crew.config import KiroCrewConfig
     from kiro_crew.config.live import snapshot
 

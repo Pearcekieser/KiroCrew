@@ -19,8 +19,10 @@ from kiro_crew.autonudge import (
     AutoNudgeService,
     MonitorUpdateConflict,
     NudgeLoop,
+    runtime_budget_exceeded,
 )
 from kiro_crew.dashboard.handlers.autonudge import render_nudge_message
+from kiro_crew.monitoring.decision import monitor_budget_reason
 from kiro_crew.monitoring.models import (
     MONITOR_STATE_VERSION,
     MonitorBudgets,
@@ -3234,39 +3236,73 @@ async def test_update_changes_runtime_budget(svc):
 
 
 @pytest.mark.asyncio
-async def test_load_names_the_loop_it_holds_inactive_for_an_over_policy_budget(
+async def test_load_leaves_an_inactive_loop_with_an_over_ceiling_budget_untouched(
     svc, monkeypatch, caplog
 ):
-    """A persisted budget above the current ceiling is held inactive, and the
-    log says which loop, which budget and which ceiling -- the operator who
-    lowered ``monitoring.max_runtime_secs`` otherwise sees a loop go quiet with
-    nothing to explain it."""
+    """A paused legacy row with NO stop reason and a budget above the current
+    ceiling is read back exactly as stored: still inactive, reason still empty,
+    budget and deadline as written, and the store is not marked dirty for it.
+    The ceiling is a write-time bound; load rewrites nothing against it."""
     loop = await svc.add(slot_key="chat-1-123", message="go", max_runtime_secs=7200)
+    svc._loops[loop.id].active = False
+    svc._loops[loop.id].stopped_reason = ""
+    svc._loops[loop.id].next_due_ts = 0.0
+    svc._save()
     svc.stop()
     monkeypatch.setattr("kiro_crew.monitoring.limits.runtime_ceiling_secs", lambda: 3600)
     restored = AutoNudgeService(base_dir=svc._base_dir)
-    with caplog.at_level(logging.WARNING, logger="kiro_crew.autonudge"):
+    with caplog.at_level(logging.INFO, logger="kiro_crew.autonudge"):
         restored._load()
     try:
         row = restored.get_by_id(loop.id)
-        assert row is not None and not row.active
-        assert row.stopped_reason == "invalid_runtime_budget"
-        held = [r for r in caplog.records if "held inactive on load" in r.getMessage()]
-        assert len(held) == 1
-        text = held[0].getMessage()
-        assert loop.id in text and "7200" in text and "3600" in text and "1 hour" in text
+        assert row is not None
+        assert row.active is False
+        assert row.stopped_reason == ""
+        assert row.max_runtime_secs == 7200
+        assert row.next_due_ts == 0.0
+        assert restored._store_dirty is False
+        assert not any("runtime" in r.getMessage() for r in caplog.records)
     finally:
         restored.stop()
 
 
 @pytest.mark.asyncio
-async def test_load_holds_a_structured_monitor_inactive_for_an_over_policy_budget(
+async def test_load_keeps_an_active_loop_with_an_over_ceiling_budget_running(svc, monkeypatch):
+    """Lowering ``monitoring.max_runtime_secs`` below a running loop's stored
+    budget does not stop it: the row stays active with its budget as written,
+    so its deadline is still the stored ``created_ts + max_runtime_secs``."""
+    loop = await svc.add(slot_key="chat-1-123", message="go", max_runtime_secs=7200)
+    created_ts = loop.created_ts
+    svc.stop()
+    monkeypatch.setattr("kiro_crew.monitoring.limits.runtime_ceiling_secs", lambda: 3600)
+    restored = AutoNudgeService(base_dir=svc._base_dir)
+    restored._load()
+    try:
+        row = restored.get_by_id(loop.id)
+        assert row is not None and row.active is True
+        assert row.stopped_reason == ""
+        assert row.max_runtime_secs == 7200
+        assert row.created_ts == created_ts
+        assert not runtime_budget_exceeded(row, created_ts + 7199)
+        assert runtime_budget_exceeded(row, created_ts + 7200)
+        # An update that omits the budget is not re-checked and keeps it.
+        updated = await restored.update(loop.id, message="still going")
+        assert updated is not None and updated.max_runtime_secs == 7200
+        # An update that supplies a budget over the ceiling is refused.
+        with pytest.raises(ValueError):
+            await restored.update(loop.id, max_runtime_secs=7200)
+        assert restored.get_by_id(loop.id).max_runtime_secs == 7200
+    finally:
+        restored.stop()
+
+
+@pytest.mark.asyncio
+async def test_load_keeps_an_active_structured_monitor_with_an_over_ceiling_budget(
     svc, monkeypatch, caplog
 ):
-    """A well-formed structured record above a lowered ceiling is a POLICY
-    failure, not a malformed record: it keeps its budget and its typed state,
-    is held inactive under the same reason as a legacy loop, and is never
-    replaced by an inert quarantine copy."""
+    """A well-formed structured record above a lowered ceiling is neither held
+    nor quarantined: it loads active with its budget, target and deadline as
+    stored. Only a budget the next write supplies meets the ceiling."""
     loop = await svc.add_monitor(
         slot_key="chat-1-123",
         kind="github_pull_request",
@@ -3275,6 +3311,7 @@ async def test_load_holds_a_structured_monitor_inactive_for_an_over_policy_budge
         cadence_secs=60,
         budgets=MonitorBudgets(max_runtime_secs=7200),
     )
+    created_ts = loop.monitor.created_ts
     svc.stop()
     monkeypatch.setattr("kiro_crew.monitoring.limits.runtime_ceiling_secs", lambda: 3600)
     restored = AutoNudgeService(base_dir=svc._base_dir)
@@ -3282,84 +3319,26 @@ async def test_load_holds_a_structured_monitor_inactive_for_an_over_policy_budge
         restored._load()
     try:
         row = restored.get_by_id(loop.id)
-        assert row is not None and not row.active
-        assert row.stopped_reason == "invalid_runtime_budget"
+        assert row is not None and row.active is True
+        assert row.stopped_reason == ""
         assert row.monitor is not None and row.monitor.outcome is None
         assert row.monitor.budgets.max_runtime_secs == 7200
         assert row.monitor.target == "owner/repo#123"
+        assert row.monitor.created_ts == created_ts
+        assert monitor_budget_reason(row.monitor, now=created_ts + 7199) == ""
+        assert monitor_budget_reason(row.monitor, now=created_ts + 7200) == "runtime_budget"
         assert not any("quarantined malformed" in r.getMessage() for r in caplog.records)
-        held = [r for r in caplog.records if "held inactive on load" in r.getMessage()]
-        assert len(held) == 1
-        text = held[0].getMessage()
-        assert loop.id in text and "7200" in text and "3600" in text
-        # A budget-neutral update may change cadence without revalidating the
-        # stored over-policy runtime budget.
+        # A budget-neutral update does not revalidate the stored runtime budget.
         updated = await restored.update_monitor(loop.id, cadence_secs=120)
         assert updated is not None and updated.monitor.cadence_secs == 120
         assert updated.monitor.budgets.max_runtime_secs == 7200
-        # Lowering the budget into policy is accepted and keeps the record.
+        # A supplied budget over the ceiling is refused; one inside it lands.
+        with pytest.raises(ValueError):
+            await restored.update_monitor(loop.id, budget_patch={"max_runtime_secs": 7200})
         updated = await restored.update_monitor(loop.id, budget_patch={"max_runtime_secs": 1800})
         assert updated is not None and updated.monitor.budgets.max_runtime_secs == 1800
     finally:
         restored.stop()
-
-
-@pytest.mark.asyncio
-async def test_a_structured_monitor_already_held_is_not_re_reported_on_every_load(
-    svc, monkeypatch, caplog
-):
-    loop = await svc.add_monitor(
-        slot_key="chat-1-123",
-        kind="github_pull_request",
-        target="owner/repo#123",
-        objective="review_ready",
-        cadence_secs=60,
-        budgets=MonitorBudgets(max_runtime_secs=7200),
-    )
-    svc.stop()
-    monkeypatch.setattr("kiro_crew.monitoring.limits.runtime_ceiling_secs", lambda: 3600)
-    second = AutoNudgeService(base_dir=svc._base_dir)
-    with caplog.at_level(logging.WARNING, logger="kiro_crew.autonudge"):
-        second._load()
-    assert sum("held inactive on load" in r.getMessage() for r in caplog.records) == 1
-    second._save()
-    second.stop()
-    caplog.clear()
-    third = AutoNudgeService(base_dir=svc._base_dir)
-    with caplog.at_level(logging.WARNING, logger="kiro_crew.autonudge"):
-        third._load()
-    try:
-        row = third.get_by_id(loop.id)
-        assert row is not None and not row.active
-        assert row.stopped_reason == "invalid_runtime_budget"
-        assert row.monitor is not None and row.monitor.outcome is None
-        assert not any("held inactive on load" in r.getMessage() for r in caplog.records)
-    finally:
-        third.stop()
-
-
-def test_a_loop_already_inactive_is_not_re_reported_on_every_load(tmp_path, monkeypatch, caplog):
-    """The warning marks the deactivation, not the row's continued existence:
-    a restart after the first hold stays quiet about it."""
-    monkeypatch.setattr("kiro_crew.monitoring.limits.runtime_ceiling_secs", lambda: 3600)
-    first = AutoNudgeService(base_dir=tmp_path)
-    first._loops["held"] = NudgeLoop(
-        id="held", slot_key="chat-1-123", message="go", active=True, max_runtime_secs=7200
-    )
-    first._save()
-    first.stop()
-    second = AutoNudgeService(base_dir=tmp_path)
-    with caplog.at_level(logging.WARNING, logger="kiro_crew.autonudge"):
-        second._load()
-    assert sum("held inactive on load" in r.getMessage() for r in caplog.records) == 1
-    second._save()
-    second.stop()
-    caplog.clear()
-    third = AutoNudgeService(base_dir=tmp_path)
-    with caplog.at_level(logging.WARNING, logger="kiro_crew.autonudge"):
-        third._load()
-    assert not any("held inactive on load" in r.getMessage() for r in caplog.records)
-    third.stop()
 
 
 @pytest.mark.asyncio

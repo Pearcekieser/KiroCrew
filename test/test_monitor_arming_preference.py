@@ -237,10 +237,10 @@ class TestAnInstallThatPredatesTheKey:
 class TestAMalformedRuntimeCeilingIsNamedWhenItIsReplaced:
     """``monitoring.max_runtime_secs`` falls back to the shipped seven days when
     the stored value cannot be honoured. The fallback is right (a finite bound
-    must always exist) but it must not be SILENT: every monitor budget is then
-    validated against a ceiling the operator did not choose, and a persisted
-    loop above it is held inactive on the next load. The warning names the
-    value that was replaced and the ceiling that replaced it."""
+    must always exist) but it must not be SILENT: every budget written from then
+    on is validated against a ceiling the operator did not choose, and the
+    person who typed the value is the one who can correct it. The warning names
+    the value that was replaced and the ceiling that replaced it."""
 
     _LOGGER = "kiro_crew.monitoring.limits"
 

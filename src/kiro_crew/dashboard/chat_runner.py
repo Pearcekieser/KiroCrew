@@ -6202,7 +6202,9 @@ _MONITOR_DIRECTIVE_TOOLS: frozenset[str] = frozenset(
 #: in this turn claimed, so it cannot even name the tool. Only a person reads
 #: this row (no tool result exists to carry an agent instruction), so it states
 #: the outcome in plain words and nothing else.
-UNCLAIMED_DIRECTIVE_NOTICE = "A request from this turn was not applied."
+UNCLAIMED_DIRECTIVE_NOTICE = (
+    "A request from this turn was not applied. Check that your last request took effect."
+)
 
 
 def _directive_recovery_instruction(tool: str) -> str:

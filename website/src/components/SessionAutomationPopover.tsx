@@ -235,14 +235,17 @@ export default function SessionAutomationPopover({
     staleTime: 60_000,
     retry: false,
   })
-  const ceiling = liveCeiling.data
+  const ceiling = liveCeiling.isError ? undefined : liveCeiling.data
   const runtimeLimits = {
     minimum: STRUCTURED_MONITOR_LIMITS.maxRuntimeSecs.minimum,
     maximum: typeof ceiling === 'number' && Number.isSafeInteger(ceiling) && ceiling >= 1
       ? Math.min(STRUCTURED_MONITOR_LIMITS.maxRuntimeSecs.maximum, ceiling)
       : SHIPPED_RUNTIME_CEILING_SECS,
   }
-  const ceilingFailed = liveCeiling.isError
+  /* Both read-failure notices sit behind the request error: a failed save is
+     what the reader must act on first, and stacking a read alert under it puts
+     two unrelated errors in front of them at once. */
+  const ceilingFailed = !errors.request && liveCeiling.isError
   const snapshotNoticeDue = !errors.request && snapshotFailed
 
   useEffect(() => {

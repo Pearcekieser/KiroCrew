@@ -2981,11 +2981,12 @@ repointed, which is exactly the state the guard exists to prevent reaching.
 ### Monitor runtime ceiling
 
 The shared policy is `monitoring.max_runtime_secs` (see [config](config.md)).
-Tools, REST creation/updates and monitor persistence use `monitoring.limits`.
+Tools and REST creation/updates use `monitoring.limits`; a budget is checked
+only when it is written, and a persisted budget is left as stored on load.
 Legacy general AutoNudge still allows zero as its pre-existing unbounded value;
 monitor tools and structured monitors require a positive finite budget. Raising
-the policy never rewrites an existing loop's timestamps or runtime. Invalid
-persisted budgets deactivate the record rather than scheduling it.
+or lowering the policy never rewrites an existing loop's timestamps, runtime or
+active state; a stored budget above the ceiling runs to its stored deadline.
 
 ### Structured monitors
 

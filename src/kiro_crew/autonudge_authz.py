@@ -205,9 +205,9 @@ async def authorize_and_update_monitor(
         await _audit("denied", error)
         return None, error, 409
     except ValueError as exc:
-        # The store's own bounds (the runtime ceiling re-checked against the
-        # effective budget, an unknown budget field) are a client error with the
-        # refusing range in its text, matching the legacy update path.
+        # The store's own bounds (the runtime ceiling checked against a budget
+        # the patch supplies, an unknown budget field) are a client error with
+        # the refusing range in its text, matching the legacy update path.
         error = str(exc)
         await _audit("denied", error)
         return None, error, 400

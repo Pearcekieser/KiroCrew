@@ -1360,7 +1360,7 @@ def _validate_monitor_runtime(args: dict[str, Any]) -> None:
     value = args.get("max_runtime_secs")
     if value is not None:
         try:
-            validate_runtime_secs(value)
+            args["max_runtime_secs"] = validate_runtime_secs(value)
         except ValueError as exc:
             raise ValidationError("max_runtime_secs", str(exc)) from exc
 
@@ -1378,7 +1378,7 @@ MONITOR_WATCH_SCHEMA = ToolSchema(
             min_val=MIN_MONITOR_CADENCE_SECS,
             max_val=MAX_MONITOR_CADENCE_SECS,
         ),
-        FieldSpec("max_runtime_secs", int, min_val=1, max_val=MAX_RUNTIME_CEILING_SECS),
+        FieldSpec("max_runtime_secs", (int, float), min_val=1, max_val=MAX_RUNTIME_CEILING_SECS),
         FieldSpec("max_agent_turns", int, min_val=1, max_val=MAX_MONITOR_AGENT_TURNS),
         FieldSpec("max_tokens", int, min_val=1, max_val=MAX_MONITOR_TOKENS),
         FieldSpec("max_provider_errors", int, min_val=1, max_val=MAX_MONITOR_PROVIDER_ERRORS),
@@ -1407,7 +1407,7 @@ MONITOR_START_SCHEMA = ToolSchema(
         FieldSpec("message", str, required=True, max_len=8000),
         FieldSpec("interval_secs", int, min_val=15, max_val=86400),
         FieldSpec("max_cycles", int, min_val=1, max_val=1000),
-        FieldSpec("max_runtime_secs", int, min_val=1, max_val=MAX_RUNTIME_CEILING_SECS),
+        FieldSpec("max_runtime_secs", (int, float), min_val=1, max_val=MAX_RUNTIME_CEILING_SECS),
         # Opt-OUT of observation gating. Absent means gated, matching the tool's
         # default, so a caller written before this field existed keeps the
         # default behaviour rather than silently escaping it.
@@ -1532,7 +1532,7 @@ MONITOR_UPDATE_SCHEMA = ToolSchema(
         FieldSpec("message", str, max_len=8000),
         FieldSpec("interval_secs", int, min_val=15, max_val=86400),
         FieldSpec("max_cycles", int, min_val=1, max_val=1000),
-        FieldSpec("max_runtime_secs", int, min_val=1, max_val=MAX_RUNTIME_CEILING_SECS),
+        FieldSpec("max_runtime_secs", (int, float), min_val=1, max_val=MAX_RUNTIME_CEILING_SECS),
         FieldSpec("target", str, max_len=MAX_SHORT_STRING),
         FieldSpec("objective", str, allowed=publicly_armable_objectives()),
         FieldSpec("max_agent_turns", int, min_val=1, max_val=MAX_MONITOR_AGENT_TURNS),

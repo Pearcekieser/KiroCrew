@@ -745,8 +745,8 @@ async def api_monitor_update(request: web.Request) -> web.Response:
             "wake_instructions": body.get("wake_instructions", current.wake_instructions),
         }
         # Only a supplied budget is re-checked against the ceiling. The stored
-        # one is not merged in: it was accepted when written, and the load path
-        # owns a stored budget that sits outside the current policy.
+        # one is not merged in: it was accepted when written and is validated
+        # again only when it is next written.
         if "max_runtime_secs" in body:
             merged["max_runtime_secs"] = body["max_runtime_secs"]
         gitlab_hosts = await ensure_gitlab_hosts_loaded()

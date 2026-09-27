@@ -555,6 +555,27 @@ describe('SessionAutomationPopover', () => {
       .toHaveAttribute('max', '604800')
   })
 
+  it('does not stack the ceiling read failure under a rejected request', async () => {
+    ;(api.monitorForSlot as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('offline'))
+    vi.mocked(api.monitorCreate).mockRejectedValueOnce(new Error('offline'))
+    renderPopover(null)
+    expect(await screen.findByTestId('monitor-read-error')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Pull request URL' }), {
+      target: { value: 'https://github.com/acme/widgets/pull/42' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Start monitor' }))
+
+    await waitFor(() => {
+      const alerts = screen.getAllByRole('alert')
+      expect(alerts).toHaveLength(1)
+      expect(alerts[0]).toHaveTextContent('The monitor request failed. Try again.')
+    })
+    expect(screen.queryByTestId('monitor-read-error')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry loading' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Start monitor' })).toBeEnabled()
+  })
+
   it('renders one notice when the snapshot and the ceiling read fail together and retries both', async () => {
     ;(api.monitorForSlot as ReturnType<typeof vi.fn>)
       .mockRejectedValueOnce(new Error('offline'))
@@ -1279,5 +1300,23 @@ describe('SessionAutomationPopover', () => {
 
     expect(screen.getByRole('textbox', { name: 'Goal description' })).toBeInTheDocument()
     expect(screen.queryByTestId('judge-line')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the shipped ceiling when a refetch fails after a raised ceiling', async () => {
+    ;(api.monitorForSlot as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        enabled: true, monitor: null, max_runtime_ceiling_secs: 2_592_000,
+      })
+      .mockRejectedValueOnce(new Error('offline'))
+    const { client } = renderPopover(null)
+    const runtime = screen.getByRole('spinbutton', { name: 'Maximum runtime in seconds' })
+    await waitFor(() => expect(runtime).toHaveAttribute('max', '2592000'))
+
+    await act(async () => {
+      await client.refetchQueries({ queryKey: ['monitor-runtime-ceiling', 'chat-1'] })
+    })
+
+    expect(await screen.findByTestId('monitor-read-error')).toHaveAttribute('role', 'alert')
+    expect(runtime).toHaveAttribute('max', '604800')
   })
 })
