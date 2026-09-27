@@ -63,8 +63,7 @@ Ask in order:
 2. **Is it proportional?** Stay within the frozen goal and actual code shape;
    reject speculative hardening, single-caller abstractions and unnecessary redesign.
    Out of goal: rebut or defer, never edit the goal. A defect in code this PR adds or
-   changes is always in scope and gets fixed; 'out of goal' applies only to new scope — a
-   new feature, surface, or hardening this PR does not need.
+   changes is always in scope and gets fixed; only new scope is out of goal.
 3. **Did an earlier round of this PR add the mechanism?** Check
    `pr_findings.py --rounds`. Before editing, compare (a) repair it and (b) remove
    it. For each, state the effect on the goal AND the defect it was added
