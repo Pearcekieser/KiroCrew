@@ -475,6 +475,68 @@ async def test_monitor_create_omitting_the_budget_succeeds_under_a_low_ceiling(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bad_budget", [3600.5, True])
+async def test_monitor_routes_normalize_integral_float_runtime_budgets(
+    monkeypatch: pytest.MonkeyPatch, bad_budget: object
+) -> None:
+    loop = _monitor_loop()
+    _svc(monkeypatch, _FakeSvc([loop]))
+    authorize_create = AsyncMock(return_value=(_monitor_loop("new-mon"), None, 200))
+    authorize_update = AsyncMock(return_value=(loop, None, 200))
+    monkeypatch.setattr(h, "authorize_and_add_nudge", authorize_create)
+    monkeypatch.setattr(h, "authorize_and_update_monitor", authorize_update)
+
+    create = await h.api_monitor_create(
+        _mk(
+            "POST",
+            "/api/monitors",
+            body={
+                "slot_key": "chat-1-111",
+                "target": "https://github.com/acme/widgets/pull/7",
+                "max_runtime_secs": 3600.0,
+            },
+        )
+    )
+    assert create.status == 200
+    assert authorize_create.await_args.kwargs["monitor"].budgets.max_runtime_secs == 3600
+
+    update = await h.api_monitor_update(
+        _mk(
+            "PATCH",
+            "/api/monitors/mon-1",
+            match={"monitor_id": "mon-1"},
+            body={"max_runtime_secs": 3600.0},
+        )
+    )
+    assert update.status == 200
+    assert update is not None
+    assert authorize_update.await_args.kwargs["patch"] == {
+        "budget_patch": {"max_runtime_secs": 3600}
+    }
+
+    for method, path, handler, match in (
+        ("POST", "/api/monitors", h.api_monitor_create, None),
+        (
+            "PATCH",
+            "/api/monitors/mon-1",
+            h.api_monitor_update,
+            {"monitor_id": "mon-1"},
+        ),
+    ):
+        body = {"max_runtime_secs": bad_budget}
+        if method == "POST":
+            body.update(
+                {
+                    "slot_key": "chat-1-111",
+                    "target": "https://github.com/acme/widgets/pull/7",
+                }
+            )
+        response = await handler(_mk(method, path, match=match, body=body))
+        assert response.status == 400
+        assert _body(response)["code"] == "invalid_monitor"
+
+
+@pytest.mark.asyncio
 async def test_monitor_update_omitting_the_budget_leaves_a_stored_one_unjudged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -735,6 +797,52 @@ async def test_monitor_restart_is_conditional_on_the_record_it_read(
     assert authorize.await_args.kwargs["expected_existing_monitor_id"] == "mon-1"
     assert authorize.await_args.kwargs["expected_existing_config_generation"] == 7
     assert authorize.await_args.kwargs["creation_surface"] is MonitorCreationSurface.CHANNEL
+
+
+@pytest.mark.asyncio
+async def test_monitor_restart_clamps_a_stored_budget_to_the_current_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record armed under a higher ceiling restarts at the ceiling in force,
+    not with a 400 naming a number the user never typed."""
+    loop = _monitor_loop()
+    assert loop.monitor is not None
+    loop.active = False
+    loop.monitor.outcome = MonitorOutcome.USER_STOP
+    loop.monitor.budgets = dataclasses.replace(loop.monitor.budgets, max_runtime_secs=7200)
+    _svc(monkeypatch, _FakeSvc([loop]))
+    monkeypatch.setattr(h, "runtime_ceiling_secs", lambda: 3600)
+    authorize = AsyncMock(return_value=(loop, None, 200))
+    monkeypatch.setattr(h, "authorize_and_add_nudge", authorize)
+
+    response = await h.api_monitor_restart(
+        _mk("POST", "/api/monitors/mon-1/restart", match={"monitor_id": "mon-1"})
+    )
+
+    assert response.status == 200
+    assert authorize.await_args.kwargs["max_runtime_secs"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_monitor_restart_keeps_a_stored_budget_under_the_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = _monitor_loop()
+    assert loop.monitor is not None
+    loop.active = False
+    loop.monitor.outcome = MonitorOutcome.USER_STOP
+    loop.monitor.budgets = dataclasses.replace(loop.monitor.budgets, max_runtime_secs=1800)
+    _svc(monkeypatch, _FakeSvc([loop]))
+    monkeypatch.setattr(h, "runtime_ceiling_secs", lambda: 3600)
+    authorize = AsyncMock(return_value=(loop, None, 200))
+    monkeypatch.setattr(h, "authorize_and_add_nudge", authorize)
+
+    response = await h.api_monitor_restart(
+        _mk("POST", "/api/monitors/mon-1/restart", match={"monitor_id": "mon-1"})
+    )
+
+    assert response.status == 200
+    assert authorize.await_args.kwargs["max_runtime_secs"] == 1800
 
 
 @pytest.mark.asyncio

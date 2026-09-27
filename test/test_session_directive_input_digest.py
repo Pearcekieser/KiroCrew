@@ -745,6 +745,125 @@ class TestNativeSubagentCannotReachTheParentThroughASharedDigest:
         assert directive_queue.depth(effective_session_key(slot)) == 0
 
 
+def _sel_spy(monkeypatch) -> list[dict]:
+    calls: list[dict] = []
+
+    class _Spy:
+        def log_tool_invocation(self, **kw):
+            calls.append(kw)
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    monkeypatch.setattr("kiro_crew.dashboard.chat_runner.sel", lambda: _Spy())
+    return calls
+
+
+def _tool_result_outputs(state) -> list[str]:
+    return [
+        c.args[1].get("output", "")
+        for c in state.broadcast_ws.call_args_list
+        if c.args and c.args[0] == "tool_result"
+    ]
+
+
+class TestOneRefusalPerFrame:
+    """A frame the out-of-band entry has already refused is settled there: the
+    identity-gated marker path must not process the same frame a second time."""
+
+    @pytest.mark.asyncio
+    async def test_native_subagent_capped_result_is_refused_once(self, tmp_path, monkeypatch):
+        """An identified call from a native sub-agent whose result lost its
+        marker: one denied audit row and one not-applied note, not two of each."""
+        state = _stub_state(tmp_path)
+        slot = state.get_or_create_slot("native-capped")
+        slot._titled = True
+        calls = _sel_spy(monkeypatch)
+        events = [
+            AcpEvent(
+                kind=EVENT_SUBAGENT_LIST,
+                subagents=[
+                    {
+                        "sessionId": "sub-1",
+                        "role": "tester",
+                        "initialQuery": "do the work",
+                        "status": {"type": "working"},
+                    }
+                ],
+            ),
+            AcpEvent(kind=EVENT_SUBAGENT_ACTIVITY, sub_session_id="sub-1", tool_call_id="tc-nat"),
+            AcpEvent(
+                kind=EVENT_TOOL_CALL,
+                tool_call_id="tc-nat",
+                title="@kirocrew-core/monitor_start",
+                wire_title="@kirocrew-core/monitor_start",
+                tool_kind="other",
+                tool_name="monitor_start",
+                mcp_server_name=session_directive.CORE_MCP_SERVER,
+                raw_tool_params=FRAME_INPUT,
+            ),
+            AcpEvent(
+                kind=EVENT_TOOL_RESULT,
+                tool_call_id="tc-nat",
+                tool_output=_kas_capped(_tool_text()),
+                tool_final=True,
+            ),
+            AcpEvent(kind=EVENT_TEXT_CHUNK, text="ok"),
+            AcpEvent(kind=EVENT_COMPLETE),
+        ]
+        spy = await _drive(state, slot, events, monkeypatch)
+        spy.assert_not_called()
+        denied = [c for c in calls if c.get("source") == "mcp-directive"]
+        assert [c["outcome"] for c in denied] == ["denied"]
+        notes = [o for o in _tool_result_outputs(state) if "[Not applied:" in o]
+        assert len(notes) == 1, notes
+        assert notes[0].count("[Not applied:") == 1, notes[0]
+        assert directive_queue.depth(effective_session_key(slot)) == 0
+
+    @pytest.mark.asyncio
+    async def test_unclaimable_marker_on_an_identified_call_is_refused_once(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """An identified call whose marker does not decode and whose record was
+        never parked is refused by the entry branch alone; the marker path does
+        not add a second, lost-marker refusal for the same frame."""
+        state = _stub_state(tmp_path)
+        slot = state.get_or_create_slot("garbled-marker")
+        slot._titled = True
+        calls = _sel_spy(monkeypatch)
+        garbled = "Monitor loop requested.\n\n" + session_directive.SENTINEL + "{not json"
+        assert session_directive.has_marker(garbled)
+        assert session_directive.decode(garbled, "monitor_start") is None
+        events = [
+            AcpEvent(
+                kind=EVENT_TOOL_CALL,
+                tool_call_id="tc-garbled",
+                title="@kirocrew-core/monitor_start",
+                wire_title="@kirocrew-core/monitor_start",
+                tool_kind="other",
+                tool_name="monitor_start",
+                mcp_server_name=session_directive.CORE_MCP_SERVER,
+                raw_tool_params=FRAME_INPUT,
+            ),
+            AcpEvent(
+                kind=EVENT_TOOL_RESULT,
+                tool_call_id="tc-garbled",
+                tool_output=garbled,
+                tool_final=True,
+            ),
+            AcpEvent(kind=EVENT_TEXT_CHUNK, text="ok"),
+            AcpEvent(kind=EVENT_COMPLETE),
+        ]
+        with caplog.at_level("WARNING"):
+            spy = await _drive(state, slot, events, monkeypatch, park=False)
+        spy.assert_not_called()
+        denied = [c for c in calls if c.get("source") == "mcp-directive"]
+        assert [c["outcome"] for c in denied] == ["denied"]
+        assert "session-directive NOT APPLIED: marker present" in caplog.text
+        assert "session-directive decode FAILED" not in caplog.text
+        assert not any("could not be verified" in o for o in _tool_result_outputs(state))
+
+
 class TestTheDisplayTitleCannotForgeTheTool:
     """``select_tool_title`` fills the DISPLAY title from a shell call's
     model-authored ``rawInput.description``. The tool half of the digest reads

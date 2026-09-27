@@ -977,6 +977,80 @@ async def test_stale_wake_cannot_mutate_replacement_loop(tmp_path, kind):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["monitor_stop", "autonudge_stop"])
+async def test_stale_wake_stop_refusal_uses_stop_wording_and_is_surfaced(tmp_path, kind):
+    """A stop refused because the wake's loop is not this session's monitor any more
+    says so in stop terms (nothing was armed or revised here) and lands a
+    transcript row, the same way a refused arm or revision does."""
+    service = AutoNudgeService(base_dir=tmp_path)
+    loop_a = await service.add(slot_key="chat-1", message="old", idle_secs=86400)
+    await service.remove(loop_a.id)
+    loop_b = await service.add(slot_key="chat-1", message="replacement", idle_secs=86400)
+    surfaced = MagicMock()
+    slot = SimpleNamespace(key="chat-1", _app="", messages=[])
+    state = SimpleNamespace()
+    try:
+        with (
+            patch("kiro_crew.autonudge.get_instance", return_value=service),
+            patch("kiro_crew.autonudge_authz.sel", return_value=MagicMock()),
+            patch("kiro_crew.dashboard.state.append_and_surface", surfaced),
+        ):
+            result = await apply_session_directive(
+                state,
+                slot,
+                "dashboard:chat-1",
+                kind,
+                {"reason": "done"},
+                producer_is_self_wake=True,
+                producer_wake_loop_id=loop_a.id,
+            )
+        current = service.get_by_slot("chat-1")
+        assert current is not None and current.id == loop_b.id and current.active
+        assert result.startswith("Monitor NOT stopped:")
+        assert "NOT armed" not in result and "NOT changed" not in result
+        assert "new user request is required" in result
+        surfaced.assert_called_once()
+        called_state, called_slot, role, text, cls = surfaced.call_args.args
+        assert called_state is state and called_slot is slot
+        assert role == "notice" and cls == "msg msg-info"
+        assert text.startswith(sda.STOP_REFUSAL_NOTICE_PREFIX)
+        assert not text.startswith(sda.ARM_REFUSAL_NOTICE_PREFIX)
+        assert not text.startswith(sda.REVISION_REFUSAL_NOTICE_PREFIX)
+    finally:
+        service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["monitor_stop", "autonudge_stop"])
+async def test_live_wake_can_stop_its_own_paused_loop(tmp_path, kind):
+    """The stop gate is the identity check alone: a wake whose loop is still this
+    session's monitor may stop it even when a person paused that loop, which the
+    arm gate would refuse as a replacement of retained evidence."""
+    service = AutoNudgeService(base_dir=tmp_path)
+    loop = await service.add(slot_key="chat-1", message="old", idle_secs=86400)
+    await service.update(loop.id, active=False, stopped_reason="manual_pause")
+    try:
+        with (
+            patch("kiro_crew.autonudge.get_instance", return_value=service),
+            patch("kiro_crew.autonudge_authz.sel", return_value=MagicMock()),
+        ):
+            result = await apply_session_directive(
+                SimpleNamespace(),
+                SimpleNamespace(key="chat-1", _app=""),
+                "dashboard:chat-1",
+                kind,
+                {"reason": "done"},
+                producer_is_self_wake=True,
+                producer_wake_loop_id=loop.id,
+            )
+        assert service.get_by_slot("chat-1") is None
+        assert "stopped" in result
+        assert "NOT armed" not in result
+    finally:
+        service.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["monitor_update", "monitor_stop", "autonudge_stop"])
 async def test_live_wake_can_mutate_its_own_loop(tmp_path, kind):
     service = AutoNudgeService(base_dir=tmp_path)

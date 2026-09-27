@@ -490,6 +490,12 @@ def _monitor_config(
     # default is itself capped to the ceiling, so a request that omits the field
     # is accepted under any ceiling instead of failing on a number nobody sent.
     runtime_ceiling = runtime_ceiling_secs()
+    normalized_body = body
+    if "max_runtime_secs" in body:
+        normalized_body = {
+            **body,
+            "max_runtime_secs": validate_runtime_secs(body["max_runtime_secs"]),
+        }
     return MonitorState(
         kind=kind,
         target=target,
@@ -504,7 +510,7 @@ def _monitor_config(
         ),
         budgets=MonitorBudgets(
             max_runtime_secs=_bounded_int(
-                body,
+                normalized_body,
                 "max_runtime_secs",
                 min(DEFAULT_MONITOR_RUNTIME_SECS, runtime_ceiling),
                 1,
@@ -876,6 +882,10 @@ async def api_monitor_restart(request: web.Request) -> web.Response:
     if monitor.outcome is None:
         return _monitor_error("only terminal monitors can restart", "monitor_not_terminal")
     state: DashboardState = request.app["state"]
+    # The stored budget was validated against the ceiling in force when the
+    # record was armed; a lowered ceiling must not turn the restart into a
+    # refusal naming a number the user never typed.
+    restart_runtime_secs = min(monitor.budgets.max_runtime_secs, runtime_ceiling_secs())
     restarted, error, status = await authorize_and_add_nudge(
         svc=svc,
         state=state,
@@ -883,7 +893,7 @@ async def api_monitor_restart(request: web.Request) -> web.Response:
         message=monitor.wake_instructions or "structured monitor",
         idle_secs=monitor.cadence_secs,
         max_cycles=0,
-        max_runtime_secs=monitor.budgets.max_runtime_secs,
+        max_runtime_secs=restart_runtime_secs,
         source="dashboard",
         caller=request.remote or "",
         monitor=monitor,

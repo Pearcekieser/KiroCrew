@@ -85,8 +85,14 @@ _ARMING_DIRECTIVES = frozenset({"monitor_start", "monitor_watch"})
 # just running the previous text -- so the two share the mechanism and not the
 # wording.
 _REVISION_DIRECTIVES = frozenset({"monitor_update"})
+# Directives that END the loop this session already has. A stale wake may not
+# stop the loop that REPLACED the one which delivered it, so a stop is gated on
+# the wake's loop still being this session's monitor -- and on nothing else:
+# whether that loop is paused or retained is the stop applier's own business,
+# not a reason to refuse. The refusal is as unobservable as a refused arm or
+# revision (the tool has already answered over its own pipe), so it is surfaced
+# the same way, in stop wording: nothing here was armed or revised.
 _STOP_DIRECTIVES = frozenset({"monitor_stop", "autonudge_stop"})
-_WAKE_BOUND_MUTATIONS = _REVISION_DIRECTIVES | _STOP_DIRECTIVES
 
 # Transcript row prefix for a refused arm. Fixed text so the frontend and tests
 # can match on it; the authorizer's reason follows the colon.
@@ -99,6 +105,9 @@ ARM_SUCCESS_NOTICE_PREFIX = "✅ Automation loop armed: "
 REVISION_REFUSAL_NOTICE_PREFIX = (
     "⚠️ Automation loop NOT updated — it kept its previous instruction: "
 )
+# Same contract for a refused stop. Neither of the two above fits: nothing was
+# armed and nothing was revised, and the loop the refusal names is untouched.
+STOP_REFUSAL_NOTICE_PREFIX = "⚠️ Automation loop NOT stopped: "
 
 
 def _surface_arm_refusal(
@@ -314,12 +323,14 @@ async def apply_session_directive(
     try:
         if producer_is_self_wake and kind in _ARMING_DIRECTIVES:
             _refuse_stale_wake_arm(session_key, producer_wake_loop_id)
-        elif producer_is_self_wake and producer_wake_loop_id and kind in _WAKE_BOUND_MUTATIONS:
+        elif producer_is_self_wake and producer_wake_loop_id and kind in _REVISION_DIRECTIVES:
             _refuse_stale_wake_arm(
                 session_key,
                 producer_wake_loop_id,
                 require_current=True,
             )
+        elif producer_is_self_wake and producer_wake_loop_id and kind in _STOP_DIRECTIVES:
+            _refuse_stale_wake_stop(session_key, producer_wake_loop_id)
         if kind == "monitor_start":
             result = await _monitor_start(
                 state,
@@ -381,6 +392,14 @@ async def apply_session_directive(
                 kind,
                 str(exc),
                 prefix=REVISION_REFUSAL_NOTICE_PREFIX,
+            )
+        elif kind in _STOP_DIRECTIVES:
+            _surface_arm_refusal(
+                state,
+                slot,
+                kind,
+                str(exc),
+                prefix=STOP_REFUSAL_NOTICE_PREFIX,
             )
         return str(exc)
     except Exception as exc:  # never propagate into the turn loop
@@ -469,6 +488,31 @@ def _refuse_stale_wake_arm(
             "Monitor NOT armed: the loop that delivered this wake was stopped by a "
             "person and is retained, so this turn may not start a replacement. A new "
             "user request is required."
+        )
+
+
+def _refuse_stale_wake_stop(session_key: str, wake_loop_id: str) -> None:
+    """Refuse a wake-delivered stop aimed at a loop other than the wake's own.
+
+    The identity check alone: the loop bound to this session must be the one
+    that delivered this turn, or a stale wake would end a loop a person armed
+    after it. A wake's loop that is paused or retained still passes -- ending
+    it is the stop applier's decision, and the arm gate's "may not start a
+    replacement" reasoning does not describe a stop.
+    """
+    from kiro_crew.autonudge import get_instance
+
+    svc = get_instance()
+    if svc is None:
+        # The applier answers a disabled host on its own, with its own wording.
+        return
+    binding = _binding(session_key)
+    current = svc.get_by_slot(binding) if binding else None
+    if current is None or getattr(current, "id", "") != wake_loop_id:
+        raise _DirectiveDenied(
+            "Monitor NOT stopped: the loop that delivered this wake is no longer "
+            "this session's monitor, so this turn may not stop the loop that "
+            "replaced it. A new user request is required."
         )
 
 

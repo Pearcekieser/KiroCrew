@@ -429,7 +429,7 @@ def schemas() -> list[dict[str, Any]]:
                         "maximum": MAX_MONITOR_CADENCE_SECS,
                     },
                     "max_runtime_secs": {
-                        "type": "number",
+                        "type": "integer",
                         "minimum": 1,
                         "maximum": runtime_ceiling,
                     },
@@ -590,7 +590,7 @@ def schemas() -> list[dict[str, Any]]:
                         ),
                     },
                     "max_runtime_secs": {
-                        "type": "number",
+                        "type": "integer",
                         "minimum": 1,
                         "maximum": runtime_ceiling,
                         "description": (
@@ -727,7 +727,7 @@ def schemas() -> list[dict[str, Any]]:
                         ),
                     },
                     "max_runtime_secs": {
-                        "type": "number",
+                        "type": "integer",
                         "minimum": 1,
                         "maximum": runtime_ceiling,
                         "description": (

@@ -13885,6 +13885,12 @@ async def _run_chat(
                     # directive from being consumed by a child's frame.
                     _in_digest = _pending_input_digest.get(event.tool_call_id, "")
                     if event.tool_call_id in _native_tc_card:
+                        # SETTLED HERE: release the identity mapping so the
+                        # marker path below does not refuse this same frame a
+                        # second time (a second denied audit row and a doubled
+                        # not-applied note).
+                        _pending_dir_tool.pop(event.tool_call_id, None)
+                        _dir_tool = ""
                         sel().log_tool_invocation(
                             session_key=session_key,
                             source="mcp-directive",
@@ -13991,6 +13997,12 @@ async def _run_chat(
                         # meant the single most security-relevant outcome of the
                         # gate was the only one absent from the SEL trail, so an
                         # operator auditing denials saw every case but the attack.
+                        # Settled here as well: an identified call whose marker
+                        # neither decoded nor matched a parked record has been
+                        # refused once, so release the mapping the marker path
+                        # would otherwise refuse again as a lost marker.
+                        _pending_dir_tool.pop(event.tool_call_id, None)
+                        _dir_tool = ""
                         sel().log_tool_invocation(
                             session_key=session_key,
                             source="mcp-directive",

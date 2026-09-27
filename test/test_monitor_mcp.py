@@ -485,6 +485,15 @@ def test_monitor_start_descriptor_advertises_the_capped_default(monkeypatch):
     assert "(default 3600; configured max 3600)" in description
 
 
+@pytest.mark.parametrize("tool_name", ["monitor_start", "monitor_watch", "monitor_update"])
+def test_monitor_tools_publish_an_integer_runtime_budget(tool_name):
+    """The published schema says integer, like every sibling budget; a JSON
+    body's whole-number float is still normalised by the validator, pinned by
+    ``test_monitor_tools_normalize_integral_float_runtime``."""
+    schema = next(item for item in control.schemas() if item["name"] == tool_name)
+    assert schema["inputSchema"]["properties"]["max_runtime_secs"]["type"] == "integer"
+
+
 @pytest.mark.parametrize(
     ("tool_name", "args", "expected"),
     [
