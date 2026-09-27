@@ -62,7 +62,7 @@ Ask in order:
 1. **Is it legitimate?** Verify the code, reachable input, call path and consequence.
 2. **Is it proportional?** Stay within the frozen goal and actual code shape;
    reject speculative hardening, single-caller abstractions and unnecessary redesign.
-   Out of goal: rebut or defer, never edit the goal. A defect in code this PR adds or
+   Out of goal: rebut or defer. A defect in code this PR adds or
    changes is always in scope and gets fixed; 'out of goal' applies only to new scope — a
    new feature, surface, or hardening this PR does not need.
 3. **Did an earlier round of this PR add the mechanism?** Check
