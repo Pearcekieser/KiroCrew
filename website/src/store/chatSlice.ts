@@ -1,6 +1,7 @@
 import { createSlice, createAsyncThunk, createSelector, type PayloadAction } from '@reduxjs/toolkit'
 import { whenScrollQuiet } from '../lib/scrollQuiet'
 import { emitSlotRead } from '../lib/slotReadRelay'
+import { nextActiveAfterClose } from '../lib/sessionTabs'
 import { api } from '../api/client'
 import { resolveDefaultMemoryMode } from '../api/queryClient'
 import { devLog, inspectorOn } from '../dev/scrollInspector'
@@ -3706,7 +3707,20 @@ export const deleteSlot = createAsyncThunk(
     let navigation: Promise<unknown> | undefined
     if (root.chat.activeSlot === key) {
       const sameSurface = new Set(root.dashboard.slots.filter(s => slotSurfaceKey(s) === deletedSurface).map(s => s.key))
-      const prev = root.chat.slotHistory.filter(k => k !== key && sameSurface.has(k)).pop()
+      const sidebarSurface = isChatPageSurface(deletedSurface)
+        ? new Set(root.dashboard.slots.filter(s => isChatPageSurface(slotSurfaceKey(s))).map(s => s.key))
+        : sameSurface
+      // Land on the sidebar row below the closed one (above at the bottom): the
+      // tab-strip landing rule, applied to the sidebar's displayed order. The
+      // sidebar publishes ROW identities, and a remote-bound local session's is
+      // `<instance_id>:<peer_key>`, so each row maps back to its slot key first.
+      // A closed session the sidebar does not show keeps the recency pick below.
+      const keyByRow = new Map(root.dashboard.slots.map(s => [s.row_identity || s.key, s.key]))
+      const displayed = [...new Set((root.dashboard.sidebarOrder ?? []).map(row => keyByRow.get(row) ?? row))]
+        .filter(k => k === key || sidebarSurface.has(k))
+      const landing = nextActiveAfterClose(displayed, key, key)
+      const prev = (landing !== key ? landing : null)
+        || root.chat.slotHistory.filter(k => k !== key && sameSurface.has(k)).pop()
         || root.dashboard.slots.filter(s => s.key !== key && sameSurface.has(s.key)).map(s => s.key)[0]
       dispatch({ type: 'chat/setActiveSlot', payload: null })
       if (prev) {

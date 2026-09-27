@@ -81,10 +81,11 @@ interface DashboardState {
   slotFetchWriteMark: Record<string, number>
   // Slot keys in the order the session sidebar actually DISPLAYS them
   // (pinned-first + the user's sort, flat-view aware). Published by
-  // ChatSidebar; consumed by the chat-jump / chat-cycle keyboard shortcuts so
-  // Ctrl/Alt+N targets the Nth visible row rather than the Nth element of
-  // `slots` (which arrives in backend insertion order). Empty until the
-  // sidebar first renders — consumers fall back to `slots` order then.
+  // ChatSidebar; consumed by the chat-jump / chat-cycle keyboard shortcuts and
+  // by deleteSlot's close-landing pick after row identities map to slot keys.
+  // Keep the complete displayed order: truncating it to the shortcut count
+  // would break adjacent-row close landing. Empty until the sidebar first
+  // renders — consumers fall back to `slots` order then.
   sidebarOrder: string[]
   approvalMode: string
   channelTrusted: boolean
@@ -799,8 +800,9 @@ const dashboardSlice = createSlice({
       state.slotsLoaded = true
       reconcileSlots(state, new Set(action.payload.map(s => s.key)))
     },
-    // Sidebar → shortcuts order feed (see DashboardState.sidebarOrder). The
-    // dispatch site diff-guards, so every action here is a real order change.
+    // Sidebar → shortcut and close-landing order feed (see
+    // DashboardState.sidebarOrder). The dispatch site diff-guards, so every
+    // action here is a real order change.
     setSidebarOrder(state, action: PayloadAction<string[]>) { state.sidebarOrder = action.payload },
     // Live TODO-list delta. Patched into the SAME slots array that sseSlots
     // populates rather than a parallel map, so the mid-turn push and the
