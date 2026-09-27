@@ -102,6 +102,36 @@ const IDENTITY_SITES = [
     code: 'const localOwner = remoteHost\n          ? "foreign"\n          : await probeGatewayPortOwner(promptPort);',
     times: 1,
   },
+  {
+    what: "restart: the successor must be this app, not whoever took the port",
+    code: 'const owner = await probeGatewayPortOwner(expectPort);',
+    times: 1,
+  },
+  {
+    what: "restart: a kirocrew or service holder confirms the successor",
+    code: 'if (owner === "kirocrew" || owner === "service") return "confirm";',
+    times: 1,
+  },
+  {
+    what: "restart: a foreign holder fails the restart",
+    code: 'if (owner === "foreign") return "foreign";',
+    times: 1,
+  },
+  {
+    what: "restart: the ownership probe could not look",
+    code: 'if (owner === "unknown") {',
+    times: 1,
+  },
+  {
+    what: "restart: the poll acts on the successor-ownership verdict",
+    code: 'if (verdict === "foreign") {',
+    times: 1,
+  },
+  {
+    what: "boot: refuse to adopt a foreign holder when no remote crew is configured",
+    code: 'if (decision.action === "reuse" && localOwner === "foreign" && !remoteHost) {',
+    times: 1,
+  },
 ];
 
 // Sentinel literals that are not about a port at all. Listed, because the guard
