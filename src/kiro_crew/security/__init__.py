@@ -1104,6 +1104,22 @@ def _inline_interpreter_bindings(text: str) -> str:
     return _INTERP_IDENT_RE.sub(lambda m: bindings.get(m.group(0), m.group(0)), text)
 
 
+def _ssh_self_status_note(text_lower: str) -> str:
+    """Status-specific refusal note for an unsettled ssh-to-self denial, or ''.
+
+    '' means the verdict is settled and the rule's standing note (Status:
+    DENIED) applies.  The note is fixed host text: nothing from the command is
+    interpolated into a security refusal.
+    """
+    status = _submodule("argv_floor").ssh_self_unsettled_status(text_lower)
+    if status is None:
+        return ""
+    _rules = _submodule("denied_rules")
+    if status == "lookup-failed":
+        return _rules._SSH_SELF_LOOKUP_FAILED_NOTE
+    return _rules._SSH_SELF_PENDING_NOTE
+
+
 def is_denied(
     tool_name: str,
     extra_patterns: list[str] | None = None,
@@ -1416,9 +1432,12 @@ def is_denied(
             # hit routinely occurs on input that pattern cannot match and the
             # bare identifier reads as a false explanation.
             _emit_deny_event(tool_name, pattern, lower)
+            note = _rules._SELF_PROTECTION_FLOOR_NOTES.get(rule_id, "")
+            if predicate is _argv._is_ssh_to_self:
+                note = _ssh_self_status_note(lower) or note
             return _reason(
                 pattern,
-                _rules._SELF_PROTECTION_FLOOR_NOTES.get(rule_id, ""),
+                note,
                 rule=rule_id,
                 component="argv-floor",
             )
@@ -2658,6 +2677,7 @@ _EXPORTS: dict[str, str] = {
     "_ssh_family_verb": "argv_floor",
     "_static_substitution_output": "argv_floor",
     "_unmask_separators": "argv_floor",
+    "ssh_self_unsettled_status": "argv_floor",
     # denied_rules
     "BUILTIN_DENIED_RULES": "denied_rules",
     "BUILTIN_DENY_PATTERNS": "denied_rules",
@@ -2704,6 +2724,8 @@ _EXPORTS: dict[str, str] = {
     "_SELF_PROTECTION_FLOOR_PATTERNS": "denied_rules",
     "_SELF_PROTECTION_FLOOR_RULE_IDS": "denied_rules",
     "_SELF_PROTECTION_UNGATED_FLOOR_IDS": "denied_rules",
+    "_SSH_SELF_LOOKUP_FAILED_NOTE": "denied_rules",
+    "_SSH_SELF_PENDING_NOTE": "denied_rules",
     "_aws_secret_word_prefix_alternation": "denied_rules",
     "_check_env_credential_access": "denied_rules",
     "_deny_matcher": "denied_rules",
@@ -3242,6 +3264,7 @@ if TYPE_CHECKING:  # keep the names visible to type checkers and IDEs
         _ssh_family_verb,
         _static_substitution_output,
         _unmask_separators,
+        ssh_self_unsettled_status,
     )
     from kiro_crew.security.denied_rules import (  # noqa: F401
         _AWS_SECRET_VAR_NAMES,
@@ -3282,6 +3305,8 @@ if TYPE_CHECKING:  # keep the names visible to type checkers and IDEs
         _SELF_PROTECTION_FLOOR_PATTERNS,
         _SELF_PROTECTION_FLOOR_RULE_IDS,
         _SELF_PROTECTION_UNGATED_FLOOR_IDS,
+        _SSH_SELF_LOOKUP_FAILED_NOTE,
+        _SSH_SELF_PENDING_NOTE,
         BUILTIN_DENIED_RULES,
         BUILTIN_DENY_PATTERNS,
         DENY_REASON_MATCH_PREFIX,

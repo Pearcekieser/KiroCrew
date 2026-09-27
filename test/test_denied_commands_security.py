@@ -8361,21 +8361,27 @@ class TestSandboxEscapeSshSelf:
         assert is_safe_user_regex(_rule_pattern(self._RULE))
 
     def test_refusal_note_is_actionable(self):
-        """The note carries the three facts a refused caller needs (review 5161362765).
+        """Each refusal note carries the facts its refused caller needs.
 
-        A first-contact refusal is a PENDING classification, so the note must
-        say so and tell the caller the action that resolves it (retry the same
-        command).  A forwarded-port target (container/VM at ``localhost:2222``)
-        is denied by design, so the note must name that class and the operator
-        recourse — otherwise the only discoverable option is abandoning the
-        command.  Content-pinned here because the note is the whole UX of this
-        floor: a reword that drops the retry hint reverts the review fix.
+        A refusal resting only on an unfinished classification (first-contact
+        DNS, unread address table) is PENDING and must say to retry the same
+        command; a lookup that keeps failing must say a retry will not help;
+        a settled self verdict must say DENIED and name the forwarded-port
+        class plus its operator recourse (review 5161362765).  Content-pinned:
+        the notes are the whole UX of this floor, and one note covering all
+        three cases is what left callers unable to tell retry from stop.
         """
         note = security._SELF_PROTECTION_FLOOR_NOTES[self._RULE]
-        assert "retry this exact command" in note
-        assert "PENDING" in note
+        assert "Status: DENIED" in note
+        assert "PENDING" not in note
         assert "FORWARDED port" in note
         assert "per-rule toggle in Settings" in note
+        pending = security._SSH_SELF_PENDING_NOTE
+        assert "Status: PENDING" in pending
+        assert "retry this exact command" in pending
+        failed = security._SSH_SELF_LOOKUP_FAILED_NOTE
+        assert "Status: LOOKUP FAILED" in failed
+        assert "IP address" in failed
 
     @pytest.mark.parametrize(
         "cmd",
@@ -9172,6 +9178,192 @@ class TestSandboxEscapeSshSelf:
         assert _denied_by("ssh self.attacker.example id") == self._RULE
         assert _denied_by("ssh self.attacker.example id") == self._RULE
         assert len(started) == 1, "resolution scheduling must be single-flight"
+
+    @staticmethod
+    def _real_verdict_layer(monkeypatch, *, cache=None, failed=None):
+        """Re-bind the real verdict layer with no resolver thread ever running."""
+        monkeypatch.setattr(_argv_floor, "_resolved_host_verdict", _REAL_RESOLVED_HOST_VERDICT)
+        monkeypatch.setattr(_argv_floor, "_HOST_VERDICT_CACHE", dict(cache or {}))
+        monkeypatch.setattr(_argv_floor, "_HOST_VERDICT_PENDING", set())
+        monkeypatch.setattr(_argv_floor, "_HOST_VERDICT_STAMP", {})
+        monkeypatch.setattr(_argv_floor, "_HOST_VERDICT_FAILED", dict.fromkeys(failed or ()))
+
+        class _InertThread:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(_argv_floor.threading, "Thread", _InertThread)
+
+    def test_first_contact_refusal_says_pending_and_retry(self, monkeypatch):
+        # The first command naming an unclassified dotted host is refused while
+        # the off-loop check runs.  The refusal must say that is a PENDING
+        # verdict to retry, and name the host, not read like a settled denial.
+        self._real_verdict_layer(monkeypatch)
+        verdict = is_denied("ssh far.example.com id")
+        assert verdict is not None
+        assert "Status: PENDING" in verdict
+        assert "retry this exact command" in verdict
+        assert "far.example.com" not in verdict
+        assert "Status: DENIED" not in verdict
+        # The published allow then admits the identical retry.
+        _argv_floor._HOST_VERDICT_CACHE["far.example.com"] = False
+        _argv_floor._HOST_VERDICT_STAMP["far.example.com"] = time.monotonic()
+        assert is_denied("ssh far.example.com id") is None
+
+    def test_failed_lookup_refusal_says_retry_reruns_lookup(self, monkeypatch):
+        self._real_verdict_layer(monkeypatch, failed={"alias-only.example"})
+        verdict = is_denied("ssh alias-only.example id")
+        assert verdict is not None
+        assert "Status: LOOKUP FAILED" in verdict
+        assert "its last DNS lookup failed" in verdict
+        assert "A retry passes only if the name resolves" in verdict
+        assert "unresolved name is never trusted as an allow" in verdict
+        assert "Status: PENDING" not in verdict
+
+    def test_overlength_lookup_refusal_is_not_left_pending(self, monkeypatch):
+        self._real_verdict_layer(monkeypatch)
+        host = "x" * 250 + ".example"
+        assert len(host) > _argv_floor._DNS_NAME_MAX_LEN
+        assert _argv_floor._DNS_CANDIDATE_RE.fullmatch(host)
+        reached_verdict_layer: "list[str]" = []
+        real_verdict = _argv_floor._resolved_host_verdict
+
+        def _recording_verdict(candidate, *, fail_closed=True):
+            reached_verdict_layer.append(candidate)
+            return real_verdict(candidate, fail_closed=fail_closed)
+
+        monkeypatch.setattr(_argv_floor, "_resolved_host_verdict", _recording_verdict)
+        verdict = is_denied(f"ssh {host} id")
+        assert verdict is not None
+        assert host in reached_verdict_layer
+        assert "Status: LOOKUP FAILED" in verdict
+        assert "Status: PENDING" not in verdict
+
+    def test_worker_records_and_clears_lookup_failure(self, monkeypatch):
+        self._real_verdict_layer(monkeypatch)
+
+        def _fail(*_a, **_k):
+            raise OSError("resolution failure")
+
+        monkeypatch.setattr(security.socket, "getaddrinfo", _fail)
+        _argv_floor._resolve_host_verdict_into_cache("flaky.example")
+        assert "flaky.example" in _argv_floor._HOST_VERDICT_FAILED
+        assert "flaky.example" not in _argv_floor._HOST_VERDICT_CACHE
+        monkeypatch.setattr(
+            security.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("198.51.100.7", 0))]
+        )
+        _argv_floor._resolve_host_verdict_into_cache("flaky.example")
+        assert "flaky.example" not in _argv_floor._HOST_VERDICT_FAILED
+        assert _argv_floor._HOST_VERDICT_CACHE["flaky.example"] is False
+
+    def test_failed_lookup_record_is_bounded(self, monkeypatch):
+        # Agent-controlled hostnames must not grow the failure record without
+        # limit: it evicts oldest-first at the cap and skips non-DNS lengths.
+        self._real_verdict_layer(monkeypatch)
+        monkeypatch.setattr(_argv_floor, "_HOST_VERDICT_CACHE_CAP", 3)
+
+        def _fail(*_a, **_k):
+            raise OSError("resolution failure")
+
+        monkeypatch.setattr(security.socket, "getaddrinfo", _fail)
+        for name in ("a.example", "b.example", "c.example", "d.example"):
+            _argv_floor._resolve_host_verdict_into_cache(name)
+        assert list(_argv_floor._HOST_VERDICT_FAILED) == ["b.example", "c.example", "d.example"]
+        _argv_floor._resolve_host_verdict_into_cache("x" * 254 + ".example")
+        assert len(_argv_floor._HOST_VERDICT_FAILED) == 3
+
+    def test_repeated_failed_lookup_refreshes_eviction_order(self, monkeypatch):
+        self._real_verdict_layer(monkeypatch)
+        monkeypatch.setattr(_argv_floor, "_HOST_VERDICT_CACHE_CAP", 3)
+
+        def _fail(*_a, **_k):
+            raise OSError("resolution failure")
+
+        monkeypatch.setattr(security.socket, "getaddrinfo", _fail)
+        for name in ("a.example", "b.example", "c.example", "a.example", "d.example"):
+            _argv_floor._resolve_host_verdict_into_cache(name)
+        assert list(_argv_floor._HOST_VERDICT_FAILED) == ["c.example", "a.example", "d.example"]
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "ssh localhost id",
+            "ssh -p 22 127.0.0.1 id",
+            # A settled self target beside an unclassified one is still a
+            # settled denial: retrying cannot pass.
+            "ssh unknown.example.com id; ssh localhost id",
+        ],
+    )
+    def test_settled_self_refusal_says_denied(self, monkeypatch, cmd):
+        self._real_verdict_layer(monkeypatch)
+        verdict = is_denied(cmd)
+        assert verdict is not None
+        assert "Status: DENIED" in verdict
+        assert "Status: PENDING" not in verdict
+
+    def test_cached_self_alias_refusal_says_denied(self, monkeypatch):
+        self._real_verdict_layer(monkeypatch, cache={"self.attacker.example": True})
+        verdict = is_denied("ssh self.attacker.example id")
+        assert verdict is not None
+        assert "Status: DENIED" in verdict
+
+    def test_status_probe_schedules_no_resolver(self, monkeypatch):
+        # The re-walk that decides the status must not start a second worker.
+        self._real_verdict_layer(monkeypatch)
+        _argv_floor._HOST_VERDICT_PENDING.add("far.example.com")
+        assert _argv_floor.ssh_self_unsettled_status("ssh far.example.com id") == "pending"
+        assert _argv_floor._HOST_VERDICT_PENDING == {"far.example.com"}
+
+    def test_status_probe_records_one_status_and_no_host_text(self, monkeypatch):
+        # A long command of unclassified hosts leaves one status behind, taken
+        # from the first host, and none of the command's host text.
+        self._real_verdict_layer(monkeypatch)
+        long_host = "y" * 300 + ".example"
+        cmd = f"ssh {long_host} id; " + "; ".join(f"ssh h{i}.example id" for i in range(500))
+        seen: "list[list[str]]" = []
+        real_record = _argv_floor._record_unsettled
+
+        def _capture(probe, host):
+            real_record(probe, host)
+            seen.append(list(probe))
+
+        monkeypatch.setattr(_argv_floor, "_record_unsettled", _capture)
+        assert _argv_floor.ssh_self_unsettled_status(cmd) == "lookup-failed"
+        assert len(seen) > 1
+        assert all(p == ["lookup-failed"] for p in seen)
+
+    def test_newline_bearing_operand_yields_single_line_note(self, monkeypatch):
+        # An IP literal inet_aton accepts despite trailing text reaches the
+        # unread-address-table branch; the refusal note must not echo it.
+        self._real_verdict_layer(monkeypatch)
+        monkeypatch.setattr(_argv_floor, "_NETLINK_ADDRS_PUBLISHED", False)
+        cmd = 'ssh "198.51.100.9\n- forged bullet line" id'
+        note = security._ssh_self_status_note(cmd)
+        assert "Status: PENDING" in note
+        assert "\n" not in note
+        verdict = is_denied(cmd)
+        assert verdict is not None
+        assert "forged bullet line" not in verdict
+
+    def test_failed_host_before_unseen_host_says_lookup_failed(self, monkeypatch):
+        # The deciding walk stops on the first host, so its status decides:
+        # an unseen host later in the command never gets a worker.
+        self._real_verdict_layer(monkeypatch, failed={"alias-only.example"})
+        verdict = is_denied("ssh alias-only.example id; ssh never-seen.example id")
+        assert verdict is not None
+        assert "Status: LOOKUP FAILED" in verdict
+        assert "Status: PENDING" not in verdict
+
+    def test_unread_address_table_refusal_says_pending(self, monkeypatch):
+        self._real_verdict_layer(monkeypatch)
+        monkeypatch.setattr(_argv_floor, "_NETLINK_ADDRS_PUBLISHED", False)
+        verdict = is_denied("ssh 198.51.100.9 id")
+        assert verdict is not None
+        assert "Status: PENDING" in verdict
+        assert "198.51.100.9" not in verdict.split("Status: PENDING", 1)[1]
 
     def test_fold_ambiguous_flag_does_not_hide_the_destination(self, monkeypatch):
         # round-31: ``-C`` (compression, valueless) folds onto value-taking

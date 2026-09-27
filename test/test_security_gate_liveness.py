@@ -74,7 +74,13 @@ def _url_payload_command(n: int) -> str:
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 27_761
+#:
+#: The ssh-to-self refusal status accounts for 121 lines of the total: the floor
+#: tells a PENDING first-contact lookup apart from a LOOKUP FAILED host and a
+#: settled DENIED target. That needs a bounded failed-lookup record and a
+#: no-resolve re-check in ``argv_floor``, two status notes in ``denied_rules``, and
+#: the facade helper that picks between them. It is new control logic, not a copy.
+_PACKAGE_LINE_BUDGET = 27_882
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

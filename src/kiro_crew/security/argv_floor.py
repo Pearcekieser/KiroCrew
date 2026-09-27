@@ -50,6 +50,7 @@ import socket
 import sys
 import threading
 import time
+from contextvars import ContextVar
 from typing import NamedTuple
 
 # fcntl/struct drive the Linux per-interface address sweep in
@@ -1348,6 +1349,30 @@ _HOST_VERDICT_CACHE_CAP = 4096
 # is this floor's safe direction.
 _HOST_VERDICT_ALLOW_TTL = 300.0
 _HOST_VERDICT_STAMP: "dict[str, float]" = {}
+# Hosts whose most recent lookup FAILED, oldest first (a dict used as an
+# ordered set, capped at ``_HOST_VERDICT_CACHE_CAP``; names longer than a DNS
+# name can be are never recorded).  Never an allow and never a deny by
+# itself -- a failure still caches no verdict (round-25) -- it only lets the
+# refusal tell "still resolving, retry" apart from "the lookup keeps failing".
+_HOST_VERDICT_FAILED: "dict[str, None]" = {}
+_DNS_NAME_MAX_LEN = 253
+# Set only while ``ssh_self_unsettled_status`` re-walks a refused command: each
+# not-yet-classified answer is treated as NOT self and no worker is scheduled.
+# The first answer the floor would have DENIED on records its status here --
+# the status only, never the command's host text -- so the re-walk shows
+# whether the refusal rested on a pending classification alone.
+_UNSETTLED_PROBE: "ContextVar[list[str] | None]" = ContextVar(
+    "kirocrew_ssh_self_unsettled_probe", default=None
+)
+
+
+def _record_unsettled(probe: "list[str]", host: str) -> None:
+    """Record the status of the re-walk's FIRST unsettled answer; ignore later ones."""
+    if probe:
+        return
+    with _HOST_VERDICT_LOCK:
+        failed = host in _HOST_VERDICT_FAILED or len(host) > _DNS_NAME_MAX_LEN
+    probe.append("lookup-failed" if failed else "pending")
 
 
 def _resolve_host_verdict_into_cache(host: str) -> None:
@@ -1387,6 +1412,14 @@ def _resolve_host_verdict_into_cache(host: str) -> None:
                 _HOST_VERDICT_STAMP.pop(evicted, None)
             _HOST_VERDICT_CACHE[host] = verdict
             _HOST_VERDICT_STAMP[host] = time.monotonic()
+            _HOST_VERDICT_FAILED.pop(host, None)
+        elif len(host) <= _DNS_NAME_MAX_LEN:
+            # Refresh a repeated failure to the newest position so eviction
+            # remains oldest-first.
+            _HOST_VERDICT_FAILED.pop(host, None)
+            if len(_HOST_VERDICT_FAILED) >= _HOST_VERDICT_CACHE_CAP:
+                _HOST_VERDICT_FAILED.pop(next(iter(_HOST_VERDICT_FAILED)))
+            _HOST_VERDICT_FAILED[host] = None
         _HOST_VERDICT_PENDING.discard(host)
 
 
@@ -1481,6 +1514,14 @@ def _resolved_host_verdict(host: str, *, fail_closed: bool = True) -> bool:
     published verdict.  A worker that cannot start keeps this call's answer
     and clears the latch so a later call retries.
     """
+    probe = _UNSETTLED_PROBE.get()
+    if probe is not None:
+        with _HOST_VERDICT_LOCK:
+            if host in _HOST_VERDICT_CACHE:
+                return _HOST_VERDICT_CACHE[host]
+        if fail_closed:
+            _record_unsettled(probe, host)
+        return False
     with _HOST_VERDICT_LOCK:
         if host in _HOST_VERDICT_CACHE:
             verdict = _HOST_VERDICT_CACHE[host]
@@ -1941,6 +1982,39 @@ def _own_host_names() -> "frozenset[str]":
         return _OWN_HOST_NAMES_CACHE
 
 
+def _address_table_unread(host: str) -> bool:
+    """Unread-table IP literal: True (deny), or recorded and False in a re-walk."""
+    probe = _UNSETTLED_PROBE.get()
+    if probe is None:
+        return True
+    _record_unsettled(probe, host)
+    return False
+
+
+def ssh_self_unsettled_status(text_lower: str) -> "str | None":
+    """Why ``_is_ssh_to_self`` refused *text_lower*: settled, or not yet.
+
+    Re-walks the command with every not-yet-classified answer (a first-contact
+    DNS lookup, an IP literal before the address table is read) taken as NOT
+    self, scheduling nothing.  ``None`` means the refusal stands on a settled
+    self verdict, so a retry is refused again.  Otherwise the status of the
+    first unclassified target, the one the deciding walk stopped on:
+    ``"lookup-failed"`` when its last lookup failed or the name is longer than
+    DNS allows (a retry is refused the same way), else ``"pending"`` -- also
+    when the classification published between the two walks.  Presentation
+    only -- the decision is already made.
+    """
+    probe: "list[str]" = []
+    token = _UNSETTLED_PROBE.set(probe)
+    try:
+        still_self = _is_ssh_to_self(text_lower)
+    finally:
+        _UNSETTLED_PROBE.reset(token)
+    if still_self:
+        return None
+    return probe[0] if probe else "pending"
+
+
 def _host_is_self(host: str, *, dns_fallback: bool = True) -> bool:
     """True if *host* (already isolated) names this machine.
 
@@ -1987,7 +2061,7 @@ def _host_is_self(host: str, *, dns_fallback: bool = True) -> bool:
         if dns_fallback and not _NETLINK_ADDRS_PUBLISHED:
             # Same unread-table window as the ``inet_aton`` branch below --
             # this branch is the one IPv6 literals take (round-33).
-            return True
+            return _address_table_unread(host)
     except ValueError:
         pass
     try:
@@ -2001,7 +2075,7 @@ def _host_is_self(host: str, *, dns_fallback: bool = True) -> bool:
             # The kernel address table is unread; this literal could be an
             # unlisted secondary of this machine.  Deny until the worker
             # publishes (round-33) -- host position only.
-            return True
+            return _address_table_unread(host)
     except OSError:
         pass
     if host in _own_host_names():

@@ -1736,13 +1736,8 @@ _SELF_PROTECTION_FLOOR_NOTES: dict[str, str] = {
         "Matched structurally on the command's argv, not by the pattern text above: "
         "the ssh/scp/sftp/rsync target resolves to THIS machine (localhost, a loopback "
         "address, or this host's own name), which would re-enter the host outside the "
-        "agent sandbox. If this is the first command naming a DOTTED hostname in this "
-        "gateway process, this refusal means DNS classification is PENDING, not that "
-        "the host is blocked: retry this exact command — it succeeds as soon as the "
-        "off-loop check rules out a loopback alias. A hostname whose lookup keeps "
-        "FAILING stays refused on every retry (a failed lookup is never trusted as an "
-        "allow): use a name DNS can resolve, or the host's IP address, instead of an "
-        "ssh_config-only alias. The port is part of the target, so a FORWARDED port on "
+        "agent sandbox. Status: DENIED — this verdict is settled, so retrying the same "
+        "command is refused again. The port is part of the target, so a FORWARDED port on "
         "a loopback address (a container or VM behind `ssh -p 2222 localhost`) is "
         "denied like the host itself — sshd on this machine could listen on that port "
         "too, and a text check cannot tell the two apart. Operator recourse for "
@@ -1750,6 +1745,29 @@ _SELF_PROTECTION_FLOOR_NOTES: dict[str, str] = {
         "exemption ships."
     ),
 }
+
+# The sandbox-escape-ssh-self refusal when the target is not yet CLASSIFIED
+# rather than known to be this machine (``ssh_self_unsettled_status``).  The
+# floor fails closed on a first-contact dotted hostname, and on an IP literal
+# before this machine's address list is read, so the first such command is
+# routinely refused; the refusal must say whether it means "retry" or "stop".
+# Both notes are fixed text: nothing from the command is interpolated.
+_SSH_SELF_PENDING_NOTE = (
+    "Matched structurally on the command's argv, not by the pattern text above. "
+    "Status: PENDING — retry this exact command. The target is not known to be "
+    "this machine: this gateway process had not yet classified it when the "
+    "command was checked. A retry is allowed once the target is classified as "
+    "another machine, and refused again if it turns out to be this machine."
+)
+_SSH_SELF_LOOKUP_FAILED_NOTE = (
+    "Matched structurally on the command's argv, not by the pattern text above. "
+    "Status: LOOKUP FAILED — the target name cannot be resolved: its last DNS "
+    "lookup failed, or it is longer than a DNS name can be. A retry passes only "
+    "if the name resolves. An unresolved name is never trusted as an allow. Use "
+    "the host's IP address, or a name DNS can resolve, instead of an "
+    "ssh_config-only alias."
+)
+
 
 # The two INTERPRETER-payload rules.  They are ordinary regex-tier rules, but an
 # interpreter CONCATENATES adjacent string literals, so they are additionally matched
