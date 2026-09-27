@@ -994,13 +994,42 @@ def is_stop_event_row(m: dict) -> bool:
     return bool(parsed and parsed.get("kind") == "stop_event")
 
 
+#: ``meta.injectKind`` values stamped on an ``inject`` row that DISPATCHED a
+#: turn (the queue drain, the cron injectors, the synthesis kick-off, an app
+#: message's delivery). Every other inject row -- a ``/note`` breadcrumb, a
+#: Stop-hook halt card, a policy refusal notice -- is appended without one and
+#: opens nothing. Mirrors ``TURN_INJECT_KINDS`` in
+#: ``website/src/store/chatSlice.ts``, which is keyed by the ``InjectKind``
+#: type so a new kind cannot be stamped without being classified there.
+#: Wider than ``_TURN_OPENING_INJECT_KINDS`` in ``chat_handlers.py`` on
+#: purpose: that set counts turns for the session-start failure streak and
+#: walks past ``recovery`` / ``user_replay`` because they resume the SAME
+#: turn; here the question is whether a dispatch happened that got no reply,
+#: and a recovery or replay dispatch that died is exactly such a turn.
+_TURN_INJECT_KINDS: frozenset[str] = frozenset(
+    {"cron", "mcp_app", "recovery", "user_replay", "synthesis"}
+)
+
+
+def _is_turn_inject(meta: object) -> bool:
+    """Whether an ``inject`` row's meta says it dispatched a turn."""
+    return isinstance(meta, dict) and meta.get("injectKind") in _TURN_INJECT_KINDS
+
+
 def is_turn_interrupted(messages: list[dict]) -> bool:
     """True when the transcript shows a turn that ended without a reply.
 
-    Two shapes qualify: the last conversational row is the USER's (nothing came
-    back at all — a gateway restart mid-turn leaves exactly this), or it is the
+    Two shapes qualify: the last turn-opening row is the USER's, a monitor
+    loop's NUDGE, or a runner-authored INJECT's (nothing came back at all — a gateway restart
+    mid-turn leaves exactly this), or the last conversational row is the
     ASSISTANT's but an error row follows it (the turn streamed partway then died,
-    which is otherwise shape-identical to a clean completion).
+    which is otherwise shape-identical to a clean completion). An inject counts
+    as an opener only when it carries a dispatching ``meta.injectKind`` (see
+    ``_TURN_INJECT_KINDS``): a queued continuation, a recovery or a synthesis
+    turn IS a turn, and without it the scan walks past an interrupted one and
+    can reach the previous turn's Stop card, which then hides the newer
+    interruption. An untagged inject -- a ``/note`` breadcrumb, a Stop-hook halt
+    card, a refusal notice -- dispatched nothing and is looked through.
 
     Two shapes are explicitly excluded. A trailing ``stop_event``: the user
     pressing Stop is a deliberate ending, not an interruption, and stopping
@@ -1042,7 +1071,8 @@ def is_turn_interrupted(messages: list[dict]) -> bool:
         # "the gateway died before anything came back". See ``is_stop_event_row``
         # for why the discriminator has to be resolved from three carriers.
         # Only the NEWEST turn's terminator reaches here -- an older stop card
-        # is never scanned, because a later user/assistant row returns first.
+        # is never scanned, because a later user/inject/assistant row returns
+        # first.
         if is_stop_event_row(m):
             return False
         if is_system_notice(role, meta):
@@ -1061,6 +1091,12 @@ def is_turn_interrupted(messages: list[dict]) -> bool:
             ):
                 saw_compaction_result = True
             continue
+        if role == "inject" and m.get("content") and _is_turn_inject(meta):
+            return True
+        # A monitor loop's cycle row always dispatches a turn; unanswered, it
+        # is the same shape as an unanswered user row.
+        if role == "nudge" and m.get("content"):
+            return True
         if role in ("user", "assistant") and m.get("content"):
             if role != "user":
                 return saw_trailing_error
@@ -1079,7 +1115,12 @@ def is_turn_interrupted(messages: list[dict]) -> bool:
             return True
         if role == "error":
             saw_trailing_error = True
-    return False
+    # The walk ran off the start of the window without meeting a conversational
+    # row: a long turn can push its own opener and reply into the frozen prefix,
+    # leaving only tool rows here. A trailing error row is still the evidence
+    # the assistant branch above honors -- the turn ended in it and nothing
+    # newer proves completion -- so it decides the same way.
+    return saw_trailing_error
 
 
 def _mark_permission_resolved(
@@ -2651,6 +2692,8 @@ class _ChatSlot:
         "instance_id",
         "remote_slot",
         "_relay_in_flight",
+        "_turn_in_flight_generation",
+        "_turn_in_flight_prompt",
         "_active_turn_session_key",
         "_side",
         "_acp_client",
@@ -2801,6 +2844,20 @@ class _ChatSlot:
         # and rehydration appends an "interrupted" row rather than leaving the
         # transcript silently stopped. Set/cleared in ``remote_relay.relay_remote_turn``.
         self._relay_in_flight: bool = False
+        # Generation of the LOCAL turn ``chat_runner._run_chat`` durably admitted;
+        # zero when no local turn is outstanding. Persisted on the metadata line
+        # before provider dispatch and omitted after teardown, so a process that
+        # dies mid-turn leaves it on disk and every restore path converts it into
+        # the interruption row the transcript shape alone cannot prove -- partial
+        # assistant text followed by completed tool rows and no error row looks
+        # exactly like a finished answer once the process is gone.
+        self._turn_in_flight_generation: int = 0
+        # The row that opened the in-flight turn, persisted beside the
+        # generation. The row itself rides the periodic flush, so a process
+        # death inside that window loses it; the copy here lets the restore
+        # put it back before the interruption is judged. None when no turn is
+        # in flight.
+        self._turn_in_flight_prompt: dict[str, Any] | None = None
         self.created_at: str = datetime.now(timezone.utc).isoformat()
         self.messages: list[dict[str, Any]] = []
         self._buffers = SlotBufferCoordinator()

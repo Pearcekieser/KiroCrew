@@ -945,6 +945,16 @@ describe('chatSlice selectors', () => {
     expect(selectTurnInterrupted(root(store))).toBe(false)
   })
 
+  it('treats a trailing dispatching inject as a new, unanswered turn floor', () => {
+    for (const injectKind of ['cron', 'mcp_app', 'recovery', 'user_replay', 'synthesis']) {
+      const store = makeStore()
+      store.dispatch(setActiveSlot('front'))
+      store.dispatch(appendMessage({ role: 'assistant', content: 'answered' } as ChatMessage))
+      store.dispatch(appendMessage({ role: 'inject', content: 'dispatched prompt', meta: { injectKind } } as ChatMessage))
+      expect(selectTurnInterrupted(root(store)), injectKind).toBe(true)
+    }
+  })
+
   it('reads an interruption from a trailing user row or an error after the answer', () => {
     const store = makeStore()
     store.dispatch(setActiveSlot('front'))
@@ -954,6 +964,31 @@ describe('chatSlice selectors', () => {
     expect(selectTurnInterrupted(root(store))).toBe(true)
 
     store.dispatch(appendMessage({ role: 'assistant', content: 'partial' } as ChatMessage))
+    expect(selectTurnInterrupted(root(store))).toBe(false)
+    store.dispatch(appendMessage({ role: 'error', content: 'gateway died' } as ChatMessage))
+    expect(selectTurnInterrupted(root(store))).toBe(true)
+  })
+
+  it('treats a trailing nudge row as a new, unanswered turn floor', () => {
+    const store = makeStore()
+    store.dispatch(setActiveSlot('front'))
+    store.dispatch(appendMessage({ role: 'user', content: 'watch it' } as ChatMessage))
+    store.dispatch(appendMessage({ role: 'assistant', content: 'watching' } as ChatMessage))
+    store.dispatch(appendMessage({ role: 'inject', content: 'stopped', meta: { kind: 'stop_event' } } as ChatMessage))
+    expect(selectTurnInterrupted(root(store))).toBe(false)
+    store.dispatch(appendMessage({ role: 'nudge', content: '[auto-nudge cycle 2] check', meta: { nudge: { cycle: 2 } } } as ChatMessage))
+    expect(selectTurnInterrupted(root(store))).toBe(true)
+    store.dispatch(appendMessage({ role: 'assistant', content: 'checked' } as ChatMessage))
+    expect(selectTurnInterrupted(root(store))).toBe(false)
+  })
+
+  it('reads a trailing error when the loaded window holds only tool rows', () => {
+    // A long turn pushed its opener and reply past the window into the frozen
+    // prefix; only its tool rows and the restart's error row were loaded.
+    const store = makeStore()
+    store.dispatch(setActiveSlot('front'))
+    store.dispatch(appendMessage({ role: 'tool_result', content: 'read page 1' } as ChatMessage))
+    store.dispatch(appendMessage({ role: 'tool_result', content: 'read page 2' } as ChatMessage))
     expect(selectTurnInterrupted(root(store))).toBe(false)
     store.dispatch(appendMessage({ role: 'error', content: 'gateway died' } as ChatMessage))
     expect(selectTurnInterrupted(root(store))).toBe(true)
