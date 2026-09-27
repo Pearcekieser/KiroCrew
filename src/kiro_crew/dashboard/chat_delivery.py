@@ -314,6 +314,12 @@ async def steer_into_running_turn(
     client = getattr(slot, "_acp_client", None)
     if client is None or not getattr(client, "supports_steer", False):
         return STEER_UNAVAILABLE
+    if not user_origin and getattr(client, "steer_needs_loss_recovery", False) is True:
+        # codex can drop a steer it already took when a later approval in the turn
+        # is denied. That limit is accepted only for the composer, where the
+        # session's own human watches the turn and can resend; a peer's text
+        # takes the caller's queue path instead.
+        return STEER_UNAVAILABLE
 
     # Register as pending BEFORE the await: ``steer()`` suspends on
     # ``stdin.drain()``, and if the turn's finally runs during that suspension

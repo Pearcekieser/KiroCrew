@@ -913,7 +913,8 @@ class TestWriteLock:
         await rt.send_request("x/y", {})
         await rt.send_response(1, {"ok": True})
         await rt.send_error(2, -32601, "nope")
-        assert held_during_write == [True, True, True, True]
+        await rt.send_request_for_answer("_session/steering", {"sessionId": "a"})
+        assert held_during_write == [True, True, True, True, True]
         assert not lock.locked()
 
     @pytest.mark.asyncio

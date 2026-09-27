@@ -1948,3 +1948,52 @@ class TestRequeuedSteerKeepsItsDecisionReceipt:
 
         await steer_into_running_turn(state, slot, self._TEXT)
         assert "decisions_strip" not in slot._queue[0]["meta"]
+
+
+class TestPeerSteerOnCodex:
+    """codex steer is accepted only from the session's own composer.
+
+    A codex steer can be lost to a later denied approval, and only the human
+    watching the composer can notice and resend, so a peer's steer
+    (``session_send``, ``user_origin=False``) is refused before any RPC and the
+    caller falls back to its queue path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_peer_steer_into_codex_is_refused_before_the_rpc(
+        self, tmp_path, monkeypatch, _patch_sel
+    ):
+        from kiro_crew.dashboard.chat_delivery import STEER_UNAVAILABLE, steer_into_running_turn
+
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        slot = _running_slot(state)
+        client = MagicMock()
+        client.supports_steer = True
+        client.steer_needs_loss_recovery = True
+        client.steer = AsyncMock(return_value=True)
+        slot._acp_client = client
+
+        outcome = await steer_into_running_turn(state, slot, "from a peer", user_origin=False)
+        assert outcome == STEER_UNAVAILABLE
+        client.steer.assert_not_awaited()
+        assert slot._pending_steers == []
+
+    @pytest.mark.asyncio
+    async def test_the_composer_still_steers_codex(self, tmp_path, monkeypatch, _patch_sel):
+        from kiro_crew.dashboard.chat_delivery import STEER_UNAVAILABLE, steer_into_running_turn
+
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        slot = _running_slot(state)
+        client = MagicMock()
+        client.supports_steer = True
+        client.steer_needs_loss_recovery = True
+        client.steer = AsyncMock(return_value=True)
+        slot._acp_client = client
+
+        outcome = await steer_into_running_turn(state, slot, "typed here", user_origin=True)
+        assert outcome != STEER_UNAVAILABLE
+        client.steer.assert_awaited_once()

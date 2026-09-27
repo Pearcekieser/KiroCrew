@@ -1072,8 +1072,10 @@ async def _steer_policy_notice(
 
     Opt-in by positive capability, never by harness identity: a backend outside
     ``ACP_BACKENDS_STEER`` has no ``_session/steer``, reports
-    ``supports_steer`` False, and keeps the recovery-continuation behaviour
-    unchanged. ``getattr`` guards the attribute because the reject paths also run
+    ``supports_refusal_steer`` False, and keeps the recovery-continuation
+    behaviour unchanged. That includes codex, whose user steer travels on
+    ``_session/steering`` but whose approval answer discards it with the turn.
+    ``getattr`` guards the attribute because the reject paths also run
     against minimal test doubles.
 
     Appends the notice to *notices* (the turn's pending list, settled later by the
@@ -1085,7 +1087,7 @@ async def _steer_policy_notice(
     :func:`build_refusal_steer_notice`. Every deny path that reaches a model runs
     through here, so a new one states its cause rather than inheriting "policy".
     """
-    if not getattr(client, "supports_steer", False):
+    if not getattr(client, "supports_refusal_steer", False):
         return False
     notice = build_refusal_steer_notice(
         title,

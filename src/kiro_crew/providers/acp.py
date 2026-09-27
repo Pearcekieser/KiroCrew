@@ -2402,8 +2402,21 @@ class AcpProvider(LLMProvider):
 
     async def steer(self, message: str) -> bool:
         """Delegate a mid-turn steer to the inner client (kiro-cli
-        ``_session/steer``). Fire-and-forget; returns False if not steerable."""
+        ``_session/steer``). Fire-and-forget; returns False if not steerable.
+
+        Refused (False, so the caller queues) when the inner session can lose a
+        delivered steer to a later denied approval: this wrapper is what the
+        messaging channels, Side Chat and ``spawn_steer`` steer, and only the
+        dashboard composer steers such a session. See
+        :attr:`steer_needs_loss_recovery`."""
+        if self.steer_needs_loss_recovery:
+            return False
         return await self._client.steer(message)
+
+    @property
+    def steer_needs_loss_recovery(self) -> bool:
+        """True when the inner session can lose a steer it reported delivered."""
+        return self._client.steer_needs_loss_recovery is True
 
     @property
     def last_steer_monotonic(self) -> float:
@@ -2412,8 +2425,18 @@ class AcpProvider(LLMProvider):
 
     @property
     def supports_steer(self) -> bool:
-        """True when the inner client supports mid-turn steer."""
-        return bool(getattr(self._client, "supports_steer", False))
+        """True when the inner client supports mid-turn steer through this wrapper.
+
+        False for a session that can lose a delivered steer (codex): only the
+        dashboard composer, which steers the inner client directly, steers it."""
+        return bool(getattr(self._client, "supports_steer", False)) and (
+            not self.steer_needs_loss_recovery
+        )
+
+    @property
+    def supports_refusal_steer(self) -> bool:
+        """True when the inner client can steer a deny notice into a refused turn."""
+        return bool(getattr(self._client, "supports_refusal_steer", False))
 
     def _inline_turn_finished_cleanly(self) -> bool:
         """Whether the last turn reached its own end boundary uncancelled.
