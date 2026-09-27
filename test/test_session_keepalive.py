@@ -64,25 +64,33 @@ def test_wait_tool_posts_keepalive_periodically():
     """wait() should POST /api/session-keepalive at least once while sleeping."""
     import time as _time
 
+    from kiro_crew import mcp_core
     from kiro_crew.mcp_core import _call_tool
 
-    with patch("kiro_crew.mcp_core._post") as mock_post, patch.object(
-        _time, "sleep", return_value=None
-    ):
+    with patch("kiro_crew.mcp_core._post") as mock_post:
         mock_post.return_value = {}
 
-        # Fake monotonic: first three calls return t=0 so the loop fires a
+        # Fake monotonic: the first three calls return t=0 so the loop fires a
         # keepalive on the first iteration; subsequent calls jump past the
-        # deadline so the loop exits cleanly. Any extra monotonic() calls
-        # from refactors fall through to a large value, still causing a
-        # clean exit.
+        # deadline so the loop exits cleanly. The wait tool reads its clock
+        # through ``mcp_core.time``, so ONLY that attribute is replaced: patching
+        # ``time.monotonic`` itself hands these values to every other thread in
+        # the worker (the subprocess-pool reaper polls it every 0.5 s), and a
+        # consumed zero leaves the loop spinning at a frozen clock forever.
         times = iter([0.0, 0.0, 0.0])
         _final = [1000.0]
 
         def _fake_monotonic() -> float:
             return next(times, _final[0])
 
-        with patch.object(_time, "monotonic", side_effect=_fake_monotonic):
+        class _FakeTime:
+            monotonic = staticmethod(_fake_monotonic)
+            sleep = staticmethod(lambda _secs: None)
+
+            def __getattr__(self, name):
+                return getattr(_time, name)
+
+        with patch.object(mcp_core, "time", _FakeTime()):
             _call_tool("wait", {"seconds": 60, "reason": "test"})
 
         paths = [c.args[0] for c in mock_post.call_args_list]

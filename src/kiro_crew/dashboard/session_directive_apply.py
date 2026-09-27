@@ -46,7 +46,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Callable
+from typing import Any
 
 from kiro_crew.apps.builtins.auto_research.session_keys import (
     is_owned_research_slot,
@@ -85,8 +85,17 @@ _ARMING_DIRECTIVES = frozenset({"monitor_start", "monitor_watch"})
 # just running the previous text -- so the two share the mechanism and not the
 # wording.
 _REVISION_DIRECTIVES = frozenset({"monitor_update"})
+# Directives that END the loop this session already has. A wake-delivered stop
+# is gated on two checks (``_refuse_stale_wake_stop``, re-taken under the
+# service lock by ``_StaleWakeStopGuard`` for the legacy writes). Identity: the wake's
+# loop must still be this session's monitor, or a stale wake would stop the
+# loop that REPLACED the one which delivered it. Retention: a row a person
+# paused or stopped is retained evidence, and a legacy stop removes its row, so
+# a wake may not delete it; a row the SYSTEM deactivated still passes and is
+# the stop applier's business. The refusal is as unobservable as a refused arm
+# or revision (the tool has already answered over its own pipe), so it is
+# surfaced the same way, in stop wording: nothing here was armed or revised.
 _STOP_DIRECTIVES = frozenset({"monitor_stop", "autonudge_stop"})
-_WAKE_BOUND_MUTATIONS = _REVISION_DIRECTIVES | _STOP_DIRECTIVES
 
 # Transcript row prefix for a refused arm. Fixed text so the frontend and tests
 # can match on it; the authorizer's reason follows the colon.
@@ -99,6 +108,9 @@ ARM_SUCCESS_NOTICE_PREFIX = "✅ Automation loop armed: "
 REVISION_REFUSAL_NOTICE_PREFIX = (
     "⚠️ Automation loop NOT updated — it kept its previous instruction: "
 )
+# Same contract for a refused stop. Neither of the two above fits: nothing was
+# armed and nothing was revised, and the loop the refusal names is untouched.
+STOP_REFUSAL_NOTICE_PREFIX = "⚠️ Automation loop NOT stopped: "
 
 
 def _surface_arm_refusal(
@@ -121,7 +133,8 @@ def _surface_arm_refusal(
     have no transcript window; the returned string is their only surface.
 
     ``prefix`` selects the wording for the class of directive that was refused
-    (an arm by default, a revision for ``monitor_update``). Only the leading
+    (an arm by default, a revision for ``monitor_update``, a stop for
+    ``monitor_stop`` / ``autonudge_stop``). Only the leading
     text differs: the redaction, the row role and the best-effort contract are
     the same guarantees either way, which is why this is one helper.
 
@@ -314,12 +327,14 @@ async def apply_session_directive(
     try:
         if producer_is_self_wake and kind in _ARMING_DIRECTIVES:
             _refuse_stale_wake_arm(session_key, producer_wake_loop_id)
-        elif producer_is_self_wake and producer_wake_loop_id and kind in _WAKE_BOUND_MUTATIONS:
+        elif producer_is_self_wake and producer_wake_loop_id and kind in _REVISION_DIRECTIVES:
             _refuse_stale_wake_arm(
                 session_key,
                 producer_wake_loop_id,
                 require_current=True,
             )
+        elif producer_is_self_wake and producer_wake_loop_id and kind in _STOP_DIRECTIVES:
+            _refuse_stale_wake_stop(session_key, producer_wake_loop_id)
         if kind == "monitor_start":
             result = await _monitor_start(
                 state,
@@ -391,6 +406,14 @@ async def apply_session_directive(
                 kind,
                 str(exc),
                 prefix=REVISION_REFUSAL_NOTICE_PREFIX,
+            )
+        elif kind in _STOP_DIRECTIVES:
+            _surface_arm_refusal(
+                state,
+                slot,
+                kind,
+                str(exc),
+                prefix=STOP_REFUSAL_NOTICE_PREFIX,
             )
         return str(exc)
     except Exception as exc:  # never propagate into the turn loop
@@ -482,47 +505,115 @@ def _refuse_stale_wake_arm(
         )
 
 
-def _stale_wake_stop_precondition(
-    svc: Any,
-    binding: str,
-    wake_loop_id: str,
-) -> tuple[Callable[[Any], bool], dict[str, str]]:
-    """Return a guard whose binding and retention decision is taken under the write lock."""
-    from kiro_crew.autonudge import _stopped_row_is_replaceable
+def _refuse_stale_wake_stop(session_key: str, wake_loop_id: str) -> None:
+    """Refuse a wake-delivered stop that would not end the wake's own live loop.
 
-    refusal = {"kind": "current", "failed": "no"}
+    Two checks. Identity: the loop bound to this session must be the one that
+    delivered this turn, or a stale wake would end a loop a person armed after
+    it. Retention: a row a person paused or stopped while this wake was still
+    running (``"manual"``, an empty reason, anything
+    ``_stopped_row_is_replaceable`` fails closed on) is retained evidence, and a
+    legacy stop REMOVES its row, so the wake may not delete it. A row the system
+    deactivated (cycle cap, runtime budget, terminal subject) still passes;
+    ending it is the stop applier's decision.
+    """
+    from kiro_crew.autonudge import _stopped_row_is_replaceable, get_instance
 
-    def _still_stoppable(row: Any) -> bool:
-        current = svc.get_by_slot(binding)
+    svc = get_instance()
+    if svc is None:
+        # The applier answers a disabled host on its own, with its own wording.
+        return
+    binding = _binding(session_key)
+    current = svc.get_by_slot(binding) if binding else None
+    if current is None or getattr(current, "id", "") != wake_loop_id:
+        raise _DirectiveDenied(
+            "Monitor NOT stopped: the loop that delivered this wake is no longer "
+            "this session's monitor, so this turn may not stop the loop that "
+            "replaced it. A new user request is required."
+        )
+    if not getattr(current, "active", False) and not _stopped_row_is_replaceable(current):
+        raise _DirectiveDenied(
+            "Monitor NOT stopped: the loop that delivered this wake was paused or "
+            "stopped by a person and is retained, so this turn may not remove it. "
+            "A new user request is required."
+        )
+
+
+_STOP_NOT_APPLIED = (
+    "Monitor NOT stopped: the monitor service did not apply the stop (it is "
+    "paused for maintenance), so the loop may still be running. Retry the stop."
+)
+
+
+class _StaleWakeStopGuard:
+    """Re-take a stale-wake stop's identity and retention decision under the write lock.
+
+    ``_refuse_stale_wake_stop`` answers early and lock-free; this guard is the
+    authoritative re-check. The service calls it on the live row inside the same
+    ``_lock`` hold that mutates it and reads only the boolean. When the row is
+    missing, the service calls ``on_absent`` in that same hold instead, so the
+    stop can tell a row that is simply gone (its goal already holds) from one a
+    concurrent arm REPLACED (the replacement is still running). A write that
+    reached neither never took the lock, and the stop may not claim success.
+    """
+
+    def __init__(self, svc: Any, binding: str, wake_loop_id: str) -> None:
+        self._svc = svc
+        self._binding = binding
+        self._wake_loop_id = wake_loop_id
+        #: ``""`` until a check fails; then ``"current"`` or ``"person"``.
+        self.refusal = ""
+        #: Set when the service found no row under the lock and nothing replaced it.
+        self.gone = False
+
+    def on_absent(self) -> None:
+        """Called by the service under ``_lock`` when the wake's row is missing."""
+        current = self._svc.get_by_slot(self._binding)
+        if current is not None and getattr(current, "id", "") != self._wake_loop_id:
+            self.refusal = "current"
+            return
+        self.gone = True
+
+    def raise_unless_stopped(self, applied: bool) -> None:
+        """Raise unless the write applied or the row was confirmed gone under the lock."""
+        if applied:
+            return
+        if self.refusal:
+            self.raise_refusal()
+        if self.gone:
+            return
+        raise _DirectiveDenied(_STOP_NOT_APPLIED)
+
+    def __call__(self, row: Any) -> bool:
+        from kiro_crew.autonudge import _stopped_row_is_replaceable
+
+        current = self._svc.get_by_slot(self._binding)
         if (
-            getattr(row, "id", "") != wake_loop_id
-            or getattr(row, "slot_key", "") != binding
+            getattr(row, "id", "") != self._wake_loop_id
+            or getattr(row, "slot_key", "") != self._binding
             or current is None
-            or getattr(current, "id", "") != wake_loop_id
+            or getattr(current, "id", "") != self._wake_loop_id
         ):
-            refusal["kind"] = "current"
-            refusal["failed"] = "yes"
+            self.refusal = "current"
             return False
         if not getattr(row, "active", False) and not _stopped_row_is_replaceable(row):
-            refusal["kind"] = "person"
-            refusal["failed"] = "yes"
+            self.refusal = "person"
             return False
         return True
 
-    return _still_stoppable, refusal
-
-
-def _raise_stale_wake_stop_refusal(refusal: dict[str, str]) -> None:
-    if refusal["kind"] == "person":
+    def raise_refusal(self) -> None:
+        """Refuse the stop for the check that failed. Callers raise only when one did."""
+        if self.refusal == "person":
+            raise _DirectiveDenied(
+                "Monitor NOT stopped: the loop that delivered this wake was paused or "
+                "stopped by a person and is retained, so this turn may not remove it. "
+                "A new user request is required."
+            )
         raise _DirectiveDenied(
-            "Monitor NOT armed: the loop that delivered this wake was stopped by a "
-            "person and is retained, so this turn may not start a replacement. A new "
-            "user request is required."
+            "Monitor NOT stopped: the loop that delivered this wake is no longer "
+            "this session's monitor, so this turn may not stop the loop that "
+            "replaced it. A new user request is required."
         )
-    raise _DirectiveDenied(
-        "Monitor NOT changed: the loop that delivered this wake is no longer "
-        "this session's monitor; a new user request is required."
-    )
 
 
 async def _monitor_start(
@@ -1135,10 +1226,6 @@ async def _stop_resolved_loop(
 
     loop_id = loop.id
     reason = _structured_stop_reason(args)
-    precondition = None
-    refusal: dict[str, str] | None = None
-    if wake_loop_id:
-        precondition, refusal = _stale_wake_stop_precondition(svc, binding, wake_loop_id)
     structured = is_structured_monitor_loop(loop)
     if structured:
         from kiro_crew.autonudge_authz import authorize_and_stop_monitor
@@ -1150,10 +1237,7 @@ async def _stop_resolved_loop(
             source="mcp-directive",
             caller="session-directive",
             user_reason=reason,
-            precondition=precondition,
         )
-        if refusal is not None and refusal["failed"] == "yes":
-            _raise_stale_wake_stop_refusal(refusal)
         if error is not None:
             raise _DirectiveDenied(f"Failed to stop structured monitor: {error}")
         return (
@@ -1170,20 +1254,56 @@ async def _stop_resolved_loop(
     # SESSION'S binding names the slot, not the loop's own slot_key: they are the
     # same for a bound loop, and the binding is the identity the ownership check
     # reads.
+    # Both legacy writes take the guard: the tombstone is read by Research Lab
+    # as a deliberate finish, so stamping it over a person's pause would settle
+    # the campaign exactly as deleting the row would lose it.
+    # Only a RECORDED outcome decides. A refusal refuses. A row the service found
+    # missing under the lock is success only if nothing replaced it (the guard's
+    # ``on_absent`` checks the slot in that same hold); a replacement refuses,
+    # because it is still running. A write that reached neither never took the
+    # lock (maintenance quiesce) and may not be reported as a stop.
+    guard = _StaleWakeStopGuard(svc, binding, wake_loop_id) if wake_loop_id else None
+    # A guard-less stop (a person's own request) has no identity to re-check, but
+    # it still may not report a write that never happened, nor a stop of a loop
+    # a concurrent arm replaced: it too learns under the lock what the slot holds.
+    absent_outcome: list[str] = []
+
+    def _mark_absent() -> None:
+        current = svc.get_by_slot(binding)
+        replaced = current is not None and getattr(current, "id", "") != loop_id
+        absent_outcome.append("replaced" if replaced else "gone")
+
+    on_absent = guard.on_absent if guard is not None else _mark_absent
     if is_owned_research_slot(binding, str(getattr(slot, "_app", "") or "")):
-        await svc.update(loop_id, active=False, stopped_reason=AUTONUDGE_STOP_REASON)
+        update_kwargs: dict[str, Any] = {
+            "active": False,
+            "stopped_reason": AUTONUDGE_STOP_REASON,
+            "on_absent": on_absent,
+        }
+        if guard is not None:
+            update_kwargs["precondition"] = guard
+        applied = await svc.update(loop_id, **update_kwargs) is not None
     else:
         # The removal leaves no row, so the agent's own reason travels in the WARNING
         # stop line instead (autonudge_stop_log); without it a self-stop is "removed".
         remove_kwargs: dict[str, Any] = {
             "stop_reason": AUTONUDGE_STOP_REASON,
             "stop_detail": reason,
+            "on_absent": on_absent,
         }
-        if precondition is not None:
-            remove_kwargs["precondition"] = precondition
-        removed = await svc.remove(loop_id, **remove_kwargs)
-        if refusal is not None and (refusal["failed"] == "yes" or not removed):
-            _raise_stale_wake_stop_refusal(refusal)
+        if guard is not None:
+            remove_kwargs["precondition"] = guard
+        applied = bool(await svc.remove(loop_id, **remove_kwargs))
+    if guard is not None:
+        guard.raise_unless_stopped(applied)
+    elif not applied and absent_outcome != ["gone"]:
+        if absent_outcome == ["replaced"]:
+            raise _DirectiveDenied(
+                "Monitor NOT stopped: this session's monitor was replaced by a new "
+                "loop while the stop was waiting, and the new loop is still running. "
+                "Stop it again to end the new loop."
+            )
+        raise _DirectiveDenied(_STOP_NOT_APPLIED)
     return (
         f"Auto-nudge loop {loop_id} stopped on this session"
         + (f" (reason: {reason})" if reason else "")

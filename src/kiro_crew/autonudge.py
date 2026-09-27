@@ -3203,7 +3203,16 @@ class AutoNudgeService:
         judge: dict | None = None,
         expected_generation: int | None = None,
         expect_fingerprint: str | None = None,
+        precondition: Callable[[NudgeLoop], bool] | None = None,
+        on_absent: Callable[[], None] | None = None,
     ) -> NudgeLoop | None:
+        """Patch a loop. ``precondition`` is re-taken on the live row under the lock.
+
+        A refused precondition changes nothing and returns ``None``, the same
+        "not applied" answer as a missing row; only the stale-wake stop passes one.
+        ``on_absent`` is called inside the same hold when the row is missing, so
+        that caller can tell a deleted row from a replaced one.
+        """
         # CANCELLATION SAFETY: same contract as add(). The mutate+persist runs
         # as a SHIELDED, supervised task so a caller cancelled mid-write cannot
         # release ``_lock`` while the executor write is still in flight — which
@@ -3222,6 +3231,8 @@ class AutoNudgeService:
                 judge=judge,
                 expected_generation=expected_generation,
                 expect_fingerprint=expect_fingerprint,
+                precondition=precondition,
+                on_absent=on_absent,
             )
         )
         self._inflight_adds.add(inner)
@@ -3310,6 +3321,8 @@ class AutoNudgeService:
         judge: dict | None = None,
         expected_generation: int | None = None,
         expect_fingerprint: str | None = None,
+        precondition: Callable[[NudgeLoop], bool] | None = None,
+        on_absent: Callable[[], None] | None = None,
     ) -> NudgeLoop | None:
         lock = await self._acquire_mutation_lock(loop_id)
         if lock is None:
@@ -3327,6 +3340,8 @@ class AutoNudgeService:
                 judge=judge,
                 expected_generation=expected_generation,
                 expect_fingerprint=expect_fingerprint,
+                precondition=precondition,
+                on_absent=on_absent,
             )
         finally:
             _release_mutation_lock(lock)
@@ -3345,12 +3360,23 @@ class AutoNudgeService:
         judge: dict | None = None,
         expected_generation: int | None = None,
         expect_fingerprint: str | None = None,
+        precondition: Callable[[NudgeLoop], bool] | None = None,
+        on_absent: Callable[[], None] | None = None,
     ) -> NudgeLoop | None:
         if max_runtime_secs is not None:
             validate_runtime_secs(max_runtime_secs, allow_unbounded=True)
         async with self._lock:
             loop = self._loops.get(loop_id)
             if not loop:
+                # Inside the hold, so the caller can inspect the slot before any
+                # concurrent arm or delete can change it.
+                if on_absent is not None:
+                    on_absent()
+                return None
+            # Same contract as ``_remove_unserialized``: the caller's decision is
+            # re-taken on the live row inside the ``_lock`` hold that mutates it,
+            # so a pause that landed while this call waited cannot be overwritten.
+            if precondition is not None and not precondition(loop):
                 return None
             # ATOMIC generation fence (inside _lock, before any mutation): a
             # caller applying a structural-terminal stop passes the generation it
@@ -3836,6 +3862,7 @@ class AutoNudgeService:
         loop_id: str,
         *,
         precondition: Callable[[NudgeLoop], bool] | None = None,
+        on_absent: Callable[[], None] | None = None,
         stop_reason: str = "",
         stop_detail: str = "",
     ) -> bool:
@@ -3847,6 +3874,7 @@ class AutoNudgeService:
             return await self._remove_unserialized(
                 loop_id,
                 precondition=precondition,
+                on_absent=on_absent,
                 stop_reason=stop_reason,
                 stop_detail=stop_detail,
                 mutation_lock=lock,
@@ -3916,6 +3944,7 @@ class AutoNudgeService:
         loop_id: str,
         *,
         precondition: Callable[[NudgeLoop], bool] | None = None,
+        on_absent: Callable[[], None] | None = None,
         stop_reason: str = "",
         stop_detail: str = "",
         mutation_lock: asyncio.Lock | None = None,
@@ -3929,7 +3958,8 @@ class AutoNudgeService:
         ``precondition`` is evaluated on the LIVE row inside the same ``_lock``
         hold that removes it, so a caller whose decision was taken before an
         await can re-take it atomically here instead of racing whatever landed
-        in between. A refused precondition changes nothing.
+        in between. A refused precondition changes nothing. ``on_absent`` is
+        called inside the same hold when the row is missing.
         """
         if mutation_lock is None:
             raise RuntimeError("mutation lock must be held by the caller")
@@ -3939,10 +3969,16 @@ class AutoNudgeService:
         async with self._lock:
             existed = loop_id in self._loops
             if not existed and loop_id not in self._pending_removals:
+                if on_absent is not None:
+                    on_absent()
                 return False
             current = self._loops.get(loop_id)
             if precondition is not None:
-                if current is None or not precondition(current):
+                if current is None:
+                    if on_absent is not None:
+                        on_absent()
+                    return False
+                if not precondition(current):
                     return False
             restore_provider_credentials = False
             if existed:
@@ -4596,18 +4632,13 @@ class AutoNudgeService:
         *,
         now: float | None = None,
         user_reason: str = "",
-        precondition: Callable[[NudgeLoop | None], bool] | None = None,
     ) -> NudgeLoop | None:
-        """Retain a structured user-stop outcome when the live row still qualifies."""
+        """Retain a structured record with a durable user-stop outcome."""
         stopped_at = time.time() if now is None else now
         async with self._lock:
             loop = self._loops.get(monitor_id)
             state = loop.monitor if loop is not None else None
             if loop is None or state is None:
-                if precondition is not None:
-                    precondition(loop)
-                return None
-            if precondition is not None and not precondition(loop):
                 return None
             if state.outcome is not None:
                 return loop
