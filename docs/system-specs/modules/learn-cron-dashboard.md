@@ -3387,7 +3387,11 @@ refused arm means no loop exists, while a refused revision leaves the loop in pl
 and waking on its OLD instruction, so the arm wording would report the wrong state.
 Without it the paused-loop denial reached only the gateway journal and the agent
 kept the tool's neutral "update requested" ack, reporting a revision that never
-landed (issue #12311).
+landed (issue #12311). A refused wake-delivered `monitor_stop` / `autonudge_stop`
+(the wake's loop is no longer this session's monitor, or the row was paused or
+stopped by a person and is retained) uses the same helper with a third prefix
+(`⚠️ Automation loop NOT stopped: <reason>`): nothing was armed and nothing was
+revised, and the loop the refusal names is untouched.
 `BUSY` persists a short retry for the existing claim without probing or entering
 the model, and the retry checks the runtime budget again before dispatch so an
 expired claim cannot start another turn; `DISPATCHED` persists a bounded

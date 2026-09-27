@@ -1022,13 +1022,52 @@ async def test_stale_wake_stop_refusal_uses_stop_wording_and_is_surfaced(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["monitor_stop", "autonudge_stop"])
-async def test_live_wake_can_stop_its_own_paused_loop(tmp_path, kind):
-    """The stop gate is the identity check alone: a wake whose loop is still this
-    session's monitor may stop it even when a person paused that loop, which the
-    arm gate would refuse as a replacement of retained evidence."""
+@pytest.mark.parametrize("stopped_reason", ["manual", ""])
+async def test_stale_wake_cannot_remove_person_paused_loop(tmp_path, kind, stopped_reason):
+    """A person pauses the loop while its delivered wake is still running; the
+    wake's stop passes the identity check but must not delete the retained row.
+    The row survives untouched and the refusal is surfaced in stop wording."""
     service = AutoNudgeService(base_dir=tmp_path)
     loop = await service.add(slot_key="chat-1", message="old", idle_secs=86400)
-    await service.update(loop.id, active=False, stopped_reason="manual_pause")
+    await service.update(loop.id, active=False, stopped_reason=stopped_reason)
+    paused_reason = service.get_by_id(loop.id).stopped_reason
+    assert paused_reason in ("manual", "")
+    surfaced = MagicMock()
+    slot = SimpleNamespace(key="chat-1", _app="", messages=[])
+    try:
+        with (
+            patch("kiro_crew.autonudge.get_instance", return_value=service),
+            patch("kiro_crew.autonudge_authz.sel", return_value=MagicMock()),
+            patch("kiro_crew.dashboard.state.append_and_surface", surfaced),
+        ):
+            result = await apply_session_directive(
+                SimpleNamespace(),
+                slot,
+                "dashboard:chat-1",
+                kind,
+                {"reason": "done"},
+                producer_is_self_wake=True,
+                producer_wake_loop_id=loop.id,
+            )
+        current = service.get_by_slot("chat-1")
+        assert current is not None and current.id == loop.id
+        assert current.active is False and current.stopped_reason == paused_reason
+        assert current.message == "old"
+        assert result.startswith("Monitor NOT stopped:")
+        assert "new user request is required" in result
+        surfaced.assert_called_once()
+        text = surfaced.call_args.args[3]
+        assert text.startswith(sda.STOP_REFUSAL_NOTICE_PREFIX)
+    finally:
+        service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["monitor_stop", "autonudge_stop"])
+async def test_live_wake_can_stop_its_own_active_loop(tmp_path, kind):
+    """A wake whose loop is still this session's ACTIVE monitor may stop it."""
+    service = AutoNudgeService(base_dir=tmp_path)
+    loop = await service.add(slot_key="chat-1", message="old", idle_secs=86400)
     try:
         with (
             patch("kiro_crew.autonudge.get_instance", return_value=service),
@@ -1045,7 +1084,35 @@ async def test_live_wake_can_stop_its_own_paused_loop(tmp_path, kind):
             )
         assert service.get_by_slot("chat-1") is None
         assert "stopped" in result
-        assert "NOT armed" not in result
+        assert "NOT stopped" not in result
+    finally:
+        service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["monitor_stop", "autonudge_stop"])
+async def test_live_wake_can_stop_its_own_system_deactivated_loop(tmp_path, kind):
+    """A row the system deactivated (cycle cap) is not retained evidence, so the
+    wake's stop still goes through, as the arm gate would admit a re-arm."""
+    service = AutoNudgeService(base_dir=tmp_path)
+    loop = await service.add(slot_key="chat-1", message="old", idle_secs=86400)
+    await service.update(loop.id, active=False, stopped_reason="cycle_cap")
+    try:
+        with (
+            patch("kiro_crew.autonudge.get_instance", return_value=service),
+            patch("kiro_crew.autonudge_authz.sel", return_value=MagicMock()),
+        ):
+            result = await apply_session_directive(
+                SimpleNamespace(),
+                SimpleNamespace(key="chat-1", _app=""),
+                "dashboard:chat-1",
+                kind,
+                {"reason": "done"},
+                producer_is_self_wake=True,
+                producer_wake_loop_id=loop.id,
+            )
+        assert service.get_by_slot("chat-1") is None
+        assert "stopped" in result and "NOT stopped" not in result
     finally:
         service.stop()
 

@@ -13885,6 +13885,12 @@ async def _run_chat(
                     # directive from being consumed by a child's frame.
                     _in_digest = _pending_input_digest.get(event.tool_call_id, "")
                     if event.tool_call_id in _native_tc_card:
+                        # The identity gate files an identified call under
+                        # _pending_dir_tool, not _seen_tool_identity, so the
+                        # directive name for the audit row is _dir_tool.
+                        _denied_tool = (
+                            _dir_tool or _seen_tool_identity.get(event.tool_call_id, ("", ""))[1]
+                        )
                         # SETTLED HERE: release the identity mapping so the
                         # marker path below does not refuse this same frame a
                         # second time (a second denied audit row and a doubled
@@ -13894,7 +13900,7 @@ async def _run_chat(
                         sel().log_tool_invocation(
                             session_key=session_key,
                             source="mcp-directive",
-                            tool_name=_seen_tool_identity.get(event.tool_call_id, ("", ""))[1],
+                            tool_name=_denied_tool,
                             outcome="denied",
                         )
                         _out = _redact_tool_field(
@@ -13997,12 +14003,11 @@ async def _run_chat(
                         # meant the single most security-relevant outcome of the
                         # gate was the only one absent from the SEL trail, so an
                         # operator auditing denials saw every case but the attack.
-                        # Settled here as well: an identified call whose marker
-                        # neither decoded nor matched a parked record has been
-                        # refused once, so release the mapping the marker path
-                        # would otherwise refuse again as a lost marker.
-                        _pending_dir_tool.pop(event.tool_call_id, None)
-                        _dir_tool = ""
+                        # The identity mapping is deliberately LEFT in place: for
+                        # an identified call whose marker did not decode, the
+                        # marker path below owns the lost-marker notice and the
+                        # sentinel strip, and it writes no audit row of its own,
+                        # so this is the frame's only denied event either way.
                         sel().log_tool_invocation(
                             session_key=session_key,
                             source="mcp-directive",

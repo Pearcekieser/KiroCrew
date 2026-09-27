@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -536,6 +537,32 @@ async def test_monitor_routes_normalize_integral_float_runtime_budgets(
         assert _body(response)["code"] == "invalid_monitor"
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["cadence_secs", "max_agent_turns", "max_tokens", "max_provider_errors", "max_runtime_secs"],
+)
+def test_monitor_config_accepts_a_whole_number_float_on_every_bounded_field(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """A JSON body may spell an integer as ``60.0``; every bounded field takes
+    it as the integer, and refuses a fractional float and a bool alike."""
+    monkeypatch.setattr(h, "runtime_ceiling_secs", lambda: 3600)
+    monkeypatch.setattr("kiro_crew.monitoring.limits.runtime_ceiling_secs", lambda: 3600)
+    base = {"slot_key": "chat-1-111", "target": "https://github.com/acme/widgets/pull/7"}
+    good = {"cadence_secs": 60.0, "max_agent_turns": 3.0, "max_tokens": 5000.0}
+    good.update({"max_provider_errors": 4.0, "max_runtime_secs": 1800.0})
+
+    monitor = h._monitor_config({**base, field: good[field]}, gitlab_hosts=frozenset())
+    got = getattr(monitor.budgets, field, None)
+    if field == "cadence_secs":
+        got = monitor.cadence_secs
+    assert got == int(good[field]) and type(got) is int
+
+    for bad in (good[field] + 0.5, True):
+        with pytest.raises(ValueError, match=f"{field} must be an integer between"):
+            h._monitor_config({**base, field: bad}, gitlab_hosts=frozenset())
+
+
 @pytest.mark.asyncio
 async def test_monitor_update_omitting_the_budget_leaves_a_stored_one_unjudged(
     monkeypatch: pytest.MonkeyPatch,
@@ -843,6 +870,91 @@ async def test_monitor_restart_keeps_a_stored_budget_under_the_ceiling(
 
     assert response.status == 200
     assert authorize.await_args.kwargs["max_runtime_secs"] == 1800
+
+
+@pytest.mark.asyncio
+async def test_monitor_restart_clamped_budget_reaches_the_store(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Driven through the REAL authorizer and service: the store re-validates
+    the monitor's own ``budgets.max_runtime_secs`` on add, so the clamp has to
+    land on the record it forwards, not only on the legacy argument. With a
+    stored 7200 and a 3600 ceiling the restart succeeds and the new row holds
+    3600."""
+    monkeypatch.setattr("kiro_crew.monitoring.limits.runtime_ceiling_secs", lambda: 604800)
+    service = AutoNudgeService(base_dir=tmp_path)
+    try:
+        loop = await service.add_monitor(
+            slot_key="chat-1-111",
+            kind="github_pull_request",
+            target="https://github.com/acme/widgets/pull/7",
+            objective="review_ready",
+            cadence_secs=300,
+            budgets=dataclasses.replace(
+                MonitorState(
+                    kind="github_pull_request",
+                    target="https://github.com/acme/widgets/pull/7",
+                    objective="review_ready",
+                    created_ts=1.0,
+                ).budgets,
+                max_runtime_secs=7200,
+            ),
+            wake_instructions="check it",
+        )
+        assert loop.monitor is not None
+        loop.active = False
+        loop.monitor.outcome = MonitorOutcome.USER_STOP
+        monkeypatch.setattr("kiro_crew.monitoring.limits.runtime_ceiling_secs", lambda: 3600)
+        monkeypatch.setattr(h, "runtime_ceiling_secs", lambda: 3600)
+        monkeypatch.setattr(h, "_autonudge_get", lambda: service)
+        monkeypatch.setattr("kiro_crew.autonudge_authz.sel", lambda: MagicMock())
+        state = MagicMock()
+        state.owner_id = ""
+        state._slots = {
+            "chat-1-111": SimpleNamespace(
+                workspace="default", is_closing=False, mode="", memory_mode="persistent"
+            )
+        }
+
+        response = await h.api_monitor_restart(
+            _mk(
+                "POST",
+                f"/api/monitors/{loop.id}/restart",
+                match={"monitor_id": loop.id},
+                state=state,
+            )
+        )
+
+        assert response.status == 200, _body(response)
+        restarted = service.get_by_slot("chat-1-111")
+        assert restarted is not None and restarted.active and restarted.id != loop.id
+        assert restarted.monitor is not None
+        assert restarted.monitor.budgets.max_runtime_secs == 3600
+    finally:
+        service.stop()
+
+
+@pytest.mark.asyncio
+async def test_monitor_restart_store_bound_refusal_is_a_coded_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ValueError the store raises on the restart add is an audited 400 with
+    a ``code``, not an unhandled 500."""
+    loop = _monitor_loop()
+    assert loop.monitor is not None
+    loop.active = False
+    loop.monitor.outcome = MonitorOutcome.USER_STOP
+    _svc(monkeypatch, _FakeSvc([loop]))
+    authorize = AsyncMock(side_effect=ValueError("no monitored kind 'x' supports objective 'y'"))
+    monkeypatch.setattr(h, "authorize_and_add_nudge", authorize)
+
+    response = await h.api_monitor_restart(
+        _mk("POST", "/api/monitors/mon-1/restart", match={"monitor_id": "mon-1"})
+    )
+
+    assert response.status == 400
+    assert _body(response)["code"] == "monitor_restart_denied"
+    assert "supports objective" in _body(response)["error"]
 
 
 @pytest.mark.asyncio

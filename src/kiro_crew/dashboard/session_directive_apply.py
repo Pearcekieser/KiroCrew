@@ -85,13 +85,15 @@ _ARMING_DIRECTIVES = frozenset({"monitor_start", "monitor_watch"})
 # just running the previous text -- so the two share the mechanism and not the
 # wording.
 _REVISION_DIRECTIVES = frozenset({"monitor_update"})
-# Directives that END the loop this session already has. A stale wake may not
-# stop the loop that REPLACED the one which delivered it, so a stop is gated on
-# the wake's loop still being this session's monitor -- and on nothing else:
-# whether that loop is paused or retained is the stop applier's own business,
-# not a reason to refuse. The refusal is as unobservable as a refused arm or
-# revision (the tool has already answered over its own pipe), so it is surfaced
-# the same way, in stop wording: nothing here was armed or revised.
+# Directives that END the loop this session already has. A wake-delivered stop
+# is gated on two checks (``_refuse_stale_wake_stop``). Identity: the wake's
+# loop must still be this session's monitor, or a stale wake would stop the
+# loop that REPLACED the one which delivered it. Retention: a row a person
+# paused or stopped is retained evidence, and a legacy stop removes its row, so
+# a wake may not delete it; a row the SYSTEM deactivated still passes and is
+# the stop applier's business. The refusal is as unobservable as a refused arm
+# or revision (the tool has already answered over its own pipe), so it is
+# surfaced the same way, in stop wording: nothing here was armed or revised.
 _STOP_DIRECTIVES = frozenset({"monitor_stop", "autonudge_stop"})
 
 # Transcript row prefix for a refused arm. Fixed text so the frontend and tests
@@ -130,7 +132,8 @@ def _surface_arm_refusal(
     have no transcript window; the returned string is their only surface.
 
     ``prefix`` selects the wording for the class of directive that was refused
-    (an arm by default, a revision for ``monitor_update``). Only the leading
+    (an arm by default, a revision for ``monitor_update``, a stop for
+    ``monitor_stop`` / ``autonudge_stop``). Only the leading
     text differs: the redaction, the row role and the best-effort contract are
     the same guarantees either way, which is why this is one helper.
 
@@ -492,15 +495,18 @@ def _refuse_stale_wake_arm(
 
 
 def _refuse_stale_wake_stop(session_key: str, wake_loop_id: str) -> None:
-    """Refuse a wake-delivered stop aimed at a loop other than the wake's own.
+    """Refuse a wake-delivered stop that would not end the wake's own live loop.
 
-    The identity check alone: the loop bound to this session must be the one
-    that delivered this turn, or a stale wake would end a loop a person armed
-    after it. A wake's loop that is paused or retained still passes -- ending
-    it is the stop applier's decision, and the arm gate's "may not start a
-    replacement" reasoning does not describe a stop.
+    Two checks. Identity: the loop bound to this session must be the one that
+    delivered this turn, or a stale wake would end a loop a person armed after
+    it. Retention: a row a person paused or stopped while this wake was still
+    running (``"manual"``, an empty reason, anything
+    ``_stopped_row_is_replaceable`` fails closed on) is retained evidence, and a
+    legacy stop REMOVES its row, so the wake may not delete it. A row the system
+    deactivated (cycle cap, runtime budget, terminal subject) still passes;
+    ending it is the stop applier's decision.
     """
-    from kiro_crew.autonudge import get_instance
+    from kiro_crew.autonudge import _stopped_row_is_replaceable, get_instance
 
     svc = get_instance()
     if svc is None:
@@ -513,6 +519,12 @@ def _refuse_stale_wake_stop(session_key: str, wake_loop_id: str) -> None:
             "Monitor NOT stopped: the loop that delivered this wake is no longer "
             "this session's monitor, so this turn may not stop the loop that "
             "replaced it. A new user request is required."
+        )
+    if not getattr(current, "active", False) and not _stopped_row_is_replaceable(current):
+        raise _DirectiveDenied(
+            "Monitor NOT stopped: the loop that delivered this wake was paused or "
+            "stopped by a person and is retained, so this turn may not remove it. "
+            "A new user request is required."
         )
 
 

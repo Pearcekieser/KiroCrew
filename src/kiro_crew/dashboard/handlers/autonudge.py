@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from dataclasses import asdict, fields
 from typing import Any
@@ -430,7 +431,12 @@ async def _require_monitor_internal(request: web.Request) -> web.Response | None
 
 def _bounded_int(body: dict[str, Any], name: str, default: int, minimum: int, maximum: int) -> int:
     raw = body.get(name, default)
-    if isinstance(raw, bool) or not isinstance(raw, int) or not minimum <= raw <= maximum:
+    # A whole-number float (``60.0``, as a JSON body may spell an integer) is
+    # taken as the integer; a bool, a fractional float and a non-finite float
+    # are refused, the same rule ``validate_runtime_secs`` applies.
+    if type(raw) is float and raw.is_integer():
+        raw = int(raw)
+    if type(raw) is not int or not minimum <= raw <= maximum:
         raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
     return raw
 
@@ -490,12 +496,6 @@ def _monitor_config(
     # default is itself capped to the ceiling, so a request that omits the field
     # is accepted under any ceiling instead of failing on a number nobody sent.
     runtime_ceiling = runtime_ceiling_secs()
-    normalized_body = body
-    if "max_runtime_secs" in body:
-        normalized_body = {
-            **body,
-            "max_runtime_secs": validate_runtime_secs(body["max_runtime_secs"]),
-        }
     return MonitorState(
         kind=kind,
         target=target,
@@ -510,7 +510,7 @@ def _monitor_config(
         ),
         budgets=MonitorBudgets(
             max_runtime_secs=_bounded_int(
-                normalized_body,
+                body,
                 "max_runtime_secs",
                 min(DEFAULT_MONITOR_RUNTIME_SECS, runtime_ceiling),
                 1,
@@ -884,24 +884,35 @@ async def api_monitor_restart(request: web.Request) -> web.Response:
     state: DashboardState = request.app["state"]
     # The stored budget was validated against the ceiling in force when the
     # record was armed; a lowered ceiling must not turn the restart into a
-    # refusal naming a number the user never typed.
+    # refusal naming a number the user never typed. The clamp lands on the
+    # record itself: the store re-validates ``budgets.max_runtime_secs`` on
+    # add, so a monitor forwarded with its stored budget would still be refused.
     restart_runtime_secs = min(monitor.budgets.max_runtime_secs, runtime_ceiling_secs())
-    restarted, error, status = await authorize_and_add_nudge(
-        svc=svc,
-        state=state,
-        slot_key=loop.slot_key,
-        message=monitor.wake_instructions or "structured monitor",
-        idle_secs=monitor.cadence_secs,
-        max_cycles=0,
-        max_runtime_secs=restart_runtime_secs,
-        source="dashboard",
-        caller=request.remote or "",
-        monitor=monitor,
-        expected_existing_monitor_id=loop.id,
-        expected_existing_config_generation=monitor.config_generation,
-        creation_surface=monitor.creation_surface,
-        grant_owner_provider_credentials=True,
+    restart_monitor = dataclasses.replace(
+        monitor,
+        budgets=dataclasses.replace(monitor.budgets, max_runtime_secs=restart_runtime_secs),
     )
+    try:
+        restarted, error, status = await authorize_and_add_nudge(
+            svc=svc,
+            state=state,
+            slot_key=loop.slot_key,
+            message=monitor.wake_instructions or "structured monitor",
+            idle_secs=monitor.cadence_secs,
+            max_cycles=0,
+            max_runtime_secs=restart_runtime_secs,
+            source="dashboard",
+            caller=request.remote or "",
+            monitor=restart_monitor,
+            expected_existing_monitor_id=loop.id,
+            expected_existing_config_generation=monitor.config_generation,
+            creation_surface=monitor.creation_surface,
+            grant_owner_provider_credentials=True,
+        )
+    except ValueError as exc:
+        # The authorizer audits the failed add before re-raising; the store's
+        # bound refusal is a client-side condition, answered with its range.
+        return _monitor_error(str(exc), "monitor_restart_denied", status=400)
     if error is not None:
         return _monitor_error(error, "monitor_restart_denied", status=status)
     return web.json_response({"ok": True, "monitor": _serialize_monitor(restarted)})

@@ -815,9 +815,67 @@ class TestOneRefusalPerFrame:
         spy.assert_not_called()
         denied = [c for c in calls if c.get("source") == "mcp-directive"]
         assert [c["outcome"] for c in denied] == ["denied"]
+        # The identity gate records an identified call in _pending_dir_tool, not
+        # _seen_tool_identity, so the denied row must name the directive tool.
+        assert denied[0]["tool_name"] == "monitor_start", denied
         notes = [o for o in _tool_result_outputs(state) if "[Not applied:" in o]
         assert len(notes) == 1, notes
         assert notes[0].count("[Not applied:") == 1, notes[0]
+        assert not any(session_directive.SENTINEL in o for o in _tool_result_outputs(state))
+        assert directive_queue.depth(effective_session_key(slot)) == 0
+
+    @pytest.mark.asyncio
+    async def test_native_subagent_garbled_marker_is_refused_once(self, tmp_path, monkeypatch):
+        """The same isolation refusal when the child's result still carries a
+        marker that does not decode: one denied row, one not-applied note, and
+        the sentinel stripped from the transcript."""
+        state = _stub_state(tmp_path)
+        slot = state.get_or_create_slot("native-garbled")
+        slot._titled = True
+        calls = _sel_spy(monkeypatch)
+        garbled = "Monitor loop requested.\n\n" + session_directive.SENTINEL + "{not json"
+        events = [
+            AcpEvent(
+                kind=EVENT_SUBAGENT_LIST,
+                subagents=[
+                    {
+                        "sessionId": "sub-1",
+                        "role": "tester",
+                        "initialQuery": "do the work",
+                        "status": {"type": "working"},
+                    }
+                ],
+            ),
+            AcpEvent(kind=EVENT_SUBAGENT_ACTIVITY, sub_session_id="sub-1", tool_call_id="tc-nat"),
+            AcpEvent(
+                kind=EVENT_TOOL_CALL,
+                tool_call_id="tc-nat",
+                title="@kirocrew-core/monitor_start",
+                wire_title="@kirocrew-core/monitor_start",
+                tool_kind="other",
+                tool_name="monitor_start",
+                mcp_server_name=session_directive.CORE_MCP_SERVER,
+                raw_tool_params=FRAME_INPUT,
+            ),
+            AcpEvent(
+                kind=EVENT_TOOL_RESULT,
+                tool_call_id="tc-nat",
+                tool_output=garbled,
+                tool_final=True,
+            ),
+            AcpEvent(kind=EVENT_TEXT_CHUNK, text="ok"),
+            AcpEvent(kind=EVENT_COMPLETE),
+        ]
+        spy = await _drive(state, slot, events, monkeypatch)
+        spy.assert_not_called()
+        denied = [c for c in calls if c.get("source") == "mcp-directive"]
+        assert [c["outcome"] for c in denied] == ["denied"]
+        outputs = _tool_result_outputs(state)
+        notes = [o for o in outputs if "[Not applied:" in o]
+        assert len(notes) == 1 and notes[0].count("[Not applied:") == 1, notes
+        assert not any(session_directive.SENTINEL in o for o in outputs), outputs
+        notices = [r.get("content", "") for r in slot.messages if r.get("role") == "notice"]
+        assert not any("could not be verified" in n for n in notices)
         assert directive_queue.depth(effective_session_key(slot)) == 0
 
     @pytest.mark.asyncio
@@ -825,8 +883,9 @@ class TestOneRefusalPerFrame:
         self, tmp_path, monkeypatch, caplog
     ):
         """An identified call whose marker does not decode and whose record was
-        never parked is refused by the entry branch alone; the marker path does
-        not add a second, lost-marker refusal for the same frame."""
+        never parked: the entry branch writes the ONE denied audit row, and the
+        authenticated decode-failure path still surfaces the ONE lost-marker
+        notice and strips the sentinel from the transcript."""
         state = _stub_state(tmp_path)
         slot = state.get_or_create_slot("garbled-marker")
         slot._titled = True
@@ -860,8 +919,13 @@ class TestOneRefusalPerFrame:
         denied = [c for c in calls if c.get("source") == "mcp-directive"]
         assert [c["outcome"] for c in denied] == ["denied"]
         assert "session-directive NOT APPLIED: marker present" in caplog.text
-        assert "session-directive decode FAILED" not in caplog.text
-        assert not any("could not be verified" in o for o in _tool_result_outputs(state))
+        assert "session-directive decode FAILED" in caplog.text
+        notices = [r.get("content", "") for r in slot.messages if r.get("role") == "notice"]
+        assert notices == ["Monitor was not set up."], notices
+        outputs = _tool_result_outputs(state)
+        assert outputs and outputs[-1].startswith("Monitor loop requested.")
+        assert outputs[-1].count("could not be verified") == 1, outputs[-1]
+        assert not any(session_directive.SENTINEL in o for o in outputs), outputs
 
 
 class TestTheDisplayTitleCannotForgeTheTool:
