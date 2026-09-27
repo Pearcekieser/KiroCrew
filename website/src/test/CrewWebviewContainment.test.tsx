@@ -128,6 +128,7 @@ describe("crew webview containment", () => {
   afterEach(() => {
     globalThis.URL.createObjectURL = originalCreate;
     globalThis.fetch = originalFetch;
+    vi.useRealTimers();
   });
 
   /** Render and wait for the docked summary. No frame exists at this point. */
@@ -434,7 +435,14 @@ describe("crew webview containment", () => {
      * on screen by the one record the reader cannot see, and the band then
      * claims the stale page is the fresh one -- the exact confusion the stamp was
      * added to remove. Here the record is republished a minute ago while the
-     * document on screen stays the fixture's much older one. */
+     * document on screen stays the fixture's much older one.
+     *
+     * "Now" is pinned a week after the fixture's publish instant. Read from the
+     * real clock, the two ages drift together: on the 23rd day the fixture read
+     * "23d ago", which contains the republish's "3d ago". Only Date is faked,
+     * so waitFor and react-query keep their real timers. */
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-11T05:16:00"));
     mintSpy.mockResolvedValueOnce({ url: DOC_URL });
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, gcTime: 0 } },
@@ -481,16 +489,18 @@ describe("crew webview containment", () => {
 
     /* Non-vacuity first: the two instants must actually RENDER differently, or
      * "does not show the new age" would hold for the wrong reason and the pin
-     * would survive the defect. They cannot collide whenever this is run -- the
-     * fixture's instant is a fixed date and so only ever gets older, while the
-     * republish is pinned three days out from the clock. */
+     * would survive the defect. With the clock pinned above, the fixture reads
+     * seven days old and the republish three. */
     const shownWhen = fmtRelative("2026-09-04T05:16:00");
     const newWhen = fmtRelative(republished);
     expect(newWhen).not.toBe(shownWhen);
 
+    // Whole-word match, so one age can never pass as a substring of the other.
+    const asWord = (s: string) =>
+      new RegExp(`(^|[^\\p{L}\\p{N}])${s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^\\p{L}\\p{N}])`, "u");
     const text = banner.textContent || "";
-    expect(text).toContain(shownWhen);
-    expect(text).not.toContain(newWhen);
+    expect(text).toMatch(asWord(shownWhen));
+    expect(text).not.toMatch(asWord(newWhen));
 
     // And THIS is the state the bar's "new version" chip exists for: the record
     // on file is newer than the document on screen, so the chip must say so and
@@ -515,8 +525,8 @@ describe("crew webview containment", () => {
         republishedCopy.webview_published_ago_newer.split("{{")[0],
       ),
     ).toBe(true);
-    expect(chipText).toContain(newWhen);
-    expect(chipText).not.toContain(shownWhen);
+    expect(chipText).toMatch(asWord(newWhen));
+    expect(chipText).not.toMatch(asWord(shownWhen));
   });
 
   it("gives the empty state a way to act, and no dead control without one", async () => {
