@@ -319,6 +319,7 @@ async def authorize_and_stop_monitor(
     source: str,
     caller: str = "",
     user_reason: str = "",
+    precondition: Callable[[Any], bool] | None = None,
 ) -> tuple[Any | None, str | None, int]:
     """Audit before retaining one ownership-resolved user-stop outcome."""
     try:
@@ -335,7 +336,10 @@ async def authorize_and_stop_monitor(
     except Exception:
         logger.error("monitor stop denied: SEL audit unavailable", exc_info=True)
         return None, "audit log unavailable — monitor not stopped", 503
-    loop = await svc.stop_monitor(loop_id, user_reason=user_reason)
+    stop_kwargs: dict[str, Any] = {"user_reason": user_reason}
+    if precondition is not None:
+        stop_kwargs["precondition"] = precondition
+    loop = await svc.stop_monitor(loop_id, **stop_kwargs)
     if loop is None:
         return None, "structured monitor not found", 404
     return loop, None, 200

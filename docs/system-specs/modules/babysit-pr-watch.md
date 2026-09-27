@@ -200,7 +200,10 @@ or dropped sentinel deactivated, admits it, and the create-only and
 the four answers. When the wake carries a loop id, its `monitor_update`,
 `monitor_stop`, and `autonudge_stop` directives apply only while that id is the
 monitor currently bound to the session; a replacement monitor is never mutated
-by the stale wake.
+by the stale wake. For stop directives, the identity, binding, and person-stop
+retention checks are repeated inside the same service transaction that removes
+a legacy loop or records a structured `USER_STOP`, so a pause landing after the
+early refusal check survives unchanged.
 
 `autonudge_stop` is deliberately non-confirming at tool-call time because the
 consumer applies it after the turn result is processed. The applier removes an

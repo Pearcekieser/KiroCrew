@@ -1270,3 +1270,112 @@ async def test_self_wake_cannot_revive_user_paused_loop_by_raising_cap(tmp_path,
         assert "new user request" in result
     finally:
         service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["monitor_stop", "autonudge_stop"])
+async def test_stale_wake_stop_preserves_pause_landing_before_remove(tmp_path, kind, monkeypatch):
+    service = AutoNudgeService(base_dir=tmp_path)
+    loop = await service.add(
+        slot_key="chat-1",
+        message="keep this paused loop",
+        idle_secs=86400,
+        max_cycles=9,
+        max_runtime_secs=7200,
+    )
+    real_acquire = service._acquire_mutation_lock
+    stop_waiting = False
+
+    async def _pause_before_stop_acquires(loop_id):
+        nonlocal stop_waiting
+        if not stop_waiting:
+            stop_waiting = True
+            await service.update(loop_id, active=False)
+        return await real_acquire(loop_id)
+
+    monkeypatch.setattr(service, "_acquire_mutation_lock", _pause_before_stop_acquires)
+    try:
+        with (
+            patch("kiro_crew.autonudge.get_instance", return_value=service),
+            patch("kiro_crew.autonudge_authz.sel", return_value=MagicMock()),
+        ):
+            result = await apply_session_directive(
+                SimpleNamespace(),
+                SimpleNamespace(key="chat-1", _app=""),
+                "dashboard:chat-1",
+                kind,
+                {"reason": "wake finished"},
+                producer_is_self_wake=True,
+                producer_wake_loop_id=loop.id,
+            )
+
+        paused = service.get_by_slot("chat-1")
+        assert paused is not None and paused.id == loop.id
+        assert not paused.active and paused.stopped_reason == "manual"
+        assert paused.message == "keep this paused loop"
+        assert paused.max_cycles == 9 and paused.max_runtime_secs == 7200
+        assert "new user request is required" in result
+    finally:
+        service.stop()
+
+
+@pytest.mark.asyncio
+async def test_remove_unserialized_requires_mutation_lock(tmp_path):
+    service = AutoNudgeService(base_dir=tmp_path)
+    loop = await service.add(slot_key="chat-1", message="keep", idle_secs=86400)
+    try:
+        with pytest.raises(RuntimeError, match="mutation lock"):
+            await service._remove_unserialized(loop.id)
+        assert service.get_by_id(loop.id) is loop
+    finally:
+        service.stop()
+
+
+@pytest.mark.asyncio
+async def test_stale_wake_structured_stop_preserves_concurrent_pause(tmp_path, monkeypatch):
+    service = AutoNudgeService(base_dir=tmp_path)
+    loop = await service.add_monitor(
+        slot_key="chat-1",
+        kind="github_pull_request",
+        target="https://github.com/acme/widgets/pull/1",
+        objective="review_ready",
+        cadence_secs=300,
+        budgets=MonitorBudgets(max_runtime_secs=7200),
+        wake_instructions="keep checking",
+    )
+    from kiro_crew.autonudge_authz import authorize_and_stop_monitor as real_stop
+
+    async def _pause_before_structured_stop(**kwargs):
+        await service.stop_monitor(loop.id, user_reason="person stopped it")
+        return await real_stop(**kwargs)
+
+    monkeypatch.setattr(
+        "kiro_crew.autonudge_authz.authorize_and_stop_monitor",
+        _pause_before_structured_stop,
+    )
+    try:
+        with (
+            patch("kiro_crew.autonudge.get_instance", return_value=service),
+            patch("kiro_crew.autonudge_authz.sel", return_value=MagicMock()),
+        ):
+            result = await apply_session_directive(
+                SimpleNamespace(),
+                SimpleNamespace(key="chat-1", _app=""),
+                "dashboard:chat-1",
+                "monitor_stop",
+                {"reason": "wake finished"},
+                producer_is_self_wake=True,
+                producer_wake_loop_id=loop.id,
+            )
+
+        paused = service.get_by_slot("chat-1")
+        assert paused is not None and paused.id == loop.id
+        assert not paused.active
+        assert paused.monitor is not None
+        assert paused.monitor.outcome is MonitorOutcome.USER_STOP
+        assert paused.monitor.stopped_reason == "user_stop"
+        assert paused.monitor.user_stop_reason == "person stopped it"
+        assert paused.monitor.wake_instructions == "keep checking"
+        assert "new user request is required" in result
+    finally:
+        service.stop()
