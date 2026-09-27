@@ -47,11 +47,11 @@ from kiro_crew.constants import (
 # ``model_registry`` (stdlib-only), so no cycle back into validation.
 from kiro_crew.effort import EFFORT_VALUES
 from kiro_crew.lesson_validation import LESSON_APPLIES_VALUES
+from kiro_crew.monitoring.limits import MAX_RUNTIME_CEILING_SECS, validate_runtime_secs
 from kiro_crew.monitoring.models import (
     MAX_MONITOR_AGENT_TURNS,
     MAX_MONITOR_CADENCE_SECS,
     MAX_MONITOR_PROVIDER_ERRORS,
-    MAX_MONITOR_RUNTIME_SECS,
     MAX_MONITOR_STOP_REASON_CHARS,
     MAX_MONITOR_TOKENS,
     MAX_MONITOR_WAKE_INSTRUCTIONS_CHARS,
@@ -1355,8 +1355,19 @@ AUTONUDGE_STOP_SCHEMA = ToolSchema(
     ],
 )
 
+
+def _validate_monitor_runtime(args: dict[str, Any]) -> None:
+    value = args.get("max_runtime_secs")
+    if value is not None:
+        try:
+            validate_runtime_secs(value)
+        except ValueError as exc:
+            raise ValidationError("max_runtime_secs", str(exc)) from exc
+
+
 MONITOR_WATCH_SCHEMA = ToolSchema(
     tool_name="monitor_watch",
+    custom_validator=_validate_monitor_runtime,
     fields=[
         FieldSpec("kind", str, required=True, allowed=publicly_armable_kinds()),
         FieldSpec("target", str, required=True, max_len=MAX_SHORT_STRING),
@@ -1367,7 +1378,7 @@ MONITOR_WATCH_SCHEMA = ToolSchema(
             min_val=MIN_MONITOR_CADENCE_SECS,
             max_val=MAX_MONITOR_CADENCE_SECS,
         ),
-        FieldSpec("max_runtime_secs", int, min_val=1, max_val=MAX_MONITOR_RUNTIME_SECS),
+        FieldSpec("max_runtime_secs", int, min_val=1, max_val=MAX_RUNTIME_CEILING_SECS),
         FieldSpec("max_agent_turns", int, min_val=1, max_val=MAX_MONITOR_AGENT_TURNS),
         FieldSpec("max_tokens", int, min_val=1, max_val=MAX_MONITOR_TOKENS),
         FieldSpec("max_provider_errors", int, min_val=1, max_val=MAX_MONITOR_PROVIDER_ERRORS),
@@ -1387,16 +1398,16 @@ MONITOR_STOP_SCHEMA = ToolSchema(
 # monitor_start creates an AutoNudge loop bound to the calling session (the
 # agent-facing "babysit this PR" primitive). message caps match the REST
 # endpoint's 8000-char limit; interval bounds mirror autonudge's
-# _MIN_IDLE_SECS/_MAX_IDLE_SECS clamp. Both caps must be positive; the 7-day
-# runtime ceiling keeps a typo like 6e9 from arming an effectively unbounded
-# loop while still covering week-long babysits.
+# _MIN_IDLE_SECS/_MAX_IDLE_SECS clamp. The custom validator applies the
+# operator's finite runtime ceiling at call time.
 MONITOR_START_SCHEMA = ToolSchema(
     tool_name="monitor_start",
+    custom_validator=_validate_monitor_runtime,
     fields=[
         FieldSpec("message", str, required=True, max_len=8000),
         FieldSpec("interval_secs", int, min_val=15, max_val=86400),
         FieldSpec("max_cycles", int, min_val=1, max_val=1000),
-        FieldSpec("max_runtime_secs", int, min_val=1, max_val=604800),
+        FieldSpec("max_runtime_secs", int, min_val=1, max_val=MAX_RUNTIME_CEILING_SECS),
         # Opt-OUT of observation gating. Absent means gated, matching the tool's
         # default, so a caller written before this field existed keeps the
         # default behaviour rather than silently escaping it.
@@ -1516,11 +1527,12 @@ def validate_judge_spec(raw: object) -> dict[str, object]:
 # that monitor_start would have refused to create.
 MONITOR_UPDATE_SCHEMA = ToolSchema(
     tool_name="monitor_update",
+    custom_validator=_validate_monitor_runtime,
     fields=[
         FieldSpec("message", str, max_len=8000),
         FieldSpec("interval_secs", int, min_val=15, max_val=86400),
         FieldSpec("max_cycles", int, min_val=1, max_val=1000),
-        FieldSpec("max_runtime_secs", int, min_val=1, max_val=604800),
+        FieldSpec("max_runtime_secs", int, min_val=1, max_val=MAX_RUNTIME_CEILING_SECS),
         FieldSpec("target", str, max_len=MAX_SHORT_STRING),
         FieldSpec("objective", str, allowed=publicly_armable_objectives()),
         FieldSpec("max_agent_turns", int, min_val=1, max_val=MAX_MONITOR_AGENT_TURNS),

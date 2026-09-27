@@ -2501,3 +2501,11 @@ CJK-pair tokenizer. Native tool schemas and Tool Search thresholds are unchanged
 gateway resolves scope from the signed session, never a model-supplied agent name.
 Without signed identity it uses the global installed catalog. Incremental indexing
 reports incomplete recall explicitly; list/read remain available during refresh.
+
+### Codex session-control delivery
+
+Eligible Codex sessions receive the dashboard server through their verified
+per-session projection on create and resume; see [providers](../system-specs/modules/providers.md#codex-dashboard-session-mount).
+The managed launcher is reconstructed before identity is attached, and broker
+claims retain their per-session ownership checks. A global dashboard entry has
+no verified session identity and cannot grant access by its name alone.

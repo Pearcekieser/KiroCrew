@@ -155,6 +155,51 @@ key-space characters. And the cron path's plural batch assembly is a driver
 change, which is the consolidation's own step. Until that step an author adding a
 cron-path kind still subclasses `irq.Probe`.
 
+## Runtime bounds and activation evidence
+
+`monitoring.max_runtime_secs` supplies the operator's finite runtime ceiling,
+shared by MCP validation, API creation/update and persistence. The shipped
+ceiling is seven days; setting 2592000 permits a 30-day request without changing
+any stored deadline or unrelated arming default. Daily prompt maintenance uses
+`interval_secs=86400`, `gate=false`, and an explicitly bounded runtime and cycle
+count. Expiry is measured from the original creation timestamp across restarts.
+Tool descriptors advertise the configured limit in the stdio server. Name-only
+discovery on the gateway event loop skips config reads; descriptor read failures
+fall back to the shipped bound without weakening invocation-time validation.
+The runtime policy applies to structured budgets and legacy outer runtimes;
+legacy observation metadata has unused budgets and retains only structural bounds.
+Malformed or over-policy persisted runtime budgets are held inactive, and the
+load logs a warning naming the loop, its budget and the ceiling that refused it. An
+over-policy budget is a policy failure, not a malformed record: a well-formed legacy
+loop or structured monitor keeps its budget and typed state and carries the loop-level
+`invalid_runtime_budget` stop reason with no terminal outcome; only a record the model
+cannot parse is quarantined. A row held under `invalid_runtime_budget` is released on
+the first load whose ceiling admits its stored budget: it resumes on its stored deadline
+with its budget still measured from creation, so a budget spent during the hold expires
+under the ordinary runtime-budget stop instead, and any other stop reason is untouched.
+A resume
+rejected by the current policy returns an audited HTTP 400 with the valid range. Resume
+and other updates that keep a loop active validate the effective stored budget
+even when the request omits that field; a structured update re-checks the effective
+budget on every call and answers the same audited 400. API creation caps the shipped
+runtime default to the ceiling and bound-checks only a budget the caller supplied.
+Explicit stops remain available.
+Quarantine remains inspectable even below the ordinary four-hour default.
+
+A tool's “requested” response proves receipt only. The gateway's applied notice
+and a subsequent `monitor_inspect` prove activation. Unmatched directive delivery
+produces an application-failure notice appended to the tool's own result text; its
+agent instruction names `monitor_inspect` only for the monitor tools and stays
+tool-neutral for every other directive tool, as does the turn-end notice for a parked
+record no call claimed. A delivered maintenance wake may outlive
+a user's Stop, including the prompt-loop path that removes its row, so the wake
+carries its loop id and an arm it issues is refused when that row is gone or
+was stopped by a person (a retained `USER_STOP`, a manual pause); a row that is
+active or that its own cycle cap or runtime budget deactivated admits the arm.
+The wake cannot revive a stopped loop except one its own bound deactivated, by
+raising that bound. Existing update, stop, terminal and repair-budget rules
+still apply.
+
 ## A monitor is a field, not a system
 
 A reader who knows the code arrives expecting a monitor subsystem sitting beside

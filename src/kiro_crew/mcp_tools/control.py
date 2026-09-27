@@ -35,6 +35,7 @@ from kiro_crew.mcp_tools._limits import (
     _MONITOR_DEFAULT_MAX_CYCLES,
     _MONITOR_DEFAULT_MAX_RUNTIME_SECS,
 )
+from kiro_crew.monitoring.limits import DEFAULT_RUNTIME_CEILING_SECS, runtime_ceiling_secs
 from kiro_crew.monitoring.models import (
     DEFAULT_MONITOR_AGENT_TURNS,
     DEFAULT_MONITOR_CADENCE_SECS,
@@ -45,7 +46,6 @@ from kiro_crew.monitoring.models import (
     MAX_MONITOR_CADENCE_SECS,
     MAX_MONITOR_CHECK_NAMES,
     MAX_MONITOR_PROVIDER_ERRORS,
-    MAX_MONITOR_RUNTIME_SECS,
     MAX_MONITOR_TOKENS,
     MAX_MONITOR_WAKE_INSTRUCTIONS_CHARS,
     MIN_MONITOR_CADENCE_SECS,
@@ -177,6 +177,17 @@ def _ending_clause() -> str:
 def schemas() -> list[dict[str, Any]]:
     """Descriptors for the control tools."""
     prefer_structured = _prefers_structured_arming()
+    # In-process discovery keeps only names; never read disk on its event loop.
+    # A failed descriptive read must not withdraw every control tool. Actual
+    # invocation still validates the current policy at the mutation boundary.
+    runtime_ceiling = DEFAULT_RUNTIME_CEILING_SECS
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            runtime_ceiling = runtime_ceiling_secs()
+        except Exception:
+            logger.debug("monitor runtime descriptor unavailable; using default", exc_info=True)
     return [
         {
             "name": "task_run",
@@ -420,7 +431,7 @@ def schemas() -> list[dict[str, Any]]:
                     "max_runtime_secs": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": MAX_MONITOR_RUNTIME_SECS,
+                        "maximum": runtime_ceiling,
                     },
                     "max_agent_turns": {
                         "type": "integer",
@@ -581,11 +592,12 @@ def schemas() -> list[dict[str, Any]]:
                     "max_runtime_secs": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 604800,
+                        "maximum": runtime_ceiling,
                         "description": (
                             "Wall-clock budget in seconds, measured from when "
                             "the loop is armed (default "
-                            f"{_MONITOR_DEFAULT_MAX_RUNTIME_SECS}; max 604800 = 7 days). "
+                            f"{min(_MONITOR_DEFAULT_MAX_RUNTIME_SECS, runtime_ceiling)}; "
+                            f"configured max {runtime_ceiling}). "
                             "Unlike max_cycles this "
                             "bounds elapsed TIME, so a loop with slow turns or "
                             "a long interval still stops on schedule. The "
@@ -717,10 +729,10 @@ def schemas() -> list[dict[str, Any]]:
                     "max_runtime_secs": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 604800,
+                        "maximum": runtime_ceiling,
                         "description": (
                             "New wall-clock budget in seconds, measured from "
-                            "when the loop was first armed (max 604800 = 7 days). "
+                            f"when the loop was first armed (configured max {runtime_ceiling}). "
                             "Omit to leave unchanged"
                         ),
                     },
@@ -1472,7 +1484,12 @@ def monitor_start(name: str, args: dict[str, Any]) -> str:
     max_cycles = _MONITOR_DEFAULT_MAX_CYCLES if raw_max is None else int(raw_max)
     # The runtime budget is bounded by default alongside the cycle cap, so a
     # quiet or slow loop cannot survive indefinitely without a fresh decision.
-    max_runtime_secs = int(args.get("max_runtime_secs") or _MONITOR_DEFAULT_MAX_RUNTIME_SECS)
+    # An omitted budget takes the default capped to the operator ceiling, so a
+    # ceiling below the default never refuses a value the caller did not send.
+    max_runtime_secs = int(
+        args.get("max_runtime_secs")
+        or min(_MONITOR_DEFAULT_MAX_RUNTIME_SECS, runtime_ceiling_secs())
+    )
     # The one escape from gating, and deliberately an opt-OUT. An opt-IN is what
     # An opt-out is used rather than opt-in: an opt-in default gates everything
     # and releases nothing (every opt-in mechanism sees zero adoption because
@@ -1696,7 +1713,11 @@ def monitor_watch(name: str, args: dict[str, Any]) -> str:
         "target": target,
         "objective": args["objective"],
         "cadence_secs": int(args.get("interval_secs") or DEFAULT_MONITOR_CADENCE_SECS),
-        "max_runtime_secs": int(args.get("max_runtime_secs") or DEFAULT_MONITOR_RUNTIME_SECS),
+        # Omitted: the default capped to the operator ceiling, as for monitor_start.
+        "max_runtime_secs": int(
+            args.get("max_runtime_secs")
+            or min(DEFAULT_MONITOR_RUNTIME_SECS, runtime_ceiling_secs())
+        ),
         "max_agent_turns": int(args.get("max_agent_turns") or DEFAULT_MONITOR_AGENT_TURNS),
         "max_tokens": int(args.get("max_tokens") or DEFAULT_MONITOR_TOKENS),
         "max_provider_errors": int(

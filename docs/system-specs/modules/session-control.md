@@ -1386,3 +1386,13 @@ follow-up.
 - **No waking closed sessions.** See above.
 - **No writes on the read path.** `session_read_message` never changes the
   target's state, so a poll loop cannot perturb what it is measuring.
+
+### Ordinary Codex dashboard grants
+
+An ordinary agent that explicitly grants `@kirocrew-dashboard` receives the
+managed dashboard mount on both create and resume through the Codex mirror.
+The grant, disabled-server and per-tool restrictions remain authoritative; a
+spec-supplied command is replaced before session identity is attached. Broker
+mounts preserve verified per-call identity and are required for host API access
+inside enforced sandboxes. Session ownership, workspace and private-session
+rules remain enforced by the existing session-control handlers.

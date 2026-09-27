@@ -8020,7 +8020,8 @@ it.
 
 Arm a loop on your own session with `monitor_start`, carrying the cycle
 instructions AND the exit condition, then end the turn. A reply saying
-*requested* is success — do not retry it. If arming is refused outright, say no
+*requested* confirms receipt only — do not retry it in the same turn.
+Confirm activation from the gateway arm notice or `monitor_inspect` on a later turn. If arming is refused outright, say no
 loop is running and drive that one round with `wait`. Call `autonudge_stop` when
 you stop. (The loop is on a timer today. When `monitor_start` accepts a
 `watch: "work-ledger"` field, gate on that instead and the quiet cycles stop
@@ -9202,7 +9203,8 @@ in that case.
 
 **Patrol with `monitor_start`, never with `wait`.** Arm it with the full cycle
 instructions AND the exit condition, then end the turn; call `autonudge_stop`
-when you stop. A reply saying *requested* is success — do not retry it. If
+when you stop. A reply saying *requested* confirms receipt only — do not retry it in the same turn.
+Confirm activation from the gateway arm notice or `monitor_inspect` on a later turn. If
 arming is refused outright, say no loop is running and drive that one round
 with `wait`. A quiet cycle is one line, then end the turn.
 
@@ -10156,7 +10158,8 @@ gate is the correct state; assuming its answer is not.
 
 **Patrol with `monitor_start`, never with `wait`.** Arm it with the full cycle
 instructions AND the exit condition, then end the turn; call `autonudge_stop`
-when you stop. A reply saying *requested* is success — do not retry it. If
+when you stop. A reply saying *requested* confirms receipt only — do not retry it in the same turn.
+Confirm activation from the gateway arm notice or `monitor_inspect` on a later turn. If
 arming is refused outright, say no loop is running and drive that one round
 with `wait`. A quiet cycle is one line, then end the turn.
 

@@ -6172,6 +6172,74 @@ def _model_unentitled_meta(exc: BaseException) -> dict[str, object] | None:
     return {"kind": MODEL_UNENTITLED_KIND}
 
 
+#: Outcome line for a directive tool whose effect was not applied, keyed by
+#: the tool. The reader is the human watching the session, so the line names
+#: what did NOT happen to their session, not the plumbing that failed.
+_DIRECTIVE_NOT_APPLIED_OUTCOMES: dict[str, str] = {
+    "monitor_start": "Monitor was not set up.",
+    "monitor_watch": "Monitor was not set up.",
+    "monitor_update": "Monitor was not changed.",
+    "monitor_stop": "Monitor was not stopped.",
+    "autonudge_stop": "Monitor was not stopped.",
+    "set_project": "The project change was not applied.",
+    "reset_conversation": "The conversation was not reset.",
+    "chat_tag": "The session tags were not changed.",
+    "ask_question": "The question was not shown.",
+    "suggest_followup": "The follow-up suggestions were not shown.",
+}
+
+#: The human-worded outcome for a directive tool this table does not name. The
+#: tool identifier belongs in the agent instruction, never first in a line a
+#: person reads.
+_DIRECTIVE_NOT_APPLIED_FALLBACK = "The request was not applied."
+
+#: The directive tools whose effect ``monitor_inspect`` can confirm.
+_MONITOR_DIRECTIVE_TOOLS: frozenset[str] = frozenset(
+    {"monitor_start", "monitor_watch", "monitor_update", "monitor_stop", "autonudge_stop"}
+)
+
+#: The unattributed case: the gateway holds a parked request that no tool call
+#: in this turn claimed, so it cannot even name the tool. Only a person reads
+#: this row (no tool result exists to carry an agent instruction), so it states
+#: the outcome in plain words and nothing else.
+UNCLAIMED_DIRECTIVE_NOTICE = "A request from this turn was not applied."
+
+
+def _directive_recovery_instruction(tool: str) -> str:
+    """The agent's one recovery step for a dropped *tool* effect.
+
+    A monitor tool has an inspector (``monitor_inspect``) that answers whether a
+    monitor exists; every other directive tool is told to confirm the session's
+    state in its own terms, without being sent to a monitor it never touched.
+    """
+    if tool in _MONITOR_DIRECTIVE_TOOLS:
+        return "call monitor_inspect before requesting it again."
+    return "confirm the session's state before requesting it again."
+
+
+def unverified_directive_outcome(tool: str) -> str:
+    """The one sentence a person reads when a directive *tool* effect was dropped.
+
+    This is the whole transcript row: it says what did not happen, in words,
+    and carries no tool identifier and no agent instruction.
+    """
+    return _DIRECTIVE_NOT_APPLIED_OUTCOMES.get(tool, _DIRECTIVE_NOT_APPLIED_FALLBACK)
+
+
+def unverified_directive_notice(tool: str) -> str:
+    """Text appended to the result of a directive tool whose effect was dropped.
+
+    Leads with the same outcome sentence the transcript row shows, then gives
+    the agent one tool-appropriate instruction for confirming the session's
+    real state before asking again. Only the tool result carries this text;
+    the row a person reads is :func:`unverified_directive_outcome` alone.
+    """
+    return (
+        f"{unverified_directive_outcome(tool)} Agent: the {tool} result could not be "
+        f"verified, so nothing changed; {_directive_recovery_instruction(tool)}"
+    )
+
+
 def _note_cycle_start_failure(slot_key: str, exc: BaseException, *, self_wake: bool) -> None:
     """Report a cycle that never obtained a model session to its nudge loop.
 
@@ -9347,7 +9415,9 @@ async def _run_chat(
     # structural-terminal slot verdict to the exact loop that produced
     # it: a slot outlives any single loop (stop one, arm another on the same
     # slot), so a slot-wide flag would let a stopped malformed loop's verdict
-    # deactivate a DIFFERENT loop armed later on that slot. Empty for every
+    # deactivate a DIFFERENT loop armed later on that slot. Also handed to the
+    # directive consumer, whose arming gate reads the row back to tell a live
+    # wake from one that outlived its loop's Stop. Empty for every
     # non-self-wake turn.
     _directive_loop_id: str = "",
     # The loop's CONFIG GENERATION at fire time (``loop.config_generation``),
@@ -13059,8 +13129,11 @@ async def _run_chat(
                         _pending_dir_for_digest[event.tool_call_id] = _dir_for_digest
                         if event.raw_tool_params is not None:
                             _pending_input_digest[event.tool_call_id] = (
-                                session_directive.call_input_digest(
-                                    _dir_for_digest, event.raw_tool_params
+                                session_directive.event_input_digest(
+                                    _dir_for_digest,
+                                    event.raw_tool_params,
+                                    event.mcp_server_name,
+                                    event.tool_name,
                                 )
                             )
                     # Forgery gate: record the directive-tool name ONLY
@@ -13161,8 +13234,13 @@ async def _run_chat(
                 if _dir_refresh and event.raw_tool_params is not None:
                     # The refinement carries the COMPLETE params; the initial
                     # tool_call may have streamed none. Same digest the tool took.
-                    _pending_input_digest[event.tool_call_id] = session_directive.call_input_digest(
-                        _dir_refresh, event.raw_tool_params
+                    _pending_input_digest[event.tool_call_id] = (
+                        session_directive.event_input_digest(
+                            _dir_refresh,
+                            event.raw_tool_params,
+                            event.mcp_server_name,
+                            event.tool_name,
+                        )
                     )
                 try:
                     _tcid_upd = _redact_tool_field(event.tool_call_id)
@@ -13512,7 +13590,14 @@ async def _run_chat(
                 # is directive-shaped on at least one channel.
                 _in_digest_probe = _pending_input_digest.get(event.tool_call_id, "")
                 if (
-                    not _dir_tool
+                    (
+                        not _dir_tool
+                        or (
+                            event.tool_final
+                            and session_directive.decode(_out, _dir_tool) is None
+                            and not session_directive.is_refusal(_out)
+                        )
+                    )
                     and event.tool_call_id not in _dir_consumed_out
                     and (
                         session_directive.has_marker(_out)
@@ -13618,6 +13703,8 @@ async def _run_chat(
                             else None
                         )
                     if _oob:
+                        _pending_dir_tool.pop(event.tool_call_id, None)
+                        _dir_tool = ""
                         _applied_kind = str(_oob.get("kind") or "")
                         _applied_one = await apply_session_directive(
                             state,
@@ -13628,13 +13715,13 @@ async def _run_chat(
                             producer_is_user_facing=_directive_user_origin,
                             producer_is_self_wake=_directive_self_wake,
                             producer_is_channel=_directive_channel_origin,
+                            producer_wake_loop_id=_directive_loop_id,
                         )
                         _record_terminal_question(_applied_kind, _applied_one)
                         logger.info(
                             "session-directive applied OUT OF BAND for %s "
-                            "(tool_call_id=%s, kind=%s): this backend emits no "
-                            "_meta.kiro identity, so the marker could not be "
-                            "trusted and the gateway-parked payload selected by "
+                            "(tool_call_id=%s, kind=%s): the marker was unavailable; "
+                            "the gateway-parked payload selected by "
                             "the call's input digest was used.",
                             session_key,
                             event.tool_call_id,
@@ -13795,6 +13882,24 @@ async def _run_chat(
                                     event.tool_call_id,
                                     len(_out or ""),
                                 )
+                                append_and_surface(
+                                    state,
+                                    slot,
+                                    "notice",
+                                    unverified_directive_outcome(_dir_tool),
+                                    "msg msg-info",
+                                )
+                                # APPENDED, not substituted: the tool's own text
+                                # is the only account of what it did before the
+                                # marker was lost, and the agent needs both it
+                                # and the recovery instruction.
+                                _out = _redact_tool_field(
+                                    session_directive.strip_marker(_out)
+                                    + "\n\n"
+                                    + unverified_directive_notice(_dir_tool)
+                                )
+                                _pending_dir_tool.pop(event.tool_call_id, None)
+                                _dir_consumed_out[event.tool_call_id] = _out
                         if _dir_args is not None:
                             # SINGLE-CONSUME (see the native branch above): drop
                             # the mapping BEFORE applying, so a second result
@@ -13818,6 +13923,7 @@ async def _run_chat(
                                 producer_is_user_facing=_directive_user_origin,
                                 producer_is_self_wake=_directive_self_wake,
                                 producer_is_channel=_directive_channel_origin,
+                                producer_wake_loop_id=_directive_loop_id,
                             )
                             _record_terminal_question(_dir_tool, _applied_one)
                             _out = _redact_tool_field(_applied_one)
@@ -19609,6 +19715,9 @@ async def _run_chat(
                 not_before=_turn_started,
             )
             if _unclaimed_markers:
+                append_and_surface(
+                    state, slot, "notice", UNCLAIMED_DIRECTIVE_NOTICE, "msg msg-info"
+                )
                 _identity_markers = tuple(
                     f"{call_id}:{server or '-'}:{tool or '-'}"
                     for call_id, (server, tool) in sorted(_seen_tool_identity.items())

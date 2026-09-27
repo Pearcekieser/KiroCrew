@@ -8967,6 +8967,7 @@
       "latest_classification": "Clasificación más reciente",
       "latest_decision": "Decisión más reciente",
       "limit_range": "Introduce un número entero entre {{min}} y {{max}}.",
+      "limit_range_duration": "Introduce un número entero entre {{min}} y {{max}} ({{duration}}).",
       "maximum_agent_turns": "Máximo de turnos del agente",
       "maximum_provider_errors": "Máximo de errores del proveedor",
       "maximum_runtime": "Tiempo máximo de ejecución en segundos",

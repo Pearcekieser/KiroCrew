@@ -8723,6 +8723,7 @@
       "latest_classification": "最新の分類",
       "latest_decision": "最新の判断",
       "limit_range": "{{min}} から {{max}} までの整数を入力してください。",
+      "limit_range_duration": "{{min}} から {{max}}（{{duration}}）までの整数を入力してください。",
       "maximum_agent_turns": "エージェント起動回数の上限",
       "maximum_provider_errors": "プロバイダーエラー数の上限",
       "maximum_runtime": "最大実行時間（秒）",

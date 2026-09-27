@@ -9089,6 +9089,7 @@
       "latest_classification": "Последняя классификация",
       "latest_decision": "Последнее решение",
       "limit_range": "Введите целое число от {{min}} до {{max}}.",
+      "limit_range_duration": "Введи целое число от {{min}} до {{max}} ({{duration}}).",
       "maximum_agent_turns": "Максимум запусков агента",
       "maximum_provider_errors": "Максимум ошибок провайдера",
       "maximum_runtime": "Максимальное время работы в секундах",

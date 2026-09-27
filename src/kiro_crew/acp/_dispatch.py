@@ -2245,7 +2245,17 @@ def _build_tool_result_event(update: dict[str, Any], cache_scope: str = "") -> A
             # only when Path 1 found nothing, which is what keeps a content block
             # winning over the raw envelope.
             if raw_output and "items" not in raw_output:
-                output_parts.append(_dumps_degraded(raw_output, default=str))
+                # Codex returns the MCP response inside result/error. Preserve
+                # its text framing; attribution still comes from the call.
+                mcp_result = raw_output.get("result")
+                mcp_text = (
+                    _mcp_content_text(mcp_result)
+                    if isinstance(mcp_result, dict) and raw_output.get("error") is None
+                    else None
+                )
+                output_parts.append(
+                    mcp_text if mcp_text is not None else _dumps_degraded(raw_output, default=str)
+                )
     tool_status = str(update.get("status") or "")
     if not output_parts:
         if tool_status not in TERMINAL_TOOL_STATUSES:

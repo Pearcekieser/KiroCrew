@@ -8723,6 +8723,7 @@
       "latest_classification": "最新分类",
       "latest_decision": "最新决策",
       "limit_range": "请输入 {{min}} 到 {{max}} 之间的整数。",
+      "limit_range_duration": "请输入 {{min}} 到 {{max}}（{{duration}}）之间的整数。",
       "maximum_agent_turns": "最大代理轮次",
       "maximum_provider_errors": "最大提供商错误数",
       "maximum_runtime": "最大运行时间（秒）",

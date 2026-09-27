@@ -149,7 +149,8 @@ The schemas in `validation.MONITOR_START_SCHEMA` and
 `validation.MONITOR_UPDATE_SCHEMA` bound the message, interval, cycle cap, and
 wall-clock budget. `mcp_tools.control.monitor_start` supplies bounded positive
 defaults from `mcp_tools._limits`; zero and negative cycle or runtime limits are
-rejected. The cap is a runaway backstop, not evidence that the watched work
+rejected. The operator ceiling is `monitoring.max_runtime_secs`; setting 2592000
+permits a 30-day request without extending existing loops. The cap is a runaway backstop, not evidence that the watched work
 completed: `AutoNudgeService._timer` deactivates a capped loop and emits
 `expired`.
 
@@ -164,8 +165,24 @@ patches its message or limits through `authorize_and_update_nudge`. It does
 not accept a loop identifier. `_monitor_update` refuses a new cap or budget
 that cannot yield another fire and never revives a manual pause as a side
 effect. It may re-arm a loop stopped by its own cycle cap or runtime budget
-only when the relevant bound is raised; the paused-loop and bound-revival
-tests in `test_autonudge_stop_auth.py` pin those distinctions.
+only when the relevant bound is raised, from a user turn or from the loop's own
+delivered wake; a wake cannot revive a loop a person stopped or paused. The
+paused-loop and bound-revival tests in `test_autonudge_stop_auth.py` pin those
+distinctions.
+
+A delivered wake may arm a monitor (`monitor_start`, `monitor_watch`) only
+while the loop that fired it is still its own: the wake carries that loop's id,
+and `apply_session_directive` reads the row back before the authorizer runs. A
+row that is gone (a prompt-loop Stop removes it) or that a person stopped (a
+retained `USER_STOP` record, a manual pause, an empty reason) refuses the arm; a
+row that is active, or that its own cycle cap, runtime budget, terminal subject
+or dropped sentinel deactivated, admits it, and the create-only and
+`replace_stopped` rules then decide as for any other arm. The self-arm tests in
+`test_autonudge_member_self_arm.py` and `test_monitor_directive_apply.py` pin
+the four answers. When the wake carries a loop id, its `monitor_update`,
+`monitor_stop`, and `autonudge_stop` directives apply only while that id is the
+monitor currently bound to the session; a replacement monitor is never mutated
+by the stale wake.
 
 `autonudge_stop` is deliberately non-confirming at tool-call time because the
 consumer applies it after the turn result is processed. The applier removes an

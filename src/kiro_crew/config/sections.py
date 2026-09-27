@@ -55,6 +55,7 @@ from kiro_crew.instances.constants import (
 )
 from kiro_crew.instances.constants import WARM_SET_CAP_AUTO as _WARM_SET_CAP_AUTO
 from kiro_crew.mcp_gateway.secret_uri import SECRET_URI_PREFIX
+from kiro_crew.monitoring.limits import DEFAULT_RUNTIME_CEILING_SECS, MAX_RUNTIME_CEILING_SECS
 from kiro_crew.stt.limits import DEFAULT_IDLE_EVICT_SECS as _STT_DEFAULT_IDLE_EVICT_SECS
 from kiro_crew.stt.limits import DEFAULT_PARTIAL_INTERVAL_MS as _STT_DEFAULT_PARTIAL_INTERVAL_MS
 from kiro_crew.stt.limits import DEFAULT_SILENCE_MS as _STT_DEFAULT_SILENCE_MS
@@ -6413,22 +6414,23 @@ class DecisionsConfig:
 
 @dataclass
 class MonitoringConfig:
-    """Which side justifies itself when a session picks a monitoring path.
+    """Monitor arming preference and finite wall-clock policy.
 
-    Two paths can watch the same pull request today and NEITHER is gated. The
-    probe-gated structured monitor (``monitor_watch``) and the per-interval
-    prompt loop (``monitor_start``) are both armable on a stock install, and
-    ``GET /api/monitors`` answers ``enabled`` from whether the service object
-    exists rather than from any key, so there has never been a switch that
-    turns the structured engine on or off.
-
-    What is genuinely unsettable is which of the two an arming takes, and the
-    reason is that no code chooses: the choice is made by the model reading the
-    two tool descriptions. So this section is read exactly where those
-    descriptions are built -- ``mcp_tools/control.py::schemas()`` -- and
-    nowhere else. That is the honest extent of it, and the help text below says
-    so rather than implying an enforcement this key does not have.
+    The preference changes tool guidance, not eligibility. The runtime ceiling
+    is enforced across tools, API mutations and persistence; raising it never
+    extends an existing loop's stored budget or creation time.
     """
+
+    max_runtime_secs: int = field(
+        default=DEFAULT_RUNTIME_CEILING_SECS,
+        metadata=_meta(
+            "Maximum monitoring runtime (seconds)",
+            "Finite wall-clock ceiling for new and updated monitors. Accepts up to "
+            "2592000 seconds (30 days). Raising this limit never extends an existing deadline.",
+            min=1,
+            max=MAX_RUNTIME_CEILING_SECS,
+        ),
+    )
 
     prefer_structured_arming: bool = field(
         default=False,

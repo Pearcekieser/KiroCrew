@@ -424,3 +424,62 @@ def test_monitor_inspect_admits_a_webex_session():
     payload = json.loads(result)
     assert payload["autonudge_loop"] == {"id": "lp-3", "active": True, "idle_secs": 300}
     getter.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        ("monitor_start", {"message": "Check the pull request and stop when ready."}),
+        (
+            "monitor_watch",
+            {
+                "kind": "github_pull_request",
+                "target": "https://github.com/acme/widgets/pull/7",
+                "objective": "review_ready",
+            },
+        ),
+    ],
+)
+@pytest.mark.parametrize(("ceiling", "expected"), [(3600, 3600), (2_592_000, 14_400)])
+def test_omitted_runtime_budget_defaults_within_the_operator_ceiling(
+    tool_name, args, ceiling, expected, gateway_posts, monkeypatch
+):
+    """A caller that sends no budget gets the default capped to the ceiling, so
+    a ceiling below the default never refuses a value nobody sent."""
+    monkeypatch.setattr(control, "runtime_ceiling_secs", lambda: ceiling)
+    with patch("kiro_crew.mcp_core._resolve_session_key_strict", return_value="dashboard:chat-1"):
+        result = getattr(control, tool_name)(tool_name, dict(args))
+
+    emitted = session_directive.decode(result, tool_name)
+    assert emitted is not None, result
+    assert emitted["max_runtime_secs"] == expected
+
+
+@pytest.mark.parametrize("tool_name", ["monitor_start", "monitor_watch"])
+def test_supplied_runtime_budget_is_passed_through_unclamped(tool_name, gateway_posts, monkeypatch):
+    """Only the omitted default is capped; a caller's own value reaches
+    validation as sent, so an over-ceiling request is refused rather than
+    silently shortened."""
+    monkeypatch.setattr(control, "runtime_ceiling_secs", lambda: 3600)
+    args = (
+        {"message": "Check the pull request and stop when ready."}
+        if tool_name == "monitor_start"
+        else {
+            "kind": "github_pull_request",
+            "target": "https://github.com/acme/widgets/pull/7",
+            "objective": "review_ready",
+        }
+    )
+    with patch("kiro_crew.mcp_core._resolve_session_key_strict", return_value="dashboard:chat-1"):
+        result = getattr(control, tool_name)(tool_name, {**args, "max_runtime_secs": 7200})
+
+    emitted = session_directive.decode(result, tool_name)
+    assert emitted is not None, result
+    assert emitted["max_runtime_secs"] == 7200
+
+
+def test_monitor_start_descriptor_advertises_the_capped_default(monkeypatch):
+    monkeypatch.setattr(control, "runtime_ceiling_secs", lambda: 3600)
+    schema = next(item for item in control.schemas() if item["name"] == "monitor_start")
+    description = schema["inputSchema"]["properties"]["max_runtime_secs"]["description"]
+    assert "(default 3600; configured max 3600)" in description

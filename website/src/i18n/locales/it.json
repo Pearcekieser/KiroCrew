@@ -8967,6 +8967,7 @@
       "latest_classification": "Classificazione più recente",
       "latest_decision": "Decisione più recente",
       "limit_range": "Inserisci un numero intero compreso tra {{min}} e {{max}}.",
+      "limit_range_duration": "Inserisci un numero intero compreso tra {{min}} e {{max}} ({{duration}}).",
       "maximum_agent_turns": "Turni massimi dell’agente",
       "maximum_provider_errors": "Errori massimi del provider",
       "maximum_runtime": "Durata massima in secondi",

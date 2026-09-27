@@ -8845,6 +8845,7 @@
       "latest_classification": "नवीनतम वर्गीकरण",
       "latest_decision": "नवीनतम निर्णय",
       "limit_range": "{{min}} से {{max}} तक की पूर्ण संख्या दर्ज करें।",
+      "limit_range_duration": "{{min}} से {{max}} ({{duration}}) तक की पूर्ण संख्या दर्ज करें।",
       "maximum_agent_turns": "अधिकतम एजेंट चरण",
       "maximum_provider_errors": "अधिकतम प्रदाता त्रुटियाँ",
       "maximum_runtime": "सेकंड में अधिकतम रनटाइम",

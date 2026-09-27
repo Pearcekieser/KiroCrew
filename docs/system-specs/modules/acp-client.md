@@ -2186,3 +2186,16 @@ tree by awaiting `process.wait()` for the same reason the real
 `terminate_windows_asyncio_tree` does — that await is what populates `returncode`,
 so a double returning without it would report the placeholder on Windows and hide
 the amendment behind its own unfaithfulness.
+
+### Codex MCP result envelopes
+
+The parser extracts `rawOutput.result.content` text from successful Codex MCP
+results before session-directive decoding. Call identity and raw arguments stay
+on the native MCP call, including calls issued through `functions.exec`. A
+result wrapper is not an identity source. The session consumer binds fallback
+delivery to the identified tool's arguments and the requesting session/turn.
+
+The Codex spawn environment sets `DISABLE_MCP_CONFIG_FILTERING=true` so the
+adapter honors the session's MCP overrides even when a global configuration
+contains the same server name. This applies to both create and load; it changes
+configuration precedence, not authentication or the sandbox's credential mask.

@@ -4144,8 +4144,23 @@
       "hasChildren": true,
       "enumValues": null,
       "defaultValue": {
+        "max_runtime_secs": 604800,
         "prefer_structured_arming": false
       }
+    },
+    {
+      "path": "monitoring.max_runtime_secs",
+      "kind": "core",
+      "type": "integer",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Maximum monitoring runtime (seconds)",
+      "help": "Finite wall-clock ceiling for new and updated monitors. Accepts up to 2592000 seconds (30 days). Raising this limit never extends an existing deadline.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": 604800
     },
     {
       "path": "monitoring.prefer_structured_arming",

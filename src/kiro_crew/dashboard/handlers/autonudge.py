@@ -30,6 +30,7 @@ from kiro_crew.dashboard.handlers.source_providers import (
     stale_owner_session_response,
 )
 from kiro_crew.dashboard.state import DashboardState
+from kiro_crew.monitoring.limits import runtime_ceiling_secs, validate_runtime_secs
 from kiro_crew.monitoring.models import (
     DEFAULT_MONITOR_AGENT_TURNS,
     DEFAULT_MONITOR_CADENCE_SECS,
@@ -39,7 +40,6 @@ from kiro_crew.monitoring.models import (
     MAX_MONITOR_AGENT_TURNS,
     MAX_MONITOR_CADENCE_SECS,
     MAX_MONITOR_PROVIDER_ERRORS,
-    MAX_MONITOR_RUNTIME_SECS,
     MAX_MONITOR_TOKENS,
     MAX_MONITOR_WAKE_INSTRUCTIONS_CHARS,
     MIN_MONITOR_CADENCE_SECS,
@@ -486,6 +486,10 @@ def _monitor_config(
             f"wake_instructions must be a string of at most "
             f"{MAX_MONITOR_WAKE_INSTRUCTIONS_CHARS} characters"
         )
+    # The operator ceiling bounds only a budget the caller SUPPLIED. The shipped
+    # default is itself capped to the ceiling, so a request that omits the field
+    # is accepted under any ceiling instead of failing on a number nobody sent.
+    runtime_ceiling = runtime_ceiling_secs()
     return MonitorState(
         kind=kind,
         target=target,
@@ -502,9 +506,9 @@ def _monitor_config(
             max_runtime_secs=_bounded_int(
                 body,
                 "max_runtime_secs",
-                DEFAULT_MONITOR_RUNTIME_SECS,
+                min(DEFAULT_MONITOR_RUNTIME_SECS, runtime_ceiling),
                 1,
-                MAX_MONITOR_RUNTIME_SECS,
+                runtime_ceiling,
             ),
             max_agent_turns=_bounded_int(
                 body,
@@ -654,6 +658,12 @@ async def api_monitor_slot_get(request: web.Request) -> web.Response:
                 if loop is not None and is_structured_monitor_loop(loop)
                 else None
             ),
+            # The LIVE operator ceiling (``monitoring.max_runtime_secs``), so the
+            # popover can bound its runtime input where the create/update
+            # handlers will actually accept it. The static contract carries only
+            # the absolute maximum any install may configure; a form validated
+            # against the contract alone can only fail as a post-submit 400.
+            "max_runtime_ceiling_secs": runtime_ceiling_secs(),
         }
     )
 
@@ -727,7 +737,6 @@ async def api_monitor_update(request: web.Request) -> web.Response:
             "target": body.get("target", current.target),
             "objective": body.get("objective", current.objective),
             "cadence_secs": body.get("cadence_secs", current.cadence_secs),
-            "max_runtime_secs": body.get("max_runtime_secs", current.budgets.max_runtime_secs),
             "max_agent_turns": body.get("max_agent_turns", current.budgets.max_agent_turns),
             "max_tokens": body.get("max_tokens", current.budgets.max_tokens),
             "max_provider_errors": body.get(
@@ -735,6 +744,11 @@ async def api_monitor_update(request: web.Request) -> web.Response:
             ),
             "wake_instructions": body.get("wake_instructions", current.wake_instructions),
         }
+        # Only a supplied budget is re-checked against the ceiling. The stored
+        # one is not merged in: it was accepted when written, and the load path
+        # owns a stored budget that sits outside the current policy.
+        if "max_runtime_secs" in body:
+            merged["max_runtime_secs"] = body["max_runtime_secs"]
         gitlab_hosts = await ensure_gitlab_hosts_loaded()
         config = _monitor_config(
             merged,
@@ -934,11 +948,18 @@ async def api_autonudge_start(request: web.Request) -> web.Response:
                 )
         idle_secs = int(body.get("idle_secs", 60))
         max_cycles = int(body.get("max_cycles", 0))
-        max_runtime_secs = int(body.get("max_runtime_secs", 0))
     except (TypeError, ValueError, OverflowError):
         return web.json_response(
             {"error": "idle_secs, max_cycles and max_runtime_secs must be integers"}, status=400
         )
+    # Bound-checked separately so an out-of-range integer is answered with the
+    # range that refused it, not with the type message above.
+    try:
+        max_runtime_secs = validate_runtime_secs(
+            body.get("max_runtime_secs", 0), allow_unbounded=True
+        )
+    except ValueError as exc:
+        return web.json_response({"error": str(exc), "code": "invalid_runtime_budget"}, status=400)
     # The gating opt-out has to exist HERE too, not only on the MCP tool: this is
     # ABSENT MEANS UNGATED on this route, unlike the monitor_start tool. This is a
     # GENERIC arming route: its only caller is the goal popover, where a person

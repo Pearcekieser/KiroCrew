@@ -374,6 +374,10 @@ from kiro_crew.memory_stores import (
     memory_store_name_defect,
 )
 
+# Runtime-budget policy and coercion live in the monitoring limits leaf module,
+# keeping the loader's compatibility facade free of duplicated bounds.
+from kiro_crew.monitoring.limits import coerce_runtime_ceiling
+
 # The speech-to-text defaults and the model catalog come from the package that
 # owns them, so the model menu this schema advertises cannot name a model that
 # cannot be downloaded, and a tuning knob cannot document a default the session
@@ -3892,6 +3896,13 @@ def _build_skills_config(skills_data: dict) -> SkillsConfig:
     )
 
 
+def _build_monitoring_config(data: dict, prefer_structured_arming: bool) -> MonitoringConfig:
+    return MonitoringConfig(
+        prefer_structured_arming=prefer_structured_arming,
+        max_runtime_secs=coerce_runtime_ceiling(data.get("max_runtime_secs")),
+    )
+
+
 def _build_session_summary_config(session_summary_data: dict) -> SessionSummaryConfig:
     return SessionSummaryConfig(
         enabled=bool(session_summary_data.get("enabled", False)),
@@ -4922,8 +4933,8 @@ class KiroCrewConfig:
                 connect_timeout_raw, instances_data, mint_timeout_raw
             ),
             heartbeat=HeartbeatConfig(default_deliver=heartbeat_default_deliver),
-            monitoring=MonitoringConfig(
-                prefer_structured_arming=monitoring_prefer_structured_arming
+            monitoring=_build_monitoring_config(
+                monitoring_data, monitoring_prefer_structured_arming
             ),
             decisions=DecisionsConfig.from_raw(decisions_data),
             skills=_build_skills_config(skills_data),

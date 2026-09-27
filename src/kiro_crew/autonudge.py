@@ -59,6 +59,7 @@ from kiro_crew.monitoring.decision import (
 # outcome ``MonitorObservation`` has no field for, so the marker is the reason code
 # the probe set, and a reason code belongs to the kind that emits it.
 from kiro_crew.monitoring.github_provider_errors import is_unattempted_probe
+from kiro_crew.monitoring.limits import validate_runtime_secs
 from kiro_crew.monitoring.models import (
     MONITOR_BUSY_RETRY_SECS,
     MONITOR_COMPLETION_EVIDENCE_TIMEOUT_SECS,
@@ -532,13 +533,20 @@ _TERMINAL_BOUND_REASONS = frozenset(
 # re-arm path re-validates the sentinel, so displacing this row is safe.
 SENTINEL_DROPPED_REASON = "sentinel_dropped"
 
+# Persisted reason for a loop ``_load`` deactivated because its stored runtime
+# budget is outside the current ``monitoring.max_runtime_secs`` policy.
+# System-imposed: the re-arm path validates the new budget against the live
+# ceiling, so displacing this row is safe.
+INVALID_RUNTIME_BUDGET_REASON = "invalid_runtime_budget"
+
 # Persisted reason for a paused loop that recorded no reason of its own —
 # ``update(active=False)`` stores this default.
 MANUAL_STOP_REASON = "manual"
 
 #: Stops the SYSTEM imposed on a legacy loop, which a directive re-arm may
 #: therefore displace: a lapsed approval, a spent bound, a finished subject, a
-#: dropped kill switch. Everything else — a manual pause (``"manual"``), a
+#: dropped kill switch, a stored budget outside the operator ceiling.
+#: Everything else — a manual pause (``"manual"``), a
 #: research tombstone (``AUTONUDGE_STOP_REASON``, consumed by the auto_research
 #: watchdog to tell deliberate completion from crash cleanup), and any reason
 #: this version does not know — is evidence some consumer may read, so it fails
@@ -546,6 +554,7 @@ MANUAL_STOP_REASON = "manual"
 _REPLACEABLE_LOOP_STOP_REASONS = _TERMINAL_BOUND_REASONS | {
     MONITOR_TERMINAL_REASON,
     SENTINEL_DROPPED_REASON,
+    INVALID_RUNTIME_BUDGET_REASON,
 }
 
 
@@ -1698,6 +1707,28 @@ class AutoNudgeService:
                         )
                         loop_values["config_generation"] = 0
                 loop = NudgeLoop(**loop_values)
+                # Whether the stored budget (legacy field or structured record)
+                # passes the live ceiling on THIS load; the policy hold below
+                # is released only when it does.
+                budget_within_policy = True
+                try:
+                    validate_runtime_secs(loop.max_runtime_secs, allow_unbounded=True)
+                except ValueError as exc:
+                    # Fail closed, but say so: the row is held inactive until a
+                    # person raises the ceiling or lowers the budget, and the
+                    # reason names which of the two to look at.
+                    budget_within_policy = False
+                    if loop.active:
+                        logger.warning(
+                            "AutoNudge: loop %s held inactive on load: its runtime "
+                            "budget %r is outside the current policy (%s)",
+                            redact_store_value(raw.get("id")),
+                            loop.max_runtime_secs,
+                            exc,
+                        )
+                    loop.active = False
+                    loop.stopped_reason = loop.stopped_reason or INVALID_RUNTIME_BUDGET_REASON
+                    self._store_dirty = True
                 # Rotated on EVERY load: a human may have hand-edited the goal while we
                 # were down, so a pre-restart token must not authorise overwriting it.
                 loop.goal_token = new_goal_token()
@@ -1763,6 +1794,7 @@ class AutoNudgeService:
                         loop.monitor = monitor_state_from_dict(monitor_raw)
                     except (TypeError, ValueError):
                         monitor_quarantined = True
+                        budget_within_policy = False
                         quarantine_needs_rewrite = loop.active or loop.next_due_ts != 0.0
                         loop.monitor = quarantine_monitor_state(monitor_raw)
                         loop.active = False
@@ -1773,6 +1805,34 @@ class AutoNudgeService:
                             loop.id,
                             exc_info=True,
                         )
+                    else:
+                        if (
+                            is_structured_monitor_loop(loop)
+                            and loop.monitor.version == MONITOR_STATE_VERSION
+                        ):
+                            # A policy check, not a shape check: the record is
+                            # well formed, so it keeps its budget and is held
+                            # inactive under the same reason as the legacy arm
+                            # above, never quarantined as malformed.
+                            _budget = loop.monitor.budgets.max_runtime_secs
+                            try:
+                                validate_runtime_secs(_budget)
+                            except ValueError as exc:
+                                budget_within_policy = False
+                                if loop.active:
+                                    logger.warning(
+                                        "AutoNudge: structured monitor %s held inactive on "
+                                        "load: its runtime budget %r is outside the current "
+                                        "policy (%s)",
+                                        loop.id,
+                                        _budget,
+                                        exc,
+                                    )
+                                loop.active = False
+                                loop.stopped_reason = (
+                                    loop.stopped_reason or INVALID_RUNTIME_BUDGET_REASON
+                                )
+                                self._store_dirty = True
                     if (
                         "gate" not in raw
                         and loop.monitor.version == MONITOR_STATE_VERSION
@@ -2014,6 +2074,19 @@ class AutoNudgeService:
                     if scrubbed_msg != loop.message:
                         loop.message = scrubbed_msg
                         self._store_dirty = True
+                if (
+                    not loop.active
+                    and loop.stopped_reason == INVALID_RUNTIME_BUDGET_REASON
+                    and budget_within_policy
+                    and (
+                        loop.monitor is None
+                        or (
+                            loop.monitor.version == MONITOR_STATE_VERSION
+                            and loop.monitor.outcome is None
+                        )
+                    )
+                ):
+                    self._release_policy_hold(loop)
                 if _is_torn_deactivation(loop):
                     # INACTIVE, NO stop reason, deadline still LIVE. No stop path
                     # of this service produces that shape: ``update`` clears the
@@ -2070,6 +2143,60 @@ class AutoNudgeService:
                         loop.monitor.next_probe_at = 0.0
                 self._store_dirty = True
         logger.info("AutoNudge: loaded %d loops", len(self._loops))
+
+    def _release_policy_hold(self, loop: NudgeLoop) -> None:
+        """Lift a policy hold whose stored budget the live ceiling admits again.
+
+        The hold recorded only ``INVALID_RUNTIME_BUDGET_REASON`` and left the
+        row's schedule in place, so lifting it restores the row as it was: the
+        deadline the user set still governs. The wall-clock budget is measured
+        from ``created_ts`` and is never re-anchored here — a row whose budget
+        ran out while it was held expires under the same reason the timer
+        would have recorded, instead of buying a resumed turn. Only the hold
+        itself is released; a manual pause or any other stop reason is not
+        this method's to touch (the caller checks the exact reason).
+        """
+        now = time.time()
+        state = loop.monitor
+        if state is None:
+            if runtime_budget_exceeded(loop, now):
+                loop.stopped_reason = "runtime_budget"
+                loop.next_due_ts = 0.0
+                logger.info(
+                    "AutoNudge: loop %s left its runtime-budget policy hold with its "
+                    "wall-clock budget already spent — expired, not resumed",
+                    loop.id,
+                )
+            else:
+                loop.active = True
+                loop.stopped_reason = ""
+                logger.info(
+                    "AutoNudge: loop %s resumed — its runtime budget %r is within the "
+                    "current policy again",
+                    loop.id,
+                    loop.max_runtime_secs,
+                )
+        else:
+            spent = monitor_budget_reason(state, now=now)
+            if spent:
+                loop.stopped_reason = ""
+                self._apply_monitor_budget_stop(loop, spent, stopped_at=now)
+                logger.info(
+                    "AutoNudge: structured monitor %s left its runtime-budget policy hold "
+                    "with a budget already spent (%s) — expired, not resumed",
+                    loop.id,
+                    spent,
+                )
+            else:
+                loop.active = True
+                loop.stopped_reason = ""
+                logger.info(
+                    "AutoNudge: structured monitor %s resumed — its runtime budget %r is "
+                    "within the current policy again",
+                    loop.id,
+                    state.budgets.max_runtime_secs,
+                )
+        self._store_dirty = True
 
     @classmethod
     async def load_for_maintenance(cls, base_dir: Path | None = None) -> "AutoNudgeService":
@@ -2587,6 +2714,7 @@ class AutoNudgeService:
                 # controller happens to hold.
                 if not kind_supports_objective(kind, objective):
                     raise ValueError(f"no monitored kind {kind!r} supports objective {objective!r}")
+                validate_runtime_secs(budgets.max_runtime_secs)
                 monitor = MonitorState(
                     kind=kind,
                     target=target,
@@ -2794,6 +2922,7 @@ class AutoNudgeService:
         loop_id: str | None = None,
         creation_surface: MonitorCreationSurface = MonitorCreationSurface.DASHBOARD,
     ) -> NudgeLoop:
+        validate_runtime_secs(max_runtime_secs, allow_unbounded=True)
         idle_secs = max(_MIN_IDLE_SECS, min(_MAX_IDLE_SECS, int(idle_secs)))
         async with self._lock:
             if admission_check is not None and not admission_check():
@@ -3119,10 +3248,17 @@ class AutoNudgeService:
         expected_generation: int | None = None,
         expect_fingerprint: str | None = None,
     ) -> NudgeLoop | None:
+        if max_runtime_secs is not None:
+            validate_runtime_secs(max_runtime_secs, allow_unbounded=True)
         async with self._lock:
             loop = self._loops.get(loop_id)
             if not loop:
                 return None
+            if active is True or (active is None and loop.active):
+                validate_runtime_secs(
+                    loop.max_runtime_secs if max_runtime_secs is None else max_runtime_secs,
+                    allow_unbounded=True,
+                )
             # ATOMIC generation fence (inside _lock, before any mutation): a
             # caller applying a structural-terminal stop passes the generation it
             # captured at fire time. If the loop's config generation has moved
@@ -4467,6 +4603,10 @@ class AutoNudgeService:
                 staged_state.budgets = MonitorBudgets(**values)
             elif budgets is not None:
                 staged_state.budgets = budgets
+            if budgets is not None or (
+                budget_patch is not None and "max_runtime_secs" in budget_patch
+            ):
+                validate_runtime_secs(staged_state.budgets.max_runtime_secs)
             if wake_instructions is not None:
                 staged_state.wake_instructions = wake_instructions
             if reset_baseline:

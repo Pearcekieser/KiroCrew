@@ -489,6 +489,25 @@ def decode(text: str, expected_tool: str) -> dict[str, Any] | None:
     return args if isinstance(args, dict) else {}
 
 
+def event_input_digest(tool: str, raw_args: Any, server: str, name: str) -> str:
+    """Select call arguments from an attributed ACP MCP envelope.
+
+    The MCP server hashes its arguments directly. Codex wraps those arguments
+    beside the adapter-resolved server and tool; unwrap only when both match
+    the independently attributed call. Never derive identity from this input.
+    """
+    if (
+        server == CORE_MCP_SERVER
+        and name == tool
+        and isinstance(raw_args, dict)
+        and raw_args.get("server") == server
+        and raw_args.get("tool") == name
+        and isinstance(raw_args.get("arguments"), dict)
+    ):
+        raw_args = raw_args["arguments"]
+    return call_input_digest(tool, raw_args)
+
+
 def call_input_digest(tool: str, raw_args: Any) -> str:
     """Digest of a tool CALL's raw arguments -- the out-of-band SELECTOR.
 

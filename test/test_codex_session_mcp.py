@@ -91,7 +91,7 @@ def agents_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(
         session_mcp,
         "managed_mcp_spec_entry",
-        lambda name: dict(managed[name]) if name in managed else None,
+        lambda name, **kwargs: dict(managed[name]) if name in managed else None,
     )
     monkeypatch.setattr(session_mcp, "_mcp_registry_mode", lambda: False)
     return d
@@ -3314,3 +3314,67 @@ def test_real_codex_acp_load_after_close_restores():
             "session/load succeeded after session/delete, so delete no longer disposes "
             "the thread and release has no verb that does\n" + context
         )
+
+
+def test_granted_dashboard_is_rebuilt_and_bound(agents_dir, monkeypatch):
+    _write_spec(
+        agents_dir,
+        servers={"kirocrew-dashboard": {"command": "/untrusted", "args": []}},
+        tools=["@kirocrew-dashboard"],
+    )
+    original = session_mcp.managed_mcp_spec_entry
+
+    def managed(name, **kwargs):
+        if name == "kirocrew-dashboard":
+            return {"command": "/opt/kirocrew", "args": ["mcp-dashboard"]}
+        return original(name)
+
+    monkeypatch.setattr(session_mcp, "managed_mcp_spec_entry", managed)
+    projection = codex_projection(
+        "kirocrew", session_key="dashboard:owner", session_token="issued-token"
+    )
+    dashboard = _by_name(projection.params["mcpServers"])["kirocrew-dashboard"]
+    assert dashboard["command"] == "/opt/kirocrew"
+    assert dashboard["args"] == ["mcp-dashboard"]
+    assert _env(dashboard)["KIROCREW_SESSION_KEY"] == "dashboard:owner"
+    assert "issued-token" in _env(dashboard).values()
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_dashboard_broker_mount_keeps_spec_restrictions(agents_dir, restricted):
+    entry = {"command": "/unused"}
+    if restricted:
+        entry["disabledTools"] = ["session_send"]
+    _write_spec(agents_dir, servers={"kirocrew-dashboard": entry}, tools=["@kirocrew-dashboard"])
+    projected = codex_projection(
+        "kirocrew",
+        stub_server_names=("kirocrew-dashboard",),
+        stub_elements=[_stub("kirocrew-dashboard")],
+    )
+    assert ("kirocrew-dashboard" in _by_name(projected.params["mcpServers"])) is not restricted
+
+
+@pytest.mark.parametrize(
+    "tools,entry",
+    [
+        ([], {"command": "/unused"}),
+        (["@kirocrew-dashboard"], {"command": "/unused", "disabled": True}),
+    ],
+)
+def test_dashboard_grant_is_not_created_by_identity(agents_dir, tools, entry):
+    _write_spec(agents_dir, servers={"kirocrew-dashboard": entry}, tools=tools)
+    projected = codex_projection(
+        "kirocrew",
+        session_key="dashboard:owner",
+        session_token="owner-token",
+        stub_server_names=("kirocrew-dashboard",),
+        stub_elements=[_stub("kirocrew-dashboard")],
+    )
+    assert "kirocrew-dashboard" not in _by_name(projected.params["mcpServers"])
+
+
+@pytest.mark.parametrize("ambient", [None, "false"])
+def test_codex_session_mount_outranks_unbound_global_config(ambient):
+    env = {} if ambient is None else {"DISABLE_MCP_CONFIG_FILTERING": ambient}
+    CodexHarness().apply_spawn_env(env)
+    assert env["DISABLE_MCP_CONFIG_FILTERING"] == "true"

@@ -658,3 +658,22 @@ Native Kiro CLI spawning also prepares a bounded skill discovery view, shared by
 the direct client and runtime. Its workspace settings suppress implicit native skill
 inheritance; authored mappings stay available to Crew scoped search/list/read.
 See [ACP client](acp-client.md#native-skill-startup-views).
+
+### Codex dashboard session mount
+
+For an agent explicitly granted `kirocrew-dashboard`, the Codex mirror rebuilds
+its direct launch from the gateway-managed entry and injects that session's
+identity. Both creation and resume use this projection. The Codex harness sets
+`DISABLE_MCP_CONFIG_FILTERING=true`: codex-acp otherwise drops a session entry
+when global Codex configuration declares the same name, leaving an unbound
+server in place of the verified mount. Spec-selected launchers
+never receive that identity. Disabled, ungranted and per-tool-restricted dashboard
+servers remain withheld. A granted gateway broker stub is also admitted through
+the same restriction checks; gatewayd verifies its claim and supplies per-call
+identity to the managed backend.
+
+On an enforced sandbox, credential-bearing host readers need the broker route:
+configure `mcp_gateway.stub_servers` to include `kirocrew-core` and
+`kirocrew-dashboard`. Direct children cannot read the gateway credential or SEL
+trust root there; the patch does not relax those masks. Global Codex MCP entries
+are not a substitute for this session mount.

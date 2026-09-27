@@ -1567,6 +1567,21 @@ purely to keep the kiro spec schema-clean; nothing in the fork resolves it.
 all times — after install, refresh, and any dashboard edit — or kiro-cli drops
 the agent and silently falls back to default.
 
+## Monitoring runtime policy
+
+`monitoring.max_runtime_secs` is the finite wall-clock ceiling shared by monitor
+MCP tools, API mutations and persisted monitor records. It defaults to 604800
+seconds; an operator may set up to 2592000 (30 days). Invalid config
+values fall back to the shipped ceiling, and `coerce_runtime_ceiling` logs a
+warning naming the rejected value and the fallback whenever a configured value
+is replaced (an unset key is the ordinary default and is silent). Validation
+errors quote the ceiling with a duration gloss, `(7 days)` for the default.
+`monitoring.limits` reads the live
+snapshot (or the loader in standalone MCP processes). Raising the ceiling does
+not change existing budgets, creation times, deadlines or the generic four-hour
+arming default. A PR-specific daily/30-day preference belongs in that
+installation's maintenance instructions and explicit new requests.
+
 ## Live config: one watcher, one applier registry
 
 `config/live.py` is the single mechanism by which a write to `config.json`

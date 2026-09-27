@@ -110,7 +110,8 @@ logger = logging.getLogger(__name__)
 # server the admin's catalog governs.
 #
 # PUBLIC on this module because the codex projection carries this session's
-# identity onto these two entries and onto NOTHING else, and the safety of that
+# identity onto these entries; an opt-in dashboard mount is rebuilt separately
+# by the Codex mirror before receiving identity. The safety of that
 # carriage rests on this being the set the loop below REPLACES from the managed
 # source: the element's command, args and env are Crew's own by construction, not
 # the spec's. The definition sits in the leaf so a consumer the agent-SDK import

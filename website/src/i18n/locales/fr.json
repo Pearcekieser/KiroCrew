@@ -8967,6 +8967,7 @@
       "latest_classification": "Dernière classification",
       "latest_decision": "Dernière décision",
       "limit_range": "Saisissez un nombre entier compris entre {{min}} et {{max}}.",
+      "limit_range_duration": "Saisis un nombre entier compris entre {{min}} et {{max}} ({{duration}}).",
       "maximum_agent_turns": "Nombre maximal de tours d’agent",
       "maximum_provider_errors": "Nombre maximal d’erreurs du fournisseur",
       "maximum_runtime": "Durée maximale en secondes",

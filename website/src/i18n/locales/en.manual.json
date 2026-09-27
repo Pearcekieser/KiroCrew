@@ -3373,6 +3373,7 @@
       "latest_classification": "Latest classification",
       "latest_decision": "Latest decision",
       "limit_range": "Enter a whole number from {{min}} to {{max}}.",
+      "limit_range_duration": "Enter a whole number from {{min}} to {{max}} ({{duration}}).",
       "maximum_agent_turns": "Maximum agent turns",
       "maximum_provider_errors": "Maximum provider errors",
       "maximum_runtime": "Maximum runtime in seconds",

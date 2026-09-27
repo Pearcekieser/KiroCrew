@@ -8845,6 +8845,7 @@
       "latest_classification": "Letzte Klassifizierung",
       "latest_decision": "Letzte Entscheidung",
       "limit_range": "Gib eine ganze Zahl zwischen {{min}} und {{max}} ein.",
+      "limit_range_duration": "Gib eine ganze Zahl zwischen {{min}} und {{max}} ({{duration}}) ein.",
       "maximum_agent_turns": "Maximale Agentenaufrufe",
       "maximum_provider_errors": "Maximale Anbieterfehler",
       "maximum_runtime": "Maximale Laufzeit in Sekunden",

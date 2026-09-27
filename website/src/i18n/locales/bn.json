@@ -8845,6 +8845,7 @@
       "latest_classification": "সর্বশেষ শ্রেণিবিন্যাস",
       "latest_decision": "সর্বশেষ সিদ্ধান্ত",
       "limit_range": "{{min}} থেকে {{max}}-এর মধ্যে একটি পূর্ণসংখ্যা লিখুন।",
+      "limit_range_duration": "{{min}} থেকে {{max}} ({{duration}})-এর মধ্যে একটি পূর্ণসংখ্যা লিখুন।",
       "maximum_agent_turns": "এজেন্ট পর্বের সর্বোচ্চ সংখ্যা",
       "maximum_provider_errors": "প্রোভাইডার ত্রুটির সর্বোচ্চ সংখ্যা",
       "maximum_runtime": "সেকেন্ডে সর্বোচ্চ চলার সময়",

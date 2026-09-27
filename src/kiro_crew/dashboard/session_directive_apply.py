@@ -85,6 +85,8 @@ _ARMING_DIRECTIVES = frozenset({"monitor_start", "monitor_watch"})
 # just running the previous text -- so the two share the mechanism and not the
 # wording.
 _REVISION_DIRECTIVES = frozenset({"monitor_update"})
+_STOP_DIRECTIVES = frozenset({"monitor_stop", "autonudge_stop"})
+_WAKE_BOUND_MUTATIONS = _REVISION_DIRECTIVES | _STOP_DIRECTIVES
 
 # Transcript row prefix for a refused arm. Fixed text so the frontend and tests
 # can match on it; the authorizer's reason follows the colon.
@@ -239,12 +241,15 @@ async def apply_session_directive(
     producer_is_user_facing: bool = False,
     producer_is_self_wake: bool = False,
     producer_is_channel: bool = False,
+    producer_wake_loop_id: str = "",
 ) -> str:
     """Apply directive *kind* with *args* to *slot*/*session_key*; return a
     confirmation string for the model. Fail-soft: any error is returned as a
     readable message, never raised. Every path emits a SEL audit event.
     ``slot`` is ``None`` for a channel (TurnDriver) caller — see the module
-    docstring."""
+    docstring. ``producer_wake_loop_id`` names the loop whose delivered wake
+    this turn is (set with ``producer_is_self_wake`` by ``_fire_dashboard_nudge``);
+    the arming gate reads that row to tell a live wake from a stale one."""
     if kind in _DASHBOARD_ONLY_DIRECTIVES and (
         slot is None or not has_dashboard_surface(session_key)
     ):
@@ -296,12 +301,25 @@ async def apply_session_directive(
     # loop bound to this very slot (marked by ``_fire_dashboard_nudge``) -- a
     # member's loop firing on the member's slot is the member keeping itself
     # awake, so the re-arm or revision it issues from inside that cycle is its
-    # own act. Everything else -- a cron injection, an app-driven turn, a
+    # own act -- with one exception, ``_refuse_stale_wake_arm``: a delivered
+    # wake can outlive a person's Stop, and that stale turn must not create a
+    # replacement automation. Reviving a loop a person stopped needs a new user
+    # request; a wake may revive a loop its own cycle cap or runtime budget
+    # deactivated, by raising that bound (``_monitor_update``).
+    # Everything else -- a cron injection, an app-driven turn, a
     # sub-agent sharing the slot -- carries neither mark and is refused. This is
     # NOT the user-surface gate below: ``set_project`` / ``reset_conversation``
     # stay human-only, a wake must never retarget the slot's project.
     self_arm_ok = bool(producer_is_user_facing or producer_is_self_wake)
     try:
+        if producer_is_self_wake and kind in _ARMING_DIRECTIVES:
+            _refuse_stale_wake_arm(session_key, producer_wake_loop_id)
+        elif producer_is_self_wake and producer_wake_loop_id and kind in _WAKE_BOUND_MUTATIONS:
+            _refuse_stale_wake_arm(
+                session_key,
+                producer_wake_loop_id,
+                require_current=True,
+            )
         if kind == "monitor_start":
             result = await _monitor_start(
                 state,
@@ -327,6 +345,7 @@ async def apply_session_directive(
                 args,
                 self_arm_ok=self_arm_ok,
                 producer_is_channel=producer_is_channel,
+                allow_rearm=not producer_is_self_wake,
             )
         elif kind == "monitor_stop":
             result = await _monitor_stop(slot, session_key, args)
@@ -390,6 +409,67 @@ def _structured_binding(session_key: str) -> str | None:
     from kiro_crew.autonudge import structured_monitor_binding_key_for
 
     return structured_monitor_binding_key_for(session_key)
+
+
+def _refuse_stale_wake_arm(
+    session_key: str,
+    wake_loop_id: str,
+    *,
+    require_current: bool = False,
+) -> None:
+    """Refuse stale-wake arms and mutations.
+
+    A delivered wake turn can outlive the Stop that ended its loop: a
+    prompt-loop Stop REMOVES the row, and a structured stop retains it as a
+    ``USER_STOP`` record. The wake carries its loop id
+    (``_fire_dashboard_nudge`` passes it with the self-wake mark), so the row
+    that fired this turn is read back here:
+
+    * row gone -> the loop was removed under the turn (a Stop, a session close):
+      refused, nothing may be created in its place;
+    * row present but stopped by a person -- a manual pause, a user stop, an
+      empty reason, anything ``_stopped_row_is_replaceable`` fails closed on
+      -> refused, the retained record is evidence;
+    * row present and active, or deactivated by its own cycle cap, runtime
+      budget, terminal subject, dropped sentinel or over-policy stored budget
+      -> admitted. The arm then meets the create-only and ``replace_stopped``
+      rules unchanged, so an active row still answers 409 and only a
+      system-imposed stop is displaced.
+
+    A wake that names no loop id (a caller outside the fire path) falls back to
+    the session's bound row, which answers the same three ways.
+    """
+    from kiro_crew.autonudge import _stopped_row_is_replaceable, get_instance
+
+    svc = get_instance()
+    if svc is None:
+        # The applier refuses a disabled host on its own, with its own wording.
+        return
+    if wake_loop_id:
+        row = svc.get_by_id(wake_loop_id)
+    else:
+        binding = _binding(session_key)
+        row = svc.get_by_slot(binding) if binding else None
+    if require_current:
+        binding = _binding(session_key)
+        current = svc.get_by_slot(binding) if binding else None
+        if current is None or getattr(current, "id", "") != wake_loop_id:
+            raise _DirectiveDenied(
+                "Monitor NOT changed: the loop that delivered this wake is no longer "
+                "this session's monitor; a new user request is required."
+            )
+    if row is None:
+        raise _DirectiveDenied(
+            "Monitor NOT armed: the loop that delivered this wake was stopped or "
+            "removed, so this turn may not start a replacement. A new user request "
+            "is required."
+        )
+    if not getattr(row, "active", False) and not _stopped_row_is_replaceable(row):
+        raise _DirectiveDenied(
+            "Monitor NOT armed: the loop that delivered this wake was stopped by a "
+            "person and is retained, so this turn may not start a replacement. A new "
+            "user request is required."
+        )
 
 
 async def _monitor_start(
@@ -590,6 +670,7 @@ async def _monitor_update(
     args: dict[str, Any],
     *,
     self_arm_ok: bool = False,
+    allow_rearm: bool = True,
     producer_is_channel: bool = False,
 ) -> str:
     from kiro_crew.autonudge import get_instance, is_structured_monitor_loop
@@ -610,6 +691,30 @@ async def _monitor_update(
     loop = svc.get_by_slot(binding)
     if not loop:
         raise _DirectiveDenied("No active monitor loop on this session to update.")
+    if not allow_rearm and not loop.active:
+        # SELF-WAKE REVIVAL: a delivered wake can outlive a Stop, so a stopped
+        # loop is NOT a wake's to revive -- with one exception the bound-revival
+        # rule below already owns. A legacy loop that deactivated on its OWN
+        # cycle cap or runtime budget (the ``_timer`` stamps exactly these two
+        # persisted reasons) was never stopped by a person, and a member's
+        # final-cycle wake raising that bound is the loop managing its own
+        # patrol lifecycle unattended. Everything else fails closed:
+        # a manual pause, a user stop, a structured record (terminal by
+        # contract, re-armed only by an explicit new watch), and an EMPTY
+        # reason (a pre-field pause or a torn write, which the cycle-count
+        # heuristic below may still read as a cap stop for a HUMAN turn but
+        # which a wake must not trust). The revival itself still runs through
+        # the bound-revival decision below, so a wake that does not raise the
+        # stopping bound is refused there like any other patch.
+        reason = str(getattr(loop, "stopped_reason", "") or "")
+        self_wake_revivable = not is_structured_monitor_loop(loop) and reason in {
+            "cycle_cap",
+            "runtime_budget",
+        }
+        if not self_wake_revivable:
+            raise _DirectiveDenied(
+                "Monitor NOT rearmed: this loop stopped; a new user request is required."
+            )
     # Read HERE, not at the write: ``get_by_slot`` hands back the LIVE row, so a token read
     # at the call site would already carry a concurrent rotation and never fail the compare.
     baseline_token = str(getattr(loop, "goal_token", "") or "")

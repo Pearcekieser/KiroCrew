@@ -4567,7 +4567,14 @@ export const api = {
   /** Structured monitor records include terminal outcomes for inspection. */
   monitorsList: (): Promise<{ enabled: boolean; monitors: unknown[] }> =>
     fetch('/api/monitors').then(j),
-  monitorForSlot: (slot: string): Promise<{ enabled: boolean; monitor: unknown | null }> =>
+  /** `max_runtime_ceiling_secs` is the LIVE operator ceiling
+   *  (`monitoring.max_runtime_secs`), which a default install sets far below the
+   *  contract's absolute maximum; the popover bounds its runtime input by it. */
+  monitorForSlot: (slot: string): Promise<{
+    enabled: boolean
+    monitor: unknown | null
+    max_runtime_ceiling_secs?: number
+  }> =>
     fetch('/api/monitors/slot/' + encodeURIComponent(slot)).then(j),
   monitorCreate: (body: Required<MonitorWrite>): Promise<MonitorResponse> =>
     post('/api/monitors', body).then(j) as Promise<MonitorResponse>,
