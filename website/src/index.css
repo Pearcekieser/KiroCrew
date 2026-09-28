@@ -21,9 +21,10 @@
    vite.config.ts (see `EDITION_SOURCE_MARKER` there), gated on the same
    KIROCREW_ALLOW_EDITION opt-in as the rest of the seam.
 
-   The utility ↔ token bridge (`@theme`, the `dark:`/`hover:` variants and the
+   The utility ↔ token bridge (`@theme`, the `dark:` variant and the
    safe-area utilities) lives in tailwind-theme.css so the phantom-classes gate
-   and the vitest theme guards can compile against it alone. */
+   and the vitest theme guards can compile against it alone. `hover:` keeps
+   Tailwind's default `@media (hover: hover)` gate; the note there says why. */
 @layer theme, base, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/preflight.css" layer(base);

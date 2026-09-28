@@ -685,7 +685,7 @@ function MemberRow({
           className={`absolute right-1 top-1/2 -translate-y-1/2 flex items-center justify-center w-6 h-6 rounded hover:bg-bg-hover transition-opacity ${
             view.starred
               ? 'opacity-100 text-accent'
-              : 'md:opacity-0 md:group-hover/row:opacity-100 md:focus-visible:opacity-100 text-muted'
+              : 'md:opacity-0 md:group-hover/row:opacity-100 [@media(hover:none)]:opacity-100 md:focus-visible:opacity-100 text-muted'
           }`}
           data-testid={`member-star-${view.slug}`}
         >

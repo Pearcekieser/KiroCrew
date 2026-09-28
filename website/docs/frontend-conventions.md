@@ -598,8 +598,11 @@ files own it:
   the runtime design token of the same stem, so `text-muted/40` renders a
   translucent `var(--muted)`. It also declares the `dark:` variant
   (`@custom-variant dark ([data-theme="dark"] …)`, so dark mode follows the
-  `data-theme` attribute rather than the OS media query alone), keeps `hover:` an
-  ungated `:hover` so touch devices still reach hover-revealed controls, and
+  `data-theme` attribute rather than the OS media query alone), leaves `hover:` at
+  Tailwind's default `@media (hover: hover)` gate (a tap that reveals content makes
+  iOS drop the click, so a hover-revealed control carries its own
+  `[@media(hover:none)]:` visible state instead; `src/test/hoverVariantPolicy.test.ts`
+  enforces it), and
   emits the iOS safe-area utilities (`p-safe`, `top-safe-offset-*`, …) as
   `@utility` blocks. Adding a utility for a new token means adding one
   `--color-<token>: var(--<token>)` line here; `scripts/check-phantom-classes.mjs`
