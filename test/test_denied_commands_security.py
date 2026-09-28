@@ -8368,14 +8368,31 @@ class TestSandboxEscapeSshSelf:
         command).  A forwarded-port target (container/VM at ``localhost:2222``)
         is denied by design, so the note must name that class and the operator
         recourse — otherwise the only discoverable option is abandoning the
-        command.  Content-pinned here because the note is the whole UX of this
-        floor: a reword that drops the retry hint reverts the review fix.
+        command.  A retry can itself land inside the background check, so a
+        refusal is only settled once it repeats after the check has had time to
+        finish; the note must say how long to keep retrying and what to use
+        instead after that (an unresolvable name, an IP address while the
+        address list cannot be read, or this machine).  The cases are labelled
+        so an agent can find its own without parsing a conditional sentence.
+        Content-pinned here because the note is the whole UX of this floor: a
+        reword that drops the retry hint reverts the review fix.
         """
         note = security._SELF_PROTECTION_FLOOR_NOTES[self._RULE]
+        assert note.startswith("Matched structurally on the command's argv")
+        assert "(1) PENDING, retry" in note
         assert "retry this exact command" in note
-        assert "PENDING" in note
-        assert "FORWARDED port" in note
+        assert "wait a minute, retry, and retry again a few seconds later" in note
+        assert "(2) Still refused after those retries" in note
+        # The minute in the note is the own-address worker's retry backoff: a
+        # retry sooner than that cannot start a new check after a failed one.
+        assert _argv_floor._OWN_HOST_RESOLVE_BACKOFF_SECS == 60.0
+        assert "ssh_config-only alias" in note
+        assert "address list cannot be read, so use a resolvable name" in note
+        assert "(3) FORWARDED port" in note
         assert "per-rule toggle in Settings" in note
+        # One line: the note is the refusal's second line, which the recovery
+        # card and the suite's ``_denied_by`` split on.
+        assert "\n" not in note
 
     @pytest.mark.parametrize(
         "cmd",
