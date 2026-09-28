@@ -1606,6 +1606,12 @@ button:hover .app-icon{--ico-a:var(--accent);--ico-b:var(--text)}
    The stroke is in the shared asset, so it applies on both palettes — on the
    dark surface a black edge against a near-black background is imperceptible,
    which is why no dark-theme override is needed. */
+/* The file-drop chomper (ChatDropOverlay, `.chat-drop-art`) has no baked stroke,
+   so light modes give it a 1px dark edge here. useTheme writes data-mode on
+   <html>, so installed palettes are covered and dark modes render unchanged.
+   Only an edition theme's own CSS can override it: chat-drop-art is not an
+   overrides.css hook, so the pack scoper drops rules that target it. */
+[data-mode="light"] .chat-drop-art{filter:drop-shadow(0 0 1px #000)}
 @property --glow-strength{syntax:'<number>';inherits:false;initial-value:0}
 @keyframes approval-glow{0%,100%{--glow-strength:0}50%{--glow-strength:1}}
 .approval-glow{--glow-strength:0;animation:approval-glow 2.5s ease-in-out infinite;box-shadow:0 0 0 1.5px color-mix(in srgb, var(--warn) calc(var(--glow-strength) * 55%), transparent),0 0 14px 1px color-mix(in srgb, var(--warn) calc(var(--glow-strength) * 40%), transparent)}

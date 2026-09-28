@@ -138,7 +138,7 @@ export default function ChatDropOverlay({
               alt=""
               draggable={false}
               aria-hidden="true"
-              className="h-[140px] w-[200px] select-none object-contain [will-change:transform]"
+              className="chat-drop-art h-[140px] w-[200px] select-none object-contain [will-change:transform]"
               animate={reduceMotion ? undefined : { y: [0, -5, 0], rotate: [-1, 1.2, -1] }}
               transition={reduceMotion ? undefined : {
                 duration: BOB_CYCLE_SECONDS,
