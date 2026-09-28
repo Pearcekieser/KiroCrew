@@ -66,6 +66,7 @@ import {
   type PasteBlock,
 } from '../utils/pasteTokens'
 import type { SendMode } from '../pages/chat/ChatSettings'
+import InlineMarkdownPlugin, { INLINE_MARKDOWN_THEME } from './InlineMarkdownPlugin'
 
 const CONTROLLED_SYNC_TAG = 'kirocrew-controlled-composer-sync'
 
@@ -87,6 +88,9 @@ interface LexicalComposerInputProps {
   /** Draw the browser's red spellcheck underlines under the input. Default true
    *  (Chromium's own default); the Settings composer toggle drives it off. */
   spellCheck?: boolean
+  /** Style bold, italic, strikethrough and inline code as the user types.
+   *  Display only: the value stays the markdown they typed. Default false. */
+  inlineMarkdown?: boolean
   className?: string
   controlRef?: React.MutableRefObject<ComposerControl | null>
   editorRef?: React.RefCallback<LexicalEditor> | React.RefObject<LexicalEditor | null | undefined>
@@ -599,6 +603,7 @@ export default function LexicalComposerInput({
   readOnly = false,
   sendOnEnter = 'enter',
   spellCheck = true,
+  inlineMarkdown = false,
   className = '',
   controlRef,
   editorRef,
@@ -614,6 +619,7 @@ export default function LexicalComposerInput({
   const initialConfig = useMemo(() => ({
     namespace: 'KiroCrewComposer',
     nodes: [PasteTokenNode],
+    theme: INLINE_MARKDOWN_THEME,
     editable: !disabled && !readOnly,
     editorState: () => $replaceComposerValue(initialValueRef.current.value, initialValueRef.current.blocks),
     onError(error: Error, _editor: LexicalEditor) {
@@ -656,6 +662,7 @@ export default function LexicalComposerInput({
           ErrorBoundary={LexicalErrorBoundary}
         />
         <HistoryPlugin />
+        <InlineMarkdownPlugin enabled={inlineMarkdown} />
         <ComposerControlPlugin
           controlRef={controlRef}
           onReady={onReady}

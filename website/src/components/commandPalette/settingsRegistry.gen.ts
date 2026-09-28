@@ -1355,6 +1355,18 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "chat.style-markdown-while-typing",
+    "label": "Style Markdown While Typing",
+    "labelKey": "pages.settings.chatPanel.inline_markdown_input",
+    "description": "Show bold, italic, strikethrough and inline code in the message input as you type. The markdown markers stay visible and the message you send is unchanged.",
+    "tab": "chat",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "composer"
+    }
+  },
+  {
     "id": "chat.subagent-effort",
     "label": "Subagent Effort",
     "labelKey": "pages.settings.chatPanel.subagent_effort",
