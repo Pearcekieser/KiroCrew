@@ -16,6 +16,7 @@ import { safeSetItem } from '../utils/safeStorage'
 import { offlineProps } from '../utils/offline'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useComposerSpellcheck } from '../hooks/useComposerSpellcheck'
+import { useComposerInlineMarkdown } from '../hooks/useComposerInlineMarkdown'
 import { useComposerSendMode } from '../hooks/useComposerSendMode'
 import TrustDropdown from './TrustDropdown'
 import { useIsMobile } from '../hooks/useIsMobile'
@@ -294,6 +295,7 @@ function ChatInput({
   // Read the composer-spellcheck preference here rather than as a prop, so every
   // render site of this component honours it and none can forget to pass it.
   const spellCheck = useComposerSpellcheck()
+  const inlineMarkdown = useComposerInlineMarkdown()
   // Same for the send-key mode: the stored preference is the fallback, not a
   // hardcoded 'enter'. A host omitting the prop (session-grid pane, side panel)
   // would otherwise send on plain Enter for a user who chose Ctrl/Cmd+Enter.
@@ -1015,6 +1017,7 @@ function ChatInput({
                 readOnly={optimizing}
                 sendOnEnter={sendOnEnter}
                 spellCheck={spellCheck}
+                inlineMarkdown={inlineMarkdown}
                 className={manualHeight !== null ? 'flex-1 min-h-0' : ''}
               />
             </Suspense>
