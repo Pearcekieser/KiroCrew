@@ -39,6 +39,7 @@ import {
   PASTE_COMMAND,
 } from 'lexical'
 import { INPUT_TYPO } from './PasteHighlightLayer'
+import { MacLineEdgePlugin } from './composerLineEdge'
 import { createImeLatch } from '../hooks/useImeGuard'
 import type { ComposerControl, ComposerSelection } from './composerControl'
 import {
@@ -618,6 +619,7 @@ export default function LexicalComposerInput({
         <OnChangePlugin onChange={handleChange} ignoreSelectionChange />
         <ControlledValuePlugin value={value} blocks={blocks} lastEmittedRef={lastEmittedRef} />
         <EditableStatePlugin editable={!disabled && !readOnly} />
+        <MacLineEdgePlugin />
         <InteractionPlugin
           blocks={blocks}
           onBlocksChange={onBlocksChange}
