@@ -3542,6 +3542,12 @@
       "from_app": "Sent by the {{app}} app",
       "delivery_failed": "Couldn't deliver your message — try again.",
       "from_app_tooltip": "This app posted a message into the chat — Kiro treats it as the app's words, not yours"
+    },
+    "promptLength": {
+      "near_tokens": "Prompt is ~{{used}} of the {{limit}} tokens this model accepts ({{pct}}).",
+      "over_tokens": "Prompt is ~{{over}} over the {{limit}}-token limit this model accepts. Trim it before sending.",
+      "sr_near": "Prompt is close to its length limit.",
+      "sr_over": "Prompt is over its length limit."
     }
   },
   "hooks": {

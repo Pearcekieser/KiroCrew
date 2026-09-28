@@ -41,6 +41,7 @@ import { isTouchDevice } from '../utils/isTouchDevice'
 import { useIsTouchDevice } from '../hooks/useIsTouchDevice'
 import { Btn, Slider } from './ui'
 import ErrorNotice from './ErrorNotice'
+import PromptLengthNotice from './PromptLengthNotice'
 import { useTouchPushToTalk } from '../hooks/useTouchPushToTalk'
 import { consumeComposerRelease, COMPOSER_EXPAND_EVENT } from '../pages/chat/composerFocus'
 import BusySendButton, { useBusySendMode, type BusySendMode } from './BusySendButton'
@@ -4482,6 +4483,8 @@ function ChatInput({
             </Btn>
           </div>
         )}
+
+        <PromptLengthNotice value={value} blocks={pasteBlocks} contextWindowTokens={contextWindowTokens} />
 
         {/* Bottom icon row */}
         <div className="flex items-center justify-between px-2.5 pb-2 pt-0.5">

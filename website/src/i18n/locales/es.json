@@ -9269,6 +9269,12 @@
       "from_app": "Enviado por la aplicación {{app}}",
       "delivery_failed": "No se pudo entregar tu mensaje. Inténtalo de nuevo.",
       "from_app_tooltip": "Esta app publicó un mensaje en el chat — Kiro lo trata como palabras de la app, no tuyas"
+    },
+    "promptLength": {
+      "near_tokens": "El prompt ocupa ~{{used}} de los {{limit}} tokens que acepta este modelo ({{pct}}).",
+      "over_tokens": "El prompt supera en ~{{over}} el límite de {{limit}} tokens de este modelo. Recórtalo antes de enviarlo.",
+      "sr_near": "El prompt está cerca de su límite de longitud.",
+      "sr_over": "El prompt supera su límite de longitud."
     }
   },
   "hooks": {
