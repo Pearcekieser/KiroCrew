@@ -8,16 +8,30 @@ import { PhoneSubContentDiv, PhoneSubTriggerDiv, usePhoneSubState } from './phon
 type DropdownMenuProps = React.ComponentProps<typeof DropdownMenuPrimitive.Root>
 
 /**
- * Radix `DropdownMenu.Root`, plus one rule: an open modal menu closes the
- * moment a file drag from outside the page enters the window, so the chat
- * composer's drop zone can receive the drop. The mechanism is documented on
- * `useCloseOnFileDrag`; `ContextMenu` applies the same rule.
+ * Radix `DropdownMenu.Root`, plus two rules.
+ *
+ * Non-modal by default on touch devices. A modal Radix menu sets
+ * `pointer-events: none` on `document.body` while open, so on a phone the
+ * first tap outside the menu only closes it and the control under the finger
+ * never gets the tap; the user has to tap again. Non-modal, Radix dismisses a
+ * touch outside on the tap's own `click`, after the tapped control has handled
+ * it, so one tap closes the menu and activates the control. Without the modal
+ * scroll lock the page behind can scroll; the menu stays anchored to its
+ * trigger while it does, the same as every Popover here. Mouse devices keep
+ * the modal default, and an explicit `modal` prop wins on every device.
+ *
+ * An open modal menu closes the moment a file drag from outside the page
+ * enters the window, so the chat composer's drop zone can receive the drop.
+ * The mechanism is documented on `useCloseOnFileDrag`; `ContextMenu` applies
+ * the same rule.
  *
  * Controlled (`open`) and uncontrolled (`defaultOpen`) usage both work: the
  * close goes through the same path as a click-outside, so `onOpenChange(false)`
  * fires for callers that track the state themselves.
  */
-function DropdownMenu({ open: openProp, defaultOpen, onOpenChange, modal = true, ...rest }: DropdownMenuProps) {
+function DropdownMenu({ open: openProp, defaultOpen, onOpenChange, modal: modalProp, ...rest }: DropdownMenuProps) {
+  const isTouch = useIsTouchDevice()
+  const modal = modalProp ?? !isTouch
   const isControlled = openProp !== undefined
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen ?? false)
   const open = isControlled ? openProp : uncontrolledOpen
