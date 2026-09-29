@@ -194,7 +194,7 @@ function ChatInput({
   pasteBlocks = [],
   onPasteBlocksChange,
   showFullPastes = false,
-  lexicalComposer = false,
+  lexicalComposer: lexicalComposerProp = false,
   knowledgeChip,
   autoFocusKey,
   inputAriaLabel,
@@ -265,6 +265,10 @@ function ChatInput({
   // render site of this component honours it and none can forget to pass it.
   const spellCheck = useComposerSpellcheck()
   const inlineMarkdown = useComposerInlineMarkdown()
+  // Live markdown styling needs rich text, which a textarea cannot draw, so the
+  // Style Markdown While Typing setting also opts this user into the Lexical
+  // composer. With the setting off (the default) the textarea path is unchanged.
+  const lexicalComposer = lexicalComposerProp || inlineMarkdown
   // Same for the send-key mode: the stored preference is the fallback, not a
   // hardcoded 'enter'. A host omitting the prop (session-grid pane, side panel)
   // would otherwise send on plain Enter for a user who chose Ctrl/Cmd+Enter.
@@ -437,7 +441,7 @@ function ChatInput({
     promptHistory.endBrowsing()
   }, [slotId, closePickers, promptHistory])
 
-  const { handleUndoKey, appendBoundary, endUndoBurst, removeFileEndingUndoBurst, removeDirEndingUndoBurst } = useUndoHistory({
+  const { handleUndoKey, stepUndoHistory, appendBoundary, endUndoBurst, removeFileEndingUndoBurst, removeDirEndingUndoBurst } = useUndoHistory({
     value, pasteBlocks, autoFocusKey, composerControl, pasteBlocksRef, valueFromUserRef, optimizingRef, onChange, onPasteBlocksChange, onRemoveFile, onRemoveDir, inputRef, ime,
   })
   const listContinuation = useTextareaListContinuation(pasteBlocksRef, ime, endUndoBurst)
@@ -467,6 +471,13 @@ function ChatInput({
     mirrorRef, hoverRef, pastePreviewPanelId, setPastePreviewPanelId, rawPasteRef,
     handleTokenKey, handlePaste, handleTextareaClick, handleSelectSnap, handleCopy, handleCut, handleFileInputChange,
   } = usePasteTokens({ value, onChange, pasteBlocks, onPasteBlocksChange, showFullPastes, onUploadFiles, inputRef, valueRef, valueFromUserRef, recordCaret, ime })
+  // The textarea's Cmd/Ctrl+Shift+Enter optimize chord, for the Lexical
+  // composer. Unset when the host opted out of the optimizer, so the chord
+  // falls through to the send rules there too.
+  const lexicalOptimizeChord = useMemo(
+    () => (promptOptimizer ? () => { if (connected) optimizePrompt() } : undefined),
+    [promptOptimizer, connected, optimizePrompt],
+  )
   const handleKeyDown = useComposerKeyDown({
     rawPasteRef, handleUndoKey, endUndoBurst, handleTokenKey, promptOptimizer, connected, optimizePrompt, sendOnEnter, onChange, optimizingRef,
     fireComposer, ime, sentMessages, onEditLastRequest, anyPickerOpenRef, promptHistory, valueRef, inputRef, pasteBlocksRef,
@@ -878,10 +889,12 @@ function ChatInput({
                 onBlocksChange={onPasteBlocksChange}
                 showFullPastes={showFullPastes}
                 onSend={fireComposer}
+                onOptimizeChord={lexicalOptimizeChord}
                 onUploadFiles={onUploadFiles}
                 controlRef={lexicalControlRef}
                 onReady={markLexicalReady}
                 onSelectionChange={publishLexicalSelection}
+                onHistoryStep={stepUndoHistory}
                 sentMessages={sentMessages}
                 historyScope={slotId}
                 onEditLastRequest={onEditLastRequest}

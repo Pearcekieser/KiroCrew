@@ -53,7 +53,9 @@ export interface ChatConfig {
   spellcheck: boolean
   /** Style bold, italic, strikethrough and inline code in the composer as the
    *  user types. Display only: the markers stay visible and the sent message is
-   *  the markdown they typed. Default false: it changes how every draft looks,
+   *  the markdown they typed. A textarea cannot draw styled text, so turning
+   *  this on also moves the user onto the Lexical composer (see ChatInput).
+   *  Default false: it changes how every draft looks,
    *  so it is the user's call rather than something a client with no stored
    *  config inherits. */
   inlineMarkdown: boolean
