@@ -42,6 +42,7 @@ import { useIsTouchDevice } from '../hooks/useIsTouchDevice'
 import { Btn, Slider } from './ui'
 import ErrorNotice from './ErrorNotice'
 import PromptLengthNotice from './PromptLengthNotice'
+import { useOverLimitSendConfirm } from './useOverLimitSendConfirm'
 import { useTouchPushToTalk } from '../hooks/useTouchPushToTalk'
 import { consumeComposerRelease, COMPOSER_EXPAND_EVENT } from '../pages/chat/composerFocus'
 import BusySendButton, { useBusySendMode, type BusySendMode } from './BusySendButton'
@@ -1718,6 +1719,12 @@ function ChatInput({
   // same steer, so the composer's own reading of "acting now" is unchanged.
   const steerActive = busyChoiceAvailable && (steerOnly || effectiveBusyMode !== 'queue')
   const steerAuto = busyChoiceAvailable && !steerOnly && effectiveBusyMode === 'auto'
+  const { pending: overLimitPending, intercept: interceptOverLimitSend } = useOverLimitSendConfirm(
+    value,
+    pasteBlocks,
+    contextWindowTokens,
+    slotId,
+  )
   /**
    * Fire the composer. `alternate === true` performs the OTHER busy action for
    * this one send — queue when the split button says steer, steer when it says
@@ -1738,6 +1745,8 @@ function ChatInput({
     // sends the complete text. Covers both Enter (handleKeyDown) and the Send
     // button, since both route through here.
     if (voiceTranscribing) return
+    // An over-limit prompt is held once; repeating the send confirms it.
+    if (interceptOverLimitSend()) { haptic('error'); return }
     const flip = alternate === true && busyChoiceAvailable && !steerOnly
     const steerNow = flip ? !steerActive : steerActive
     // A flipped send never asks: the chord is the sender answering the question
@@ -1749,7 +1758,7 @@ function ChatInput({
     if (value.trim() || pendingFiles.length || pendingSessions.length) haptic('light')
     if (steerNow && onSteer) onSteer(steerAuto && !flip ? { auto: true } : undefined)
     else onSend()
-  }, [disabled, voiceTranscribing, busyChoiceAvailable, steerOnly, steerActive, steerAuto, onSteer, onSend, value, pendingFiles.length, pendingSessions.length])
+  }, [disabled, voiceTranscribing, interceptOverLimitSend, busyChoiceAvailable, steerOnly, steerActive, steerAuto, onSteer, onSend, value, pendingFiles.length, pendingSessions.length])
   // Every stop button in the row goes through this, so the tap and the truthiness
   // checks on `onStop` (which decide whether a button renders at all) stay apart.
   const stopWithTap = useCallback(() => {
@@ -3052,6 +3061,9 @@ function ChatInput({
       // steer (default) acts on the text now; queue defers it.
       if (!ime.claimEnter(e)) return
       if (optimizingRef.current) return
+      // A held-down key's auto-repeat is not a second send: it would confirm an
+      // over-limit prompt the user never chose to send.
+      if (e.repeat) return
       // ⌘↩ / Ctrl+Enter while the busy split is showing performs the OTHER
       // action for this send (steer ↔ queue) — the Claude Code / Codex gesture.
       // Only in the `enter` send mode: in `ctrl-enter` the modified Enter IS the
@@ -4552,7 +4564,7 @@ function ChatInput({
           </div>
         )}
 
-        <PromptLengthNotice value={value} blocks={pasteBlocks} contextWindowTokens={contextWindowTokens} />
+        <PromptLengthNotice value={value} blocks={pasteBlocks} contextWindowTokens={contextWindowTokens} confirmPending={overLimitPending} />
 
         {/* Bottom icon row */}
         <div className="flex items-center justify-between px-2.5 pb-2 pt-0.5">

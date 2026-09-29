@@ -9111,7 +9111,9 @@
       "near_tokens": "提示约为此模型可接受的 {{limit}} 个 token 中的 {{used}} 个（{{pct}}）。",
       "over_tokens": "提示超出此模型 {{limit}} 个 token 的上限约 {{over}}。请先缩短再发送。",
       "sr_near": "提示接近长度上限。",
-      "sr_over": "提示超出长度上限。"
+      "sr_over": "提示超出长度上限。",
+      "held_tokens": "已暂缓发送。提示超出此模型 {{limit}} 个 token 的上限约 {{over}}。如仍要发送，请再次发送。",
+      "sr_confirm": "已暂缓发送：提示超出长度上限。如仍要发送，请再次发送。"
     }
   },
   "hooks": {

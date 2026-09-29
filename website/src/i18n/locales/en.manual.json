@@ -3638,7 +3638,9 @@
       "near_tokens": "Prompt is ~{{used}} of the {{limit}} tokens this model accepts ({{pct}}).",
       "over_tokens": "Prompt is ~{{over}} over the {{limit}}-token limit this model accepts. Trim it before sending.",
       "sr_near": "Prompt is close to its length limit.",
-      "sr_over": "Prompt is over its length limit."
+      "sr_over": "Prompt is over its length limit.",
+      "held_tokens": "Send held. Prompt is ~{{over}} over the {{limit}}-token limit this model accepts. Send again to send it anyway.",
+      "sr_confirm": "Send held: the prompt is over its length limit. Send again to send it anyway."
     }
   },
   "hooks": {

@@ -9363,7 +9363,9 @@
       "near_tokens": "Il prompt occupa ~{{used}} dei {{limit}} token accettati da questo modello ({{pct}}).",
       "over_tokens": "Il prompt supera di ~{{over}} il limite di {{limit}} token di questo modello. Accorcialo prima di inviarlo.",
       "sr_near": "Il prompt è vicino al suo limite di lunghezza.",
-      "sr_over": "Il prompt supera il suo limite di lunghezza."
+      "sr_over": "Il prompt supera il suo limite di lunghezza.",
+      "held_tokens": "Invio sospeso. Il prompt supera di ~{{over}} il limite di {{limit}} token di questo modello. Invia di nuovo per inviarlo comunque.",
+      "sr_confirm": "Invio sospeso: il prompt supera il suo limite di lunghezza. Invia di nuovo per inviarlo comunque."
     }
   },
   "hooks": {

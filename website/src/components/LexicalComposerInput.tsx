@@ -476,7 +476,9 @@ function InteractionPlugin({
           : !event.shiftKey
         if (!shouldSend) return false
         event.preventDefault()
-        if (!disabled && !readOnly) onSend()
+        // Auto-repeat of a held key is not a second send (it would confirm an
+        // over-limit prompt the user never chose to send).
+        if (!disabled && !readOnly && !event.repeat) onSend()
         return true
       },
       COMMAND_PRIORITY_HIGH,
