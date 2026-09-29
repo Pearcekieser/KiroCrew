@@ -1584,6 +1584,20 @@ mutating-kind denylist.
 
 ### Inert mentions of a permission verb (`security/argv_floor.py`)
 
+`BatchMode` contains the letters of `chmod` once case is folded, so an ordinary
+`ssh -o BatchMode=yes host /usr/bin/...` matches the permission rows' bare substrings.
+`_batchmode_option_only` in `security/perm_verb_mention.py` exempts that option
+alone, as a whole-command judgement on the same opted-in rows: the command must
+start with `ssh` or `scp`, and once the unquoted `-o BatchMode=yes|no` token is
+removed, every remaining character must be a letter, a digit, a space, one of
+`._/:@=,+-`, a plain quote, or the escaped double quote `\"`. No verb substring
+may remain once the quotes and that escape are dropped. Because this is an
+allowlist, no expansion, glob, separator, redirection, grouping or line
+continuation can assemble a verb. The catalog patterns are unchanged, so only a
+command of exactly that `ssh`/`scp` + `BatchMode` + allowlist shape changes
+disposition; everything else the bare substrings deny is still denied, including
+a glued spelling that expansion unglues (`x=xxchmod; ${x#xx} ...`).
+
 The catalog's `chmod`/`chown` rows are `re.search` patterns over the whole command
 text. A regex over text cannot tell a verb that RUNS from the same word handed to a
 search tool as a pattern, so an ordinary audit of those very rules was refused —

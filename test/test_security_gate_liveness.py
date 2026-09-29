@@ -74,12 +74,17 @@ def _url_payload_command(n: int) -> str:
 #: where this machine's address list cannot be read, so a refused agent knows when
 #: to stop retrying and what to use instead.
 #:
+#: Raised again, from 27,766, for the ssh/scp ``BatchMode`` exemption in
+#: ``perm_verb_mention.py``: case folding makes ``BatchMode`` spell a
+#: permission verb, and the exemption is a structural whole-command check rather
+#: than a rewrite of the catalog patterns, so every command denied before stays denied.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 27_766
+_PACKAGE_LINE_BUDGET = 27_789
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

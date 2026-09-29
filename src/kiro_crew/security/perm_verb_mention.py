@@ -502,3 +502,25 @@ def _perm_verb_mention_only(text_lower: str) -> bool:
                 if program and program not in _PERM_VERB_MENTION_PROGRAMS:
                     return False
     return found
+
+
+# ``BatchMode`` spells ``chmod`` once case is folded.  Only that ssh/scp
+# option is exempt, judged on the whole command by an ALLOWLIST: with the option
+# removed, every character must be a letter, a digit, a space, one of ``._/:@=,+-``,
+# a plain quote, or the escaped double quote ``\"``, and no verb substring may
+# remain once quotes and that escape are dropped.  No expansion, glob, separator,
+# redirection, grouping or line continuation can then assemble a verb.
+_BATCHMODE_PROGRAM_RE = re.compile(r"\A(?:[^ ]*/)?(?:ssh|scp)(?:\.exe)? ")
+_BATCHMODE_OPTION_RE = re.compile(r"(?<![^ ])-o ?batchmode=(?:yes|no)(?![^ ])")
+_BATCHMODE_ALLOWED_RE = re.compile(r"\A(?:[a-z0-9 ._/:@=,+'\"-]|\\\")*\Z")
+
+
+def _batchmode_option_only(text_lower: str) -> bool:
+    """True if every permission-verb substring sits inside an ssh BatchMode option."""
+    if not _BATCHMODE_PROGRAM_RE.match(text_lower):
+        return False
+    stripped, count = _BATCHMODE_OPTION_RE.subn(" ", text_lower)
+    if not count or not _BATCHMODE_ALLOWED_RE.match(stripped):
+        return False
+    glued = re.sub(r"\\\"|[\"']", "", stripped)
+    return not any(verb in glued for verb in _PERM_VERB_MENTION_VERBS)

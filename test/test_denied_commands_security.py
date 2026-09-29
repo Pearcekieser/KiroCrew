@@ -2793,6 +2793,75 @@ _CM = "ch" + "mod"
 _CO = "ch" + "own"
 
 
+def _perm_row_patterns() -> list[str]:
+    return [
+        r.pattern
+        for r in BUILTIN_DENIED_RULES
+        if r.id.startswith((f"local-destructive-{_CM}-", f"local-destructive-{_CO}-"))
+    ]
+
+
+class TestSshBatchModeOption:
+    """``BatchMode`` spells the verb under case folding; only that option is exempt."""
+
+    @pytest.mark.parametrize("root", ["usr", "etc", "sbin", "boot", "lib", "lib64"])
+    @pytest.mark.parametrize(
+        "prefix",
+        ["ssh -o BatchMode=yes", "/usr/bin/ssh -oBatchMode=no", "scp -o BatchMode=yes"],
+    )
+    def test_batchmode_option_is_not_a_permission_verb(self, prefix, root):
+        command = f"{prefix} remote.example /{root}/bin/example"
+        assert is_denied(command, denied_regexes=_perm_row_patterns()) is None
+
+    def test_contacts_read_through_the_hook(self, monkeypatch):
+        from kiro_crew.hooks import TOOL_DENY, HookManager
+
+        # Fixture host is remote. Isolate DNS; no SSH or osascript is executed.
+        monkeypatch.setattr(_argv_floor, "_resolved_host_verdict", lambda host, **kwargs: False)
+        monkeypatch.setattr(_argv_floor, "_NETLINK_ADDRS_PUBLISHED", True)
+        command = (
+            "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=8 user@remote.example "
+            '"/usr/bin/osascript -e \'tell application \\"Contacts\\" to count every person\'"'
+        )
+        result = HookManager().on_tool_call("Run command", command=command, is_shell=True)
+        assert result.action != TOOL_DENY, result.reason
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"x='xx{_CM} 777 ./file'; ${{x#xx}}",
+            f"x=xx{_CM}; ${{x#xx}} 755 /usr/bin/example",
+            f"x=xx{_CO}; ${{x#xx}} root /etc/example",
+        ],
+    )
+    def test_glued_expansion_spelling_stays_denied(self, command):
+        assert is_denied(command, denied_regexes=_perm_row_patterns()) is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"ssh -o BatchMode=yes remote.example '{_CM} 755 /usr/bin/example'",
+            f"ssh -o BatchMode=yes remote.example 'x=xx{_CM}; ${{x#xx}} 755 /usr/bin/example'",
+            "ssh -o BatchMode=yes remote.example c'h'mod 755 /usr/bin/example",
+            f"ssh -o BatchMode=yes remote.example; {_CO} root /etc/example",
+            f"ssh -o BatchMode=yes remote.example /usr/bin/true && {_CM} 777 ./file",
+            "echo -o BatchMode=yes /usr/bin/example",
+            "ssh -o 'BatchMode=yes' remote.example /usr/bin/example",
+            "ssh -o BatchMode=yes remote.example -o LocalCommand=/bin/ch?od 777 /usr/bin/x",
+            "ssh -o BatchMode=yes remote.example /bin/ch*d 755 /usr/bin/x",
+            "ssh -o BatchMode=yes remote.example; ch\\\nmod 777 /usr/bin/x",
+            "ssh -o BatchMode=yes remote.example ch\\\nown root /etc/example",
+            "ssh -o BatchMode=yes remote.example /usr/bin/example > /etc/x",
+        ],
+    )
+    def test_batchmode_does_not_cover_a_real_verb_or_another_program(self, command):
+        assert is_denied(command, denied_regexes=_perm_row_patterns()) is not None
+
+    def test_explicit_custom_substring_rule_keeps_its_meaning(self):
+        command = "ssh -o BatchMode=yes remote.example /usr/bin/true"
+        assert is_denied(command, denied_regexes=[f"{_CM}.*/usr/bin.*"]) is not None
+
+
 class TestPermissionVerbMentionNarrowing:
     """A permission verb handed to a SEARCH tool is text, not an action.
 
