@@ -6725,8 +6725,13 @@ class DashboardState:
         meta: dict | None = None,
         url: str | None = None,
         actions: list[dict[str, Any]] | None = None,
+        channel: str | None = None,
     ) -> None:
-        """Validate and deliver a legacy notification without raising."""
+        """Validate and deliver a legacy notification without raising.
+
+        ``channel`` overrides the system channel ``kind`` maps to (see
+        :func:`payload_from_legacy`); ``kind`` still reaches the frontend.
+        """
         _notifications_for(self).notify(
             self,
             kind,
@@ -6735,6 +6740,7 @@ class DashboardState:
             meta=meta,
             url=url,
             actions=actions,
+            channel=channel,
         )
 
     def _deliver_note(self, note: dict[str, Any]) -> None:

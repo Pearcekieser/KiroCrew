@@ -285,6 +285,7 @@ from kiro_crew.monitoring.models import (
     MonitorOutcome,
     monitor_state_public_dict,
 )
+from kiro_crew.notifications.bus import MONITOR_CHANNEL
 from kiro_crew.platform import boot_platform
 from kiro_crew.platform.context import (
     PlatformCompositionError,
@@ -8750,7 +8751,9 @@ class GatewayOrchestrator:
                 body = f"{body}\n\n{monitor.target}"
                 body, _ = redact_exfiltration_urls(body)
                 body, _ = redact_credentials(body)
-                self.dashboard_state.notify("agent", title, body, meta=meta)
+                self.dashboard_state.notify(
+                    "agent", title, body, meta=meta, channel=MONITOR_CHANNEL
+                )
                 return True
             capped_out = loop.max_cycles and loop.cycle_count >= loop.max_cycles
             # Every branch below except the terminal one explains why the loop stopped
@@ -8835,7 +8838,7 @@ class GatewayOrchestrator:
                     "goal may still be unmet. Reopen the goal popover to raise "
                     "the cap or restart it."
                 )
-            self.dashboard_state.notify("agent", title, body, meta=meta)
+            self.dashboard_state.notify("agent", title, body, meta=meta, channel=MONITOR_CHANNEL)
             return True
         except Exception:
             logger.debug("AutoNudge expiry notification failed", exc_info=True)
