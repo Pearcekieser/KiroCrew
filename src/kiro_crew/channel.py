@@ -141,6 +141,9 @@ CHANNEL_AGENT_BLOCKED_TOOLS: tuple[str, ...] = (
     "session_set_model",
     "session_send",
     "session_read_message",
+    # A digest of the same transcript `session_read_message` returns, so it is
+    # blocked for the same exfiltration reason.
+    "session_summary",
     # The fan-out verb, blocked for the reason `session_send` is and then some: one
     # call reaches every session the caller created, so a channel agent acting on
     # words from a thread other people are in would relay them into the user's

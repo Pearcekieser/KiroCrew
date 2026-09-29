@@ -4,13 +4,13 @@ One chat session can open, fork, seed, watch, stop and close another one, change
 another one under itself in the sidebar. The tools come from the
 `kirocrew-dashboard` MCP server, so an agent that does not mount that server
 never has them — exactly like any other MCP server. This page is the reference
-for all 21 of its tools, written for the agent that is about to use them.
+for all 22 of its tools, written for the agent that is about to use them.
 
 The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
 
 - **Session control** — `session_create`, `session_fork`, `session_send`,
-  `session_read_message`, `session_stop`, `session_set_model`, `session_close`,
-  `session_adopt`, `session_release`. These reach another session.
+  `session_read_message`, `session_summary`, `session_stop`, `session_set_model`,
+  `session_close`, `session_adopt`, `session_release`. These reach another session.
 - **Sidebar shape** — `chat_folder_tree`, `chat_folder_create`,
   `chat_folder_move`, `chat_folder_move_session`, `chat_folder_file_self`,
   `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`,
@@ -288,6 +288,46 @@ not re-read what it already saw. Two readings matter:
   rows this window did not reach — read again immediately instead of waiting.
 
 `wait`, then read. See [Monitor loops](monitor-loops.md) for the loop shape.
+
+### `session_summary`
+
+| Argument | Required | Meaning |
+|---|---|---|
+| `target` | yes | Session key, or its exact title |
+
+Returns the target's intent summary, the digest the dashboard's summary panel
+shows: each goal with its status, recent progress and next steps, then the
+session's recurring project notes. The reply is bounded: the ten most recently
+touched goals, the last five progress items and first five next steps of each,
+ten notes, and 500 characters per line, with a count of anything it left out. Use it when a patrol cycle needs to know what
+a peer is doing and a transcript tail would cost 20 rows to find out.
+
+```
+🧭 `chat-7` — fix the build (idle)
+Summary written 2026-09-29T21:40:12Z.
+- [in-progress] Get the build green
+    progress: 3 of 5 failing tests fixed
+    next: fix the two remaining snapshot tests
+```
+
+It is a cached read and never spends a model call. The dashboard writes the
+summary at turn end, and only when the operator has turned on
+`session_summary.enabled`, so three answers are normal:
+
+- Summaries are off: the reply says so. Use `session_read_message`.
+- No summary yet: a session with too few turns has none.
+- `STALE`: turns have landed since the summary was written. The digest still
+  describes the session, but anything newer is only in the transcript.
+
+It is authorized exactly as `session_read_message` is, because the summary is
+derived from the same transcript: a session you cannot read, you cannot
+summarize. The check runs again after the summary is read, so a session that
+gains a channel link or is replaced in between is refused (`target_replaced`)
+rather than answered. An incognito session never has one. Read-only.
+
+Each goal carries the panel's state word (`in-progress`, `needs-you`, `done`,
+`dropped`), so work that finished without being verified reads `needs-you`
+rather than done.
 
 ### `session_adopt` and `session_release`
 

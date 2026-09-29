@@ -438,8 +438,9 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     (
         "Session control read",
         "dashboard/session_control.py",
-        "Another session's transcript tail, served by "
-        "`GET /api/session-control/read` to the calling agent. Conversation "
+        "Another session's transcript tail and its cached intent summary, served by "
+        "`GET /api/session-control/read` and `GET /api/session-control/summary` to "
+        "the calling agent. Conversation "
         "content read off a live slot, so it can carry a credential a tool "
         "printed — the same output-boundary reason as the session-storage inventory "
         "below, with the reader being an LLM rather than the browser.",

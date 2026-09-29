@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import logging
 import re as _re
+import time
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
@@ -122,6 +123,7 @@ from kiro_crew.validation import (
     SESSION_SET_MODEL_SCHEMA,
     SESSION_STATUS_SCHEMA,
     SESSION_STOP_SCHEMA,
+    SESSION_SUMMARY_SCHEMA,
     validate_tool_args,
 )
 
@@ -148,6 +150,7 @@ SESSION_CONTROL_TOOLS: tuple[str, ...] = (
     "session_adopt",
     "session_release",
     "session_read_message",
+    "session_summary",
 )
 
 # The folder endpoints store ``name[:100]``. Mirroring the number here is what
@@ -887,6 +890,31 @@ def _tool_definitions() -> list[dict[str, Any]]:
                             "Return messages from this index onward — pass the ``next_since`` from "
                             "your previous read to get only new ones. Omit for the newest tail."
                         ),
+                    },
+                },
+                "required": ["target"],
+            },
+        },
+        {
+            "name": "session_summary",
+            "description": (
+                "Read another session's intent summary: the short digest the dashboard's "
+                "summary panel shows (each goal with its status, progress and next steps, "
+                "plus recurring project notes), and whether the session is still working. "
+                "Use it on a patrol cycle to learn what a peer is doing without paging its "
+                "transcript with session_read_message. It is a CACHED read and never spends "
+                "a model call: the dashboard writes the summary at turn end, only when the "
+                "operator has turned session summaries on, so it can be absent or `stale` "
+                "(older than the latest turns). Fall back to session_read_message for "
+                "anything newer or more exact. Authorized exactly as session_read_message "
+                "is. READ-only."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Session key from list_sessions, or its exact title.",
                     },
                 },
                 "required": ["target"],
@@ -1932,6 +1960,57 @@ def _resolve_folder_for_new_session(folder_ref: str, verb: str) -> tuple[str, st
     return fld_id, _chat_folder_paths(chat_folders).get(fld_id, fld_id), made_note, None
 
 
+def _summary_time(value: object) -> str:
+    """The sidecar's ``generated_at`` (a ``time.time()`` float) as UTC ISO-8601."""
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "at an unknown time"
+
+
+def _render_session_summary(resp: dict[str, Any]) -> str:
+    """Render a ``/api/session-control/summary`` body as compact text.
+
+    The route has already bounded and redacted every field; this only formats
+    it and says where the route left something out.
+    """
+    state_line = "still working" if resp.get("running") else "idle"
+    head = f"\U0001f9ed `{resp.get('target', '')}` — {resp.get('title', '')} ({state_line})"
+    if not resp.get("enabled"):
+        return (
+            f"{head}\nSession summaries are switched off on this gateway "
+            "(session_summary.enabled), so there is no digest to read. Use "
+            "session_read_message instead."
+        )
+    intents = [i for i in (resp.get("intents") or []) if isinstance(i, dict)]
+    if not intents:
+        return (
+            f"{head}\nNo summary has been written for this session yet (one is written "
+            "at turn end once the session has enough turns). Use session_read_message "
+            "instead."
+        )
+    when = _summary_time(resp.get("generated_at"))
+    stale = " — STALE: newer turns exist." if resp.get("stale") else "."
+    lines = [head, f"Summary written {when}{stale}"]
+    for intent in intents:
+        lines.append(f"- [{intent.get('state') or '?'}] {intent.get('title', '')}")
+        lines.extend(f"    progress: {p}" for p in intent.get("progress") or [])
+        if intent.get("progress_omitted"):
+            lines.append(f"    ({intent['progress_omitted']} earlier progress item(s) not shown)")
+        lines.extend(f"    next: {st}" for st in intent.get("next_steps") or [])
+        if intent.get("next_steps_omitted"):
+            lines.append(f"    ({intent['next_steps_omitted']} more next step(s) not shown)")
+    if resp.get("intents_omitted"):
+        lines.append(f"({resp['intents_omitted']} older intent(s) not shown.)")
+    notes = resp.get("constraints") or []
+    if notes:
+        lines.append("Project notes:")
+        lines.extend(f"- {n}" for n in notes)
+    if resp.get("constraints_omitted"):
+        lines.append(f"({resp['constraints_omitted']} more project note(s) not shown.)")
+    return "\n".join(lines)
+
+
 def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
     """Dispatch one validated tool call."""
     caller_key = ""
@@ -2348,6 +2427,13 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
             )
         )
         return "\n".join(read_lines)
+
+    if name == "session_summary":
+        args = validate_tool_args(args, SESSION_SUMMARY_SCHEMA)
+        resp = _get(f"/api/session-control/summary?target={quote(str(args['target']))}", caller_key)
+        if resp.get("error"):
+            return f"Error: could not read that session's summary: {resp['error']}"
+        return _render_session_summary(resp)
 
     if name == "chat_folder_tree":
         validate_tool_args(args, CHAT_FOLDER_TREE_SCHEMA)

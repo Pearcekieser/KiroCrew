@@ -4063,6 +4063,10 @@ handle immediately.
 #:   intended. No workspace state is altered.
 #: * ``session_read_message`` — read-only, and the verb the patrol loop actually
 #:   needs on a cycle with nobody at the keyboard. GRANTED.
+#: * ``session_summary`` — WITHHELD, though it is a read authorized exactly as
+#:   ``session_read_message`` is and returns a digest of the same transcript: a
+#:   verb is granted for a step, and no conductor step calls it yet. A skill that
+#:   adopts it for the patrol cycle adds it here with that step as the reason.
 #: * ``chat_folder_move_session`` — WITHHELD. It writes another session's
 #:   ``folder_id``: the PATCH goes to ``/api/chat/slots/<target>/folder`` where the
 #:   target is the session named in the ARGUMENTS, and the strictly-resolved

@@ -109,6 +109,7 @@ from kiro_crew.messaging.link import CHAT_TYPE_DIRECT, ChannelLink, parse_sessio
 from kiro_crew.messaging.transport import DM_TARGET_PREFIX, sole_direct_target
 from kiro_crew.security import redact, redact_and_truncate
 from kiro_crew.sel import sel
+from kiro_crew.session_summary import derive_state
 from kiro_crew.validation import (
     _MODEL_NAME_RE,
     BROADCAST_TARGET_ALLOWANCE_SECS,
@@ -132,6 +133,15 @@ DEFAULT_READ_MESSAGES = 20
 # Per-message content cap for reads, so pulling a transcript tail cannot return
 # a multi-megabyte tool payload verbatim.
 MAX_READ_CONTENT_CHARS = 4000
+
+# Bounds on a ``read_summary`` response. The stored summary caps intent and note
+# COUNTS at 50 but neither per-intent list lengths nor string lengths, so the
+# response is cut here, once, and says how much it left out. Intents arrive
+# most-recently-touched first, so the intent cut drops the oldest.
+MAX_SUMMARY_INTENTS = 10
+MAX_SUMMARY_ITEMS = 5
+MAX_SUMMARY_NOTES = 10
+MAX_SUMMARY_CHARS = 500
 
 # A cron run's own slot (``cron-<job_id>``, minted by ``inject_cron_result_to_dashboard``).
 CRON_SLOT_PREFIX = "cron-"
@@ -6282,4 +6292,136 @@ def read_messages(
         # a rewound transcript).
         "next_since": start + len(out),
         "messages": out,
+    }
+
+
+def _summary_text(value: object) -> str:
+    """One summary string, redacted and then cut to ``MAX_SUMMARY_CHARS``."""
+    text = value if isinstance(value, str) else ""
+    # Redact the whole string first (the helper's own order), then cut, so the
+    # marker reflects what the redacted text lost.
+    redacted = redact_and_truncate(text, len(text) * 4 + 256)
+    if len(redacted) <= MAX_SUMMARY_CHARS:
+        return redacted
+    return redacted[:MAX_SUMMARY_CHARS] + " …[truncated]"
+
+
+def _bounded_summary(payload: dict) -> dict[str, Any]:
+    """The fields a patrol reads, bounded, with a count of what each cut dropped.
+
+    Redaction runs on every emitted string through ``redact_and_truncate``, the
+    sink ``read_messages`` uses: the sidecar was redacted when written, and
+    re-redacting on the way out covers a scrubber rule added since.
+    """
+    raw_intents = [i for i in (payload.get("intents") or []) if isinstance(i, dict)]
+    intents: list[dict[str, Any]] = []
+    for intent in raw_intents[:MAX_SUMMARY_INTENTS]:
+        progress = [p for p in (intent.get("progress") or []) if isinstance(p, str)]
+        steps = [st for st in (intent.get("next_steps") or []) if isinstance(st, dict)]
+        intents.append(
+            {
+                "title": _summary_text(intent.get("title")),
+                # The panel's single word, not the raw progress axis: a
+                # ``completed`` intent that was never verified reads
+                # ``needs-you``, which is the case a patrol most needs to see.
+                "state": _summary_text(
+                    intent.get("state")
+                    or derive_state(str(intent.get("status") or ""), intent.get("verified"))
+                ),
+                # The latest progress is what a patrol needs; the next steps in
+                # the order the summarizer ranked them.
+                "progress": [_summary_text(p) for p in progress[-MAX_SUMMARY_ITEMS:]],
+                "progress_omitted": max(0, len(progress) - MAX_SUMMARY_ITEMS),
+                "next_steps": [_summary_text(st.get("what")) for st in steps[:MAX_SUMMARY_ITEMS]],
+                "next_steps_omitted": max(0, len(steps) - MAX_SUMMARY_ITEMS),
+            }
+        )
+    notes = [n for n in (payload.get("constraints") or []) if isinstance(n, str)]
+    return {
+        "intents": intents,
+        "intents_omitted": max(0, len(raw_intents) - MAX_SUMMARY_INTENTS),
+        "constraints": [_summary_text(n) for n in notes[:MAX_SUMMARY_NOTES]],
+        "constraints_omitted": max(0, len(notes) - MAX_SUMMARY_NOTES),
+    }
+
+
+async def read_summary(
+    state: "DashboardState",
+    *,
+    caller_session_key: str,
+    target: str,
+    caller_fenced: bool | None = None,
+) -> dict[str, Any]:
+    """Return *target*'s cached intent summary, the one the side panel shows.
+
+    Authorized by the gate :func:`read_messages` uses (``authorize_target``):
+    the summary is derived from the transcript, so a caller that may not read
+    the transcript may not read its digest either. ``operation`` only labels
+    the audit line, so a refusal reads as ``session_control.summary``.
+
+    A cache read only. It never generates, so it never spends a model call:
+    summaries are written at turn end by the background pass, or on the panel's
+    explicit POST, and neither is reachable from here. Gated on
+    ``session_summary.enabled`` like the panel GET, so switching the feature
+    off stops serving sidecars written while it was on.
+
+    The ``authorize_target`` gate runs before the first suspension, so the
+    handler's ``prewarm_enabled_check`` stays valid across it.
+    """
+    # Late import: chat_summary pulls in the chat package, which imports this
+    # module at load time.
+    from kiro_crew.dashboard.chat_summary import read_cached_intent_summary
+
+    def _authorize(*, recheck: bool) -> "_ChatSlot":
+        return authorize_target(
+            state,
+            caller_session_key=caller_session_key,
+            target=target,
+            operation="summary",
+            skip_enabled_check=recheck,
+            precomputed_ownership_fenced=caller_fenced,
+        )
+
+    slot = _authorize(recheck=False)
+    running = bool(slot.running or getattr(slot, "_in_stage_execution", False))
+
+    cfg = await asyncio.to_thread(KiroCrewConfig.load)
+    enabled = bool(cfg.session_summary.enabled)
+    payload: dict | None = None
+    stale = False
+    log = state.conversation_log
+    if enabled and log is not None:
+        payload, stale = await read_cached_intent_summary(log, slot)
+    # Both reads above suspend, the sidecar read for as long as the transcript
+    # lock's acquire ceiling. The caller or the target can gain a channel link
+    # or a mirror in that window, so the gate runs again, synchronously, before
+    # anything is returned, and the answer must still be the same slot.
+    if _authorize(recheck=True) is not slot:
+        raise SessionControlError(
+            "the target session was replaced while its summary was read; try again",
+            status=409,
+            code="target_replaced",
+        )
+    bounded = _bounded_summary(payload or {})
+
+    _audit(
+        caller_session_key=caller_session_key,
+        operation="summary",
+        slot_key=slot.key,
+        outcome="allowed",
+        detail={
+            "enabled": enabled,
+            "present": payload is not None,
+            "intents": len(bounded["intents"]),
+        },
+    )
+    return {
+        "ok": True,
+        "target": slot.key,
+        "title": sanitize_outbound(slot.display_title),
+        "running": running,
+        "enabled": enabled,
+        "stale": stale,
+        "generated_at": (payload or {}).get("generated_at"),
+        **bounded,
     }

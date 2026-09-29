@@ -94,8 +94,9 @@ Both sidecars are reaped by `delete_session`, which is contractually a permanent
 removal: a deleted session must leave no orphaned model-generated text on disk.
 Their user-facing reads validate the transcript's derivation policy through
 `ConversationLog.derivation_hold` while holding the transcript lock; the intent
-panel's GET and the POST's read-back share one helper
-(`chat_handlers._read_intent_summary_if_derivation_is_allowed`), so a `.intents`
+panel's GET, the POST's read-back and the `session_summary` MCP tool's
+`GET /api/session-control/summary` share one helper
+(`chat_summary.read_cached_intent_summary`), so a `.intents`
 file left by the key's earlier persistent life is never served bare to a slot that
 is now restricted. Each writer revalidates through
 `ConversationLog.publication_hold` immediately after the model call and keeps that

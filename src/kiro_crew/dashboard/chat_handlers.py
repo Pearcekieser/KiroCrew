@@ -97,7 +97,7 @@ from kiro_crew.dashboard.chat_runner import (
     context_entry_expired,
     schedule_eager_spawn,
 )
-from kiro_crew.dashboard.chat_summary import generate_session_summary
+from kiro_crew.dashboard.chat_summary import generate_session_summary, read_cached_intent_summary
 from kiro_crew.dashboard.chat_tags import (
     _bump_slot_tags_revision,
     tags_write_lock,
@@ -194,12 +194,8 @@ from kiro_crew.dashboard.system_notices import SESSION_RELOAD_KIND, is_system_no
 from kiro_crew.dashboard.turn_dispatch import spawn_guarded_turn
 from kiro_crew.history import (
     HUMAN_TURN_META_KEY,
-    ConversationLog,
-    TranscriptBusy,
     carry_provenance,
     is_incognito_transcript,
-    transcript_lock_stems,
-    transcript_withholds_derivation,
 )
 from kiro_crew.history_projection import TranscriptRevisionChanged
 from kiro_crew.jsonl_util import OversizedRecord, SplitlinesBoundaryRecord
@@ -1843,7 +1839,7 @@ async def api_chat_slot_summary(request: web.Request) -> web.Response:
     # stop serving summaries, not just stop producing them, or a sidecar written
     # during an earlier opt-in keeps being returned after opt-out.
     if enabled and log is not None:
-        payload, stale = await _read_intent_summary_if_derivation_is_allowed(log, slot)
+        payload, stale = await read_cached_intent_summary(log, slot)
 
     body: dict = {
         "enabled": enabled,
@@ -1856,38 +1852,6 @@ async def api_chat_slot_summary(request: web.Request) -> web.Response:
         "generate_state": _generate_state(cfg, slot),
     }
     return web.json_response(body)
-
-
-async def _read_intent_summary_if_derivation_is_allowed(
-    log: ConversationLog, slot: Any
-) -> tuple[dict | None, bool]:
-    """Read *slot*'s ``.intents`` sidecar only if its transcript may be derived from.
-
-    The one read both summary routes use: the sidecar is itself derived from
-    the transcript, so it is served under the same two gates as the transcript
-    -- the live slot's mode, and the on-disk line validated while holding the
-    same physical lock as metadata writers. A ``.intents`` file can outlive the
-    persistent life that wrote it (the key is recreated restricted; the sidecar
-    stays, by design, for a later persistent holder), and
-    ``read_intent_summary`` reports its signature mismatch as ``stale`` rather
-    than dropping it, so a bare read would hand a restricted session its
-    predecessor's summary. Unreadable fails closed; a lock timeout is the same
-    empty result.
-    """
-    if is_incognito_transcript(getattr(slot, "memory_mode", "")):
-        return None, False
-    history_key = slot_history_key(slot)
-
-    def _read() -> tuple[dict | None, bool]:
-        with log.derivation_hold(transcript_lock_stems(history_key)):
-            if transcript_withholds_derivation(log, history_key):
-                return None, False
-            return log.read_intent_summary(history_key)
-
-    try:
-        return await asyncio.to_thread(_read)
-    except TranscriptBusy:
-        return None, False
 
 
 def _generate_state(cfg: KiroCrewConfig, slot: Any) -> str:
@@ -2009,7 +1973,7 @@ async def api_chat_slot_summary_generate(request: web.Request) -> web.Response:
     # the same gated read as the GET: a pass the generator skipped for
     # ``memory_mode`` must not be answered with a sidecar left over from the
     # key's earlier persistent life.
-    payload, stale = await _read_intent_summary_if_derivation_is_allowed(log, slot)
+    payload, stale = await read_cached_intent_summary(log, slot)
     if payload is None:
         return web.json_response(
             {"error": "could not summarize this session", "code": "summary_unavailable"},
