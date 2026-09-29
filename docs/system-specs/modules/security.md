@@ -1585,6 +1585,23 @@ mutating-kind denylist.
 
 ### Inert mentions of a permission verb (`security/argv_floor.py`)
 
+An option key can spell a permission verb once case is folded: `BatchMode`
+contains `chmod`, so an ordinary `ssh -o BatchMode=yes host /usr/bin/...` matches
+the permission rows' bare substrings. A key is never executed, so
+`_option_key_mention_only` in `security/perm_verb_mention.py` drops such a key before
+the same opted-in rows are read. The rule is structural and not tied to any program.
+A key is an unquoted run of letters and digits right after `-o `, `-o` or `--` and
+before `=`. It is dropped only when every verb in it is embedded mid-word, with
+letters or digits on both sides. A key that is the verb or starts or ends on it
+(`rsync --chmod=777 ...`) still counts, and so does every value
+(`--rsync-path=chmod`). The whole command must pass an allowlist: every character
+must be a letter, a digit, a space, one of `._/:@=,+-`, a plain quote, or the
+escaped double quote `\"`. With the embedding keys removed and those quotes
+dropped, no verb substring may remain. Because this is an allowlist, no expansion,
+glob, separator, redirection, grouping or line continuation can assemble a verb.
+The catalog patterns are unchanged. A command's disposition changes only when every permission-verb hit it had sat in an embedded key, and the command without those keys
+is one the rows already allow.
+
 The catalog's `chmod`/`chown` rows are `re.search` patterns over the whole command
 text. A regex over text cannot tell a verb that RUNS from the same word handed to a
 search tool as a pattern, so an ordinary audit of those very rules was refused —

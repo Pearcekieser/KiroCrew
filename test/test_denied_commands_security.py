@@ -2793,6 +2793,129 @@ _CM = "ch" + "mod"
 _CO = "ch" + "own"
 
 
+def _perm_row_patterns() -> list[str]:
+    return [
+        r.pattern
+        for r in BUILTIN_DENIED_RULES
+        if r.id.startswith((f"local-destructive-{_CM}-", f"local-destructive-{_CO}-"))
+    ]
+
+
+def _perm_denied(command: str) -> bool:
+    return is_denied(command, denied_regexes=_perm_row_patterns()) is not None
+
+
+# An interpreter that joins the verb at run time never spells it, so the rows
+# allow this remote command with or without an embedded option key.
+_PERL_JOIN = '"perl -e \'system \\"ch\\".\\"mod 777 /usr/bin/x\\"\'"'
+
+
+class TestOptionKeyVerbMention:
+    """A verb embedded mid-word in an option KEY is not a permission change.
+
+    ``BatchMode`` spells the verb under case folding.  The rule is structural, not
+    ssh-specific: keys are never executed, so a key that merely embeds the verb is
+    dropped before the rows are read, while a key that IS the verb, or starts or
+    ends on it, and every value still count.
+    """
+
+    @pytest.mark.parametrize("root", ["usr", "etc", "sbin", "boot", "lib", "lib64"])
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "ssh -o BatchMode=yes",
+            "/usr/bin/ssh -oBatchMode=no",
+            "scp -o BatchMode=yes",
+            "ssh -oBATCHMODE=yes",
+        ],
+    )
+    def test_embedded_key_is_not_a_permission_verb(self, prefix, root):
+        assert not _perm_denied(f"{prefix} remote.example /{root}/bin/example")
+
+    def test_contacts_read_through_the_hook(self, monkeypatch):
+        from kiro_crew.hooks import TOOL_DENY, HookManager
+
+        # Fixture host is remote. Isolate DNS; no SSH or osascript is executed.
+        monkeypatch.setattr(_argv_floor, "_resolved_host_verdict", lambda host, **kwargs: False)
+        monkeypatch.setattr(_argv_floor, "_NETLINK_ADDRS_PUBLISHED", True)
+        command = (
+            "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=8 user@remote.example "
+            '"/usr/bin/osascript -e \'tell application \\"Contacts\\" to count every person\'"'
+        )
+        result = HookManager().on_tool_call("Run command", command=command, is_shell=True)
+        assert result.action != TOOL_DENY, result.reason
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"rsync --{_CM}=777 f /usr/bin/dest",
+            f"rsync --{_CM}=u+x f /usr/bin/dest",
+            f"ssh -o {_CO}=root remote.example /etc/example",
+            f"tool --{_CM}x=1 /usr/bin/example",
+            f"tool --x{_CM}=1 /usr/bin/example",
+            f"tool --{_CO}er=1 /etc/example",
+            f"tool --opt={_CM} /usr/bin/example",
+            f"rsync --rsync-path={_CM} 777 /usr/bin/x host:",
+        ],
+    )
+    def test_key_on_a_verb_boundary_or_a_verb_value_stays_denied(self, command):
+        assert _perm_denied(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"x='xx{_CM} 777 ./file'; ${{x#xx}}",
+            f"x=xx{_CM}; ${{x#xx}} 755 /usr/bin/example",
+            f"x=xx{_CO}; ${{x#xx}} root /etc/example",
+        ],
+    )
+    def test_glued_expansion_spelling_stays_denied(self, command):
+        assert _perm_denied(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"ssh -o BatchMode=yes remote.example '{_CM} 755 /usr/bin/example'",
+            f"ssh -o BatchMode=yes remote.example 'x=xx{_CM}; ${{x#xx}} 755 /usr/bin/example'",
+            "ssh -o BatchMode=yes remote.example c'h'mod 755 /usr/bin/example",
+            f"ssh -o BatchMode=yes remote.example; {_CO} root /etc/example",
+            f"ssh -o BatchMode=yes remote.example /usr/bin/true && {_CM} 777 ./file",
+            "ssh -o 'BatchMode=yes' remote.example /usr/bin/example",
+            "ssh -o BatchMode=yes remote.example -o LocalCommand=/bin/ch?od 777 /usr/bin/x",
+            "ssh -o BatchMode=yes remote.example /bin/ch*d 755 /usr/bin/x",
+            "ssh -o BatchMode=yes remote.example; ch\\\nmod 777 /usr/bin/x",
+            "ssh -o BatchMode=yes remote.example ch\\\nown root /etc/example",
+            "ssh -o BatchMode=yes remote.example /usr/bin/example > /etc/x",
+            "ssh -o BatchMode=yes remote.example $(printf ch)mod 755 /usr/bin/x",
+            "ssh -o BatchMode=yes remote.example `printf ch`mod 755 /usr/bin/x",
+            "ssh -o BatchMode=yes -o LocalCommand=ch'mod' remote.example 755 /usr/bin/x",
+        ],
+    )
+    def test_embedded_key_does_not_cover_a_real_verb(self, command):
+        assert _perm_denied(command)
+
+    @pytest.mark.parametrize(
+        "remote",
+        [
+            "/usr/bin/example",
+            "/etc/hosts",
+            _PERL_JOIN,
+            f"{_CM} 755 /usr/bin/example",
+            "c'h'mod 755 /usr/bin/example",
+            f"x=xx{_CM}; ${{x#xx}} 755 /usr/bin/example",
+        ],
+    )
+    def test_dropping_the_embedded_key_matches_the_verdict_without_it(self, remote):
+        # Base equivalence: adding ``-o BatchMode=yes`` never allows a command the
+        # rows deny without it.  The only verdict it can change is its own false hit.
+        without = _perm_denied(f"ssh remote.example {remote}")
+        assert _perm_denied(f"ssh -o BatchMode=yes remote.example {remote}") == without
+
+    def test_explicit_custom_substring_rule_keeps_its_meaning(self):
+        command = "ssh -o BatchMode=yes remote.example /usr/bin/true"
+        assert is_denied(command, denied_regexes=[f"{_CM}.*/usr/bin.*"]) is not None
+
+
 class TestPermissionVerbMentionNarrowing:
     """A permission verb handed to a SEARCH tool is text, not an action.
 

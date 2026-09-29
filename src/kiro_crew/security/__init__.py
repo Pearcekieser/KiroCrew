@@ -1790,7 +1790,8 @@ def _perm_verb_mention_narrows(
         return False
     verdict = cache.get(view)
     if verdict is None:
-        verdict = _submodule("perm_verb_mention")._perm_verb_mention_only(view)
+        mention = _submodule("perm_verb_mention")
+        verdict = mention._perm_verb_mention_only(view) or mention._option_key_mention_only(view)
         cache[view] = verdict
     return verdict
 

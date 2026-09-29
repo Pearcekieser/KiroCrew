@@ -502,3 +502,48 @@ def _perm_verb_mention_only(text_lower: str) -> bool:
                 if program and program not in _PERM_VERB_MENTION_PROGRAMS:
                     return False
     return found
+
+
+# An option KEY (``-o Key=``, ``-oKey=``, ``--key=``) is never executed, so a verb
+# embedded mid-word in one (``chmod`` inside ``BatchMode``) is not a permission
+# change.  A key that is the verb or begins or ends on it (``--chmod=``) still
+# counts, and so does every value.  Judged on the whole command against an
+# ALLOWLIST: letters, digits, spaces, ``._/:@=,+-``, plain quotes and the escaped
+# double quote ``\"``.  With the embedding keys removed and the quotes dropped,
+# no verb may remain.  No expansion, glob, separator, redirection, grouping or
+# line continuation can then assemble a verb.
+_OPTION_KEY_RE = re.compile(r"(?<![^ ])(?:-o ?|--)([a-z0-9]+)(?==)")
+_OPTION_KEY_ALLOWED_RE = re.compile(r"\A(?:[a-z0-9 ._/:@=,+'\"-]|\\\")*\Z")
+
+
+def _verb_embedded_mid_word(key: str) -> bool:
+    """True if *key* holds a verb, and every verb in it has letters on both sides."""
+    found = False
+    for verb in _PERM_VERB_MENTION_VERBS:
+        start = key.find(verb)
+        while start != -1:
+            if start == 0 or start + len(verb) == len(key):
+                return False
+            found = True
+            start = key.find(verb, start + 1)
+    return found
+
+
+def _option_key_mention_only(text_lower: str) -> bool:
+    """True if every permission-verb substring sits mid-word inside an option key."""
+    if not _OPTION_KEY_ALLOWED_RE.match(text_lower):
+        return False
+    removed = 0
+
+    def _drop(match: "re.Match[str]") -> str:
+        nonlocal removed
+        if not _verb_embedded_mid_word(match.group(1)):
+            return match.group(0)
+        removed += 1
+        return " "
+
+    stripped = _OPTION_KEY_RE.sub(_drop, text_lower)
+    if not removed:
+        return False
+    glued = re.sub(r"\\\"|[\"']", "", stripped)
+    return not any(verb in glued for verb in _PERM_VERB_MENTION_VERBS)
