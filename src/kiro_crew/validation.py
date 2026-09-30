@@ -2516,6 +2516,16 @@ CHAT_TAG_COLUMN_MOVE_SCHEMA = ToolSchema(
     ],
 )
 
+SESSION_MOVE_TO_COLUMN_SCHEMA = ToolSchema(
+    tool_name="session_move_to_column",
+    fields=[
+        # Same session-reference shape as ``chat_tag_assign.session``.
+        FieldSpec("target", str, required=True, max_len=512),
+        # A column id or exact name, bounded like every other column reference.
+        FieldSpec("column", str, required=True, max_len=_CHAT_TAG_REF_MAX),
+    ],
+)
+
 ARTIFACT_MOVE_SCHEMA = ToolSchema(
     tool_name="artifact_move",
     fields=[
@@ -3907,6 +3917,7 @@ MCP_DASHBOARD_SCHEMAS: dict[str, ToolSchema] = {
     "chat_tag_column_list": CHAT_TAG_COLUMN_LIST_SCHEMA,
     "chat_tag_column_create": CHAT_TAG_COLUMN_CREATE_SCHEMA,
     "chat_tag_column_move": CHAT_TAG_COLUMN_MOVE_SCHEMA,
+    "session_move_to_column": SESSION_MOVE_TO_COLUMN_SCHEMA,
 }
 
 # ── Tool Schemas (MCP crew log — server ``kirocrew-crew-log``) ──
