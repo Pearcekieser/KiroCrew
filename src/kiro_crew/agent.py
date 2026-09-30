@@ -4489,6 +4489,8 @@ handle immediately.
 #:   person has not touched since, and refuses an app or crew member outright.
 #:   It is withheld for the ``session_summary`` reason: no conductor step calls
 #:   it yet. A skill whose cleanup step adopts it adds it here with that step.
+#: * ``chat_folder_update`` — WITHHELD. Renames or restyles an existing folder,
+#:   which may be the person's, and no conductor step needs it.
 #: * ``chat_tag_list`` / ``chat_tag_create`` / ``chat_tag_update`` — WITHHELD,
 #:   not because any fails the invariant (a read, a create that dedups on name,
 #:   and a metadata edit that loses no assignment) but because no conductor step
