@@ -115,13 +115,23 @@ def _url_payload_command(n: int) -> str:
 #: control logic and no new matching pass. This branch's raise and the ones above it
 #: are independent additions to the same ratchet, so the number below is re-MEASURED
 #: off the tree rather than being the arithmetic sum of the deltas.
+#: Raised again, from 27,863, for the own-address startup warm in ``argv_floor``:
+#: the gateway starts the netlink read at boot, the worker reads and publishes that
+#: table before any DNS lookup, and the publish merges the addresses and opens the
+#: IP-literal window in one lock hold while each check reads the window flag before
+#: the names, so the first ssh after a restart is not refused as this machine and a
+#: secondary own IP is never admitted mid-publish. A dump that ends without
+#: NLMSG_DONE, or that the kernel flags NLM_F_DUMP_INTR, counts as unread, so a
+#: partial table never opens the window. So does an NLMSG_DONE whose errno is not 0.
+#: Three incomplete dumps in a row log one warning, so a host whose table never
+#: reads can be told apart from a target that is really this machine.
 #:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 27_863
+_PACKAGE_LINE_BUDGET = 27_942
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
