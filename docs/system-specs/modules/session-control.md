@@ -31,6 +31,7 @@ unreachable in production because the caller's `X-Internal-Secret` is ignored.
 | `session_status` | `GET /api/session-control/status` | List the sessions the caller stood up and what each is doing, with the roster taken from the crew log's session tree so a session that is gone still appears |
 | `session_read_message` | `GET /api/session-control/read` | Read another session's transcript tail + liveness |
 | `session_summary` | `GET /api/session-control/summary` | Read another session's cached intent summary + liveness, authorized as `session_read_message` is; never generates one |
+| `session_queue` | `POST /api/session-control/queue` | List, cancel or move queue entries on a session the caller created; cancel and move reach only entries the caller queued (sender stamp), and a move earlier may pass only the caller's own entries |
 
 **Two verbs here write into another session's conversation: `session_send` and
 `session_broadcast`.** Reading returns a transcript tail, stopping cancels a turn
