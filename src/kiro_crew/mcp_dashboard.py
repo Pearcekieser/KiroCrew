@@ -116,6 +116,7 @@ from kiro_crew.validation import (
     SESSION_BROADCAST_SCHEMA,
     SESSION_CLOSE_SCHEMA,
     SESSION_CREATE_SCHEMA,
+    SESSION_END_WAIT_SCHEMA,
     SESSION_FORK_SCHEMA,
     SESSION_READ_MESSAGE_SCHEMA,
     SESSION_RELEASE_SCHEMA,
@@ -143,6 +144,7 @@ SESSION_CONTROL_TOOLS: tuple[str, ...] = (
     "session_create",
     "session_fork",
     "session_stop",
+    "session_end_wait",
     "session_set_model",
     "session_close",
     "session_revive",
@@ -609,6 +611,32 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "target's transcript so the person reading it sees what happened. Stopping "
                 "discards the turn's work, so read the session first when you are not sure "
                 "what it is doing."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Session key from list_sessions, or its exact title.",
+                    },
+                },
+                "required": ["target"],
+            },
+        },
+        {
+            "name": "session_end_wait",
+            "description": (
+                "Wake a session you created that is sleeping in the `wait` tool, "
+                "without cancelling its turn: the same thing as pressing End wait on "
+                "its countdown. The target's wait returns a normal result that names "
+                "your session as the one that ended it, and its turn carries on. Use "
+                "it when the thing a worker is waiting for has already happened. "
+                "Only sessions you created are reachable. "
+                "Unlike session_stop nothing is discarded, and unlike session_send "
+                "no text reaches the target. A target that is not waiting gets an "
+                "informational reply, not an error, so there is nothing to retry. "
+                "The wake lands on the target's next keepalive ping, within about "
+                "five seconds."
             ),
             "inputSchema": {
                 "type": "object",
@@ -2268,6 +2296,24 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
                 return f"\u2139\ufe0f `{target}`: {info} — the earlier stop still stands."
             return f"\u2139\ufe0f `{target}`: {info} — nothing to stop."
         return f"\U0001f6d1 Stop sent to `{target}`. Its transcript now shows the stop card."
+
+    if name == "session_end_wait":
+        args = validate_tool_args(args, SESSION_END_WAIT_SCHEMA)
+        resp = _post(
+            "/api/session-control/end-wait",
+            {"target": args["target"]},
+            session_key=caller_key,
+        )
+        if resp.get("error"):
+            return f"Error: could not end that session's wait: {resp['error']}"
+        target = resp.get("target", args["target"])
+        if not resp.get("ended"):
+            info = resp.get("info") or "not sleeping in the wait tool"
+            return f"\u2139\ufe0f `{target}`: {info}. Nothing to end."
+        return (
+            f"\u23f0 End-wait sent to `{target}`. Its wait returns on the next "
+            "keepalive ping (within about 5s) and the turn continues."
+        )
 
     if name == "session_set_model":
         args = validate_tool_args(args, SESSION_SET_MODEL_SCHEMA)

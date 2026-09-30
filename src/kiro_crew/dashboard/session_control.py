@@ -4323,6 +4323,82 @@ async def stop_target(
     return {"ok": True, "target": slot.key, **result}
 
 
+async def end_wait_target(
+    state: "DashboardState",
+    *,
+    caller_session_key: str,
+    target: str,
+    caller_fenced: bool | None = None,
+) -> dict[str, Any]:
+    """Wake *target* from the ``wait`` tool early, keeping its turn.
+
+    The same mechanism as the dashboard's End-wait button
+    (``api_chat_slot_end_wait``): the request is parked on the slot as
+    ``_end_wait_request`` and the sleeping tool collects it on its next keepalive
+    ping, then returns a normal tool result. Nothing is cancelled and no work is
+    discarded, which is what separates this verb from ``session_stop``.
+
+    The caller does not name a ``wait_id``. The button needs one because a stale
+    tab can still show an old countdown; here the id is read from the slot at the
+    moment of the request, so the request can only ever name the sleep that is in
+    flight now. ``_end_wait_by`` records who asked, so the keepalive reply can tell
+    the woken session that another session ended its wait rather than the user.
+
+    A target that is not sleeping is not an error: the reply carries ``info``
+    instead, so a caller does not retry something that has nothing to act on.
+    """
+    # Same ordering as `stop_target`: both prewarms are awaits, so they sit
+    # above the gate and nothing suspends between the gate and the write.
+    try:
+        await asyncio.to_thread(sel)
+    except Exception:  # noqa: BLE001 - a prewarm failure must not fail the call
+        logger.warning("session-control SEL prewarm failed", exc_info=True)
+    await prewarm_enabled_check()
+
+    slot = authorize_target(
+        state,
+        caller_session_key=caller_session_key,
+        target=target,
+        operation="end_wait",
+        precomputed_ownership_fenced=caller_fenced,
+    )
+    caller_key = caller_slot_key(state, caller_session_key)
+    if _created_by_other(slot, caller_key):
+        # Narrower than the other verbs on purpose: an owner session is not
+        # creator-fenced by `authorize_target`, but waking a sleep moves a turn
+        # forward on someone else's schedule, and the caller that armed the
+        # worker's wait is the one that knows when it is safe to end it.
+        raise _deny_factory(
+            caller_session_key=caller_session_key, operation="end_wait", target=target
+        )("session_end_wait reaches only sessions you created", "not_creator")
+    if getattr(slot, "_wait_contested", False):
+        # Two sleeps share this slot's session key (see _service_wait_ping's
+        # ambiguous-identity guard). There is no way to aim at one of them, and
+        # the button is hidden for the same reason.
+        info = "two waits share this session, so neither can be ended early"
+        result = {"ended": False, "info": info}
+        audit_result = "contested"
+    else:
+        current = getattr(slot, "_wait_state", None) or {}
+        wait_id = str(current.get("wait_id") or "")
+        if not wait_id:
+            result = {"ended": False, "info": "not sleeping in the wait tool"}
+            audit_result = "not_waiting"
+        else:
+            slot._end_wait_request = wait_id
+            slot._end_wait_by = caller_key
+            result = {"ended": True, "wait_id": wait_id}
+            audit_result = "requested"
+    _audit(
+        caller_session_key=caller_session_key,
+        operation="end_wait",
+        slot_key=slot.key,
+        outcome="allowed",
+        detail={"result": audit_result},
+    )
+    return {"ok": True, "target": slot.key, **result}
+
+
 async def set_model_target(
     state: "DashboardState",
     *,

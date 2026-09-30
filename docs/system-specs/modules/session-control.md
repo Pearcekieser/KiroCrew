@@ -21,6 +21,7 @@ unreachable in production because the caller's `X-Internal-Secret` is ignored.
 | `session_create` | `POST /api/session-control/create` | Open a new, empty session in the caller's workspace, optionally filed into a sidebar folder at creation |
 | `session_fork` | `POST /api/session-control/fork` | Open a new session that CARRIES a copy of a source session's transcript — the caller's own by default — the way the dashboard's Fork button does; optionally titled, filed, and cut at a fork point |
 | `session_stop` | `POST /api/session-control/stop` | Stop another session's in-flight turn |
+| `session_end_wait` | `POST /api/session-control/end-wait` | Wake a session the caller CREATED from the `wait` tool early, keeping its turn; any other target is refused `not_creator`, for every caller class |
 | `session_set_model` | `POST /api/session-control/set-model` | Record a pending model pick on an idle session; `apply_pending_model_pick` commits it at the start of the target's next turn after re-running `authorize_target` in the same synchronous step. A busy target is refused with `target_busy` and keeps its model |
 | `session_close` | `POST /api/session-control/close` | Close (archive) another session, as the tab ✕ does — heavier than stop, and recoverable rather than a delete |
 | `session_revive` | `POST /api/session-control/revive` | Bring an archived session back into the live sidebar, as clicking it in the History tab does — the mirror of close, optionally filing it into a folder |
@@ -618,6 +619,8 @@ Two rules give a member caller its shape:
   unchanged.
 
 Ordinary (non-member) callers are untouched: they still require the switch.
+The one exception is `session_end_wait`, whose own creator fence (below, "Ending
+a wait early") binds every caller class, owner sessions included.
 
 #### The strict-internal surface admits a member DM slot, not every scoped caller
 
@@ -1354,6 +1357,32 @@ the rows below the clamp are what replaced the old tail, a cursor never moves
 backwards, so they would be skipped permanently while the response read as
 "nothing new". A cursor exactly AT the end is not stale and still returns an empty
 window.
+
+## Ending a wait early
+
+`session_end_wait(target)` is the other half of the poll loop: a caller that has
+already seen the condition its worker is sleeping on can wake that worker instead
+of letting the `wait` run out. `end_wait_target` runs `authorize_target` like the
+other verbs and then applies a creator fence of its own: a target whose
+`_created_by` is not the caller is refused `not_creator` (403) even for an owner
+session, which the shared gate does not fence. Waking a sleep moves another
+session's turn forward on the caller's schedule, and the caller that armed the
+worker's wait is the one that knows when that is safe.
+
+It reuses the End-wait button's mechanism rather than adding one. It reads the
+`wait_id` currently tracked in `_wait_state` at request time (an MCP caller has no
+countdown to name a stale id from), parks it in `_end_wait_request`, and records
+the caller in `_end_wait_by`. The sleeping tool collects it from its next
+keepalive reply, which then carries `end_wait_by`, and returns a normal result
+naming the session that ended it. The turn is not cancelled and nothing is
+discarded.
+
+A target with no tracked sleep, or with `_wait_contested` set (two sleeps share
+one session key, so neither can be aimed at), gets `ok: true, ended: false` with
+an `info` string and nothing is parked. The SEL audit detail records
+`requested`, `not_waiting` or `contested`. Channel agents are blocked from the
+verb, and it is withheld from the conductor and member auto-approve grants; see
+the comment on `_CONDUCTOR_DASHBOARD_GRANTS` in `agent.py`.
 
 ## Stopping is safe to re-send
 

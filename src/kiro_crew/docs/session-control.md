@@ -4,14 +4,14 @@ One chat session can open, fork, seed, watch, stop, close and revive another one
 change its model, and take another one under itself in the sidebar. The tools come from the
 `kirocrew-dashboard` MCP server, so an agent that does not mount that server
 never has them — exactly like any other MCP server. This page is the reference
-for all 23 of its tools, written for the agent that is about to use them.
+for all 24 of its tools, written for the agent that is about to use them.
 
 The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
 
 - **Session control** — `session_create`, `session_fork`, `session_send`,
-  `session_read_message`, `session_summary`, `session_stop`, `session_set_model`,
-  `session_close`, `session_revive`, `session_broadcast`, `session_status`,
-  `session_adopt`, `session_release`. These reach another session.
+  `session_read_message`, `session_summary`, `session_stop`, `session_end_wait`,
+  `session_set_model`, `session_close`, `session_revive`, `session_broadcast`,
+  `session_status`, `session_adopt`, `session_release`. These reach another session.
 - **Sidebar shape** — `chat_folder_tree`, `chat_folder_create`,
   `chat_folder_move`, `chat_folder_move_session`, `chat_folder_file_self`,
   `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`,
@@ -391,6 +391,33 @@ cancel is still in flight.
 `session_close` is not a permanent delete — the conversation is archived and
 `session_revive` brings it back — but it does discard a running turn's work. Read the session first
 when you are not sure what it is doing.
+
+### `session_end_wait`
+
+| Argument | Required | Meaning |
+|---|---|---|
+| `target` | yes | Session key or exact title |
+
+Wakes a session that is sleeping in the `wait` tool, the same way the End wait
+button on its countdown does. The turn is not cancelled: the target's `wait`
+returns a normal result, and the turn carries on from there. Use it when a
+worker is waiting for something that has already happened, such as a build you
+watched finish. It reaches only sessions you created; any other target is
+refused with `not_creator`, even for a caller the other verbs do not fence.
+
+The target's `wait` result names your session (`Wait ended early by session
+<key> (session_end_wait) ...`), so the woken agent can tell that a peer ended its
+sleep rather than the person or a steer. The wake lands on the target's next
+keepalive ping, within about five seconds.
+
+A target that is not sleeping in `wait` gets an informational reply ending
+`Nothing to end.`, not an error, so there is nothing to retry. The same reply
+comes back when two sleeps share the target's session key: the dashboard cannot
+tell which one to wake, and hides the button for the same reason.
+
+Compared with the verbs next to it: `session_stop` discards the turn's work,
+and `session_send` to a sleeping target also ends its wait (as a steer) but
+delivers text the target then acts on. `session_end_wait` does neither.
 
 ### `session_set_model`
 

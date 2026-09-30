@@ -360,6 +360,9 @@ class TestWhatThisSetGrants:
         "session_create",
         "session_fork",
         "session_stop",
+        # Wakes a created session from `wait` through the same parked request
+        # the End-wait button writes; nothing discarded, same target fence.
+        "session_end_wait",
         "session_set_model",
         "session_close",
         "session_revive",

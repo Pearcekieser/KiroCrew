@@ -4132,6 +4132,10 @@ handle immediately.
 #:   cancelled turn's work is gone either way — the retry de-duplication that
 #:   keeps a re-sent stop from ALSO discarding the queue does not make the verb
 #:   non-destructive).
+#: * ``session_end_wait`` — WITHHELD. Discards nothing, but it moves another
+#:   session's turn forward (the target's ``wait`` returns early), which is a
+#:   change to state that is not the caller's own, and no conductor step needs it
+#:   unattended.
 #:
 #: Every withheld verb stays MOUNTED (``@kirocrew-dashboard`` is still in
 #: ``tools``) — it just passes through ``hooks.on_tool_call`` like any ungranted

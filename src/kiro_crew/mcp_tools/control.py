@@ -1091,6 +1091,10 @@ def wait(name: str, args: dict[str, Any]) -> str:
     # staleness watchdog alone would need.
     _next_ping = mcp_core.time.monotonic()
     ended_early = False
+    # Slot key of the session that ended this sleep through session_end_wait,
+    # or "" for the End-wait button / a steer. Only read from a reply that named
+    # this wait, so it cannot describe someone else's sleep.
+    ended_by = ""
     # Publish wait metadata ONLY under an authoritative identity, and refuse
     # to honour `end_wait` without one.
     #
@@ -1156,6 +1160,7 @@ def wait(name: str, args: dict[str, Any]) -> str:
             # somebody else's wait.
             if _identified and isinstance(reply, dict) and reply.get("end_wait") == wait_id:
                 ended_early = True
+                ended_by = str(reply.get("end_wait_by") or "")[:128]
                 break
             _next_ping = now + _ping_secs
         mcp_core.time.sleep(min(_ping_secs, remaining))
@@ -1183,6 +1188,11 @@ def wait(name: str, args: dict[str, Any]) -> str:
     # the response of a cancelled call, so raising here would leave kiro-cli
     # waiting on a tool result that never arrives until the 600s stall
     # watchdog kills the session. Ending a wait early continues the turn.
+    if ended_early and ended_by:
+        return (
+            f"Wait ended early by session `{ended_by}` (session_end_wait) after "
+            f"{waited}s of {seconds}s. Resuming: {reason_safe}"
+        )
     if ended_early:
         return (
             f"Wait ended early by the user after {waited}s of {seconds}s. "

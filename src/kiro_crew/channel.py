@@ -146,6 +146,9 @@ CHANNEL_AGENT_BLOCKED_TOOLS: tuple[str, ...] = (
     "send_message",
     "send_notification",
     "session_stop",
+    # Ending another session's wait moves that turn forward on a schedule the
+    # channel's thread text would then be choosing; same containment reason.
+    "session_end_wait",
     # Changing a session's model decides what the user's next turn there runs
     # on and spends; same containment reason as stop.
     "session_set_model",

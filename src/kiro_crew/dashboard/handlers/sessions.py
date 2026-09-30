@@ -3868,7 +3868,9 @@ def _wait_end_reason(slot, wait_id: str, provider: Any) -> str | None:
     Exactly two reasons, and the narrowness is the design:
 
     ``"user"``
-        The End-wait button parked an explicit request naming this ``wait_id``.
+        The End-wait button parked an explicit request naming this ``wait_id``,
+        or another session parked the same request through ``session_end_wait``
+        (``slot._end_wait_by`` then names it).
 
     ``"steer"``
         A mid-turn steer reached the backend AFTER this sleep began. kiro-cli
@@ -4040,6 +4042,7 @@ def _service_wait_ping(
         slot._wait_last_ping = now
     reason = _wait_end_reason(slot, wait_id, provider)
     if reason is not None:
+        ended_by = getattr(slot, "_end_wait_by", "") if reason == "user" else ""
         # Consume exactly once. Leaving it set would make the NEXT wait in this
         # session return instantly, which is the failure mode a session-scoped
         # boolean flag would have had.
@@ -4048,6 +4051,10 @@ def _service_wait_ping(
         slot._wait_last_ping = 0.0
         slot._wait_steer_baseline = 0.0
         reply["end_wait"] = wait_id
+        # Advisory, for the tool's result text only: a tool that predates this
+        # field honours ``end_wait`` alone exactly as before.
+        if ended_by:
+            reply["end_wait_by"] = ended_by
         logger.info("wait ending early for %s (reason=%s)", session_key, reason)
         state.push_slots_update()
 

@@ -1550,9 +1550,14 @@ Contract:
   non-object body degrades to touch-only rather than failing the keepalive,
   because that half of the route is what stops the watchdog killing the ACP
   subprocess mid-wait.
-- **Reply**: `{"ok": true}`, plus `{"end_wait": "<wait_id>"}` when the user has
-  asked to end *that* sleep. The tool breaks its loop and returns a normal
-  string — deliberately **not** `ToolCancelled`, whose response is suppressed.
+- **Reply**: `{"ok": true}`, plus `{"end_wait": "<wait_id>"}` when an early end
+  of *that* sleep has been requested, either by the user (the End-wait button)
+  or by a session that created this one (`session_end_wait`, via
+  `POST /api/session-control/end-wait`). A session-requested end also carries
+  `{"end_wait_by": "<caller slot key>"}`, which the tool reads only from a reply
+  naming its own `wait_id` and uses to say which session ended the sleep. The
+  tool breaks its loop and returns a normal string — deliberately **not**
+  `ToolCancelled`, whose response is suppressed.
 - **Ping interval** is `mcp_core.WAIT_PING_SECS` (5.0s), not the 60s the
   staleness watchdog alone needs: it is the button's worst-case latency. The
   handler only touches two timestamps, so a 30-minute wait costs ~360 loopback
@@ -1562,6 +1567,11 @@ Contract:
   `slot_not_found`, 409 `wait_not_in_flight` when the id does not match the
   sleep currently tracked — which is how a click on a stale countdown is
   rejected instead of ending a *later* wait. Consumed exactly once.
+  `session_control.end_wait_target` parks the same `_end_wait_request` (plus
+  `_end_wait_by`) for the currently tracked `wait_id`, after the session-control
+  target gate and a creator fence (`not_creator`); a slot with no tracked sleep
+  or with `_wait_contested` set gets an informational `ended: false` reply and
+  parks nothing.
 - **`_ChatSlot`** gains `_wait_state` (`{wait_id, seconds, deadline_ts}`, emitted
   as `wait_state` in `to_dict()`), plus the server-only `_wait_last_ping` and
   `_wait_contested`. `deadline_ts` is absolute and minted **once** on first

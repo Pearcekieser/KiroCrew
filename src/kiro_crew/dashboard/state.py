@@ -2887,6 +2887,7 @@ class _ChatSlot:
         "_steer_attachment_meta",
         "_wait_state",
         "_end_wait_request",
+        "_end_wait_by",
         "_wait_last_ping",
         "_wait_steer_baseline",
         "_wait_contested",
@@ -4059,6 +4060,11 @@ class _ChatSlot:
         # wait_id the user asked to end early, parked here until the sleeping
         # tool collects it on its next poll. Consumed exactly once.
         self._end_wait_request: str | None = None
+        # Slot key of the session that parked ``_end_wait_request`` through
+        # ``session_end_wait``; "" when the End-wait button parked it. Both
+        # writers set it together with the request, so it is only ever read
+        # alongside a request it describes and needs no clearing of its own.
+        self._end_wait_by: str = ""
         # Wall clock of the tracked wait's last keepalive ping. Server-side only
         # (deliberately NOT in to_dict): it is the heartbeat that distinguishes a
         # sleep that ended from one that is still running, which is how

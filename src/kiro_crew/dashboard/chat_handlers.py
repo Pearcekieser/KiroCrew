@@ -6519,6 +6519,9 @@ async def api_chat_slot_end_wait(request: web.Request) -> web.Response:
             {"error": "no such wait in flight", "code": "wait_not_in_flight"}, status=409
         )
     slot._end_wait_request = wait_id
+    # The button, not a session: clears any requester a session_end_wait left
+    # behind, so the woken tool reports the user as the one who ended it.
+    slot._end_wait_by = ""
     sel().log_tool_invocation(
         session_key=_history_key_for(name),
         agent=getattr(slot, "agent", "") or "kirocrew",
