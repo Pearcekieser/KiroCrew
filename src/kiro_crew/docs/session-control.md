@@ -1,17 +1,17 @@
 # Session Control — driving another session
 
-One chat session can open, fork, seed, watch, stop, retry, close and revive another one,
+One chat session can open, fork, seed, watch, stop, retry, continue, close and revive another one,
 change its model, reload its agent process, and take another one under itself in
 the sidebar. The tools come from the
 `kirocrew-dashboard` MCP server, so an agent that does not mount that server
 never has them — exactly like any other MCP server. This page is the reference
-for all 29 of its tools, written for the agent that is about to use them.
+for all 30 of its tools, written for the agent that is about to use them.
 
 The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
 
 - **Session control** — `session_create`, `session_fork`, `session_send`,
   `session_read_message`, `session_summary`, `session_stop`, `session_end_wait`, `session_retry`,
-  `session_set_model`, `session_reload`, `session_close`, `session_revive`, `session_broadcast`,
+  `session_continue`, `session_set_model`, `session_reload`, `session_close`, `session_revive`, `session_broadcast`,
   `session_status`, `session_adopt`, `session_release`. These reach another session.
 - **Sidebar shape** — `chat_folder_tree`, `chat_folder_create`,
   `chat_folder_move`, `chat_folder_move_session`, `chat_folder_file_self`,
@@ -504,6 +504,35 @@ refused with `remote_target_unsupported`.
 
 The session-control audit line records your session key as the caller, and the
 target's own `dashboard_continue` line records `via=session_control`.
+
+### `session_continue`
+
+| Argument | Required | Meaning |
+|---|---|---|
+| `target` | yes | Session key or exact title |
+
+Hands the target's thread back to its agent, the same way the Continue button in
+that tab does. Use it for a turn that a gateway restart or a killed process cut
+short. Such a turn runs no cleanup, so it leaves no error row and reads as
+finished, and `session_retry` refuses it with `turn_not_failed`.
+
+The target is sent one of two fixed messages, chosen the way the button chooses:
+the interrupted pick-up when its last turn looks cut short, and a carry-on
+message when it ended cleanly. The result's `body` says which one, `resumed` or
+`continued`. The tool takes no prompt text. To ask the session for something
+new, use `session_send`.
+
+The target must be idle and must have a conversation. The refusals are the
+Continue button's own: `slot_running`, `slot_orchestrating`, `slot_stopping`,
+`slot_queue_pending`, `slot_approval_pending`, `slot_subagents_running`,
+`slot_empty`. After two failed session starts in a row the call is refused too,
+with the same advice to restart the gateway. A target bound to a remote crew is
+refused with `remote_target_unsupported`. It reaches the same sessions
+`session_stop` does.
+
+The session-control audit line records your session key as the caller and the
+body sent, and the target's own `dashboard_continue` line records
+`via=session_control`.
 
 ### `session_revive`
 

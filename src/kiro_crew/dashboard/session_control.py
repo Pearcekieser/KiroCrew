@@ -4522,12 +4522,69 @@ async def retry_target(
 
     ``caller_fenced`` has the meaning :func:`stop_target` documents.
     """
+    slot_key, _body = await _continue_turn_of_target(
+        state,
+        caller_session_key=caller_session_key,
+        target=target,
+        caller_fenced=caller_fenced,
+        operation="retry",
+        require_interrupted=True,
+    )
+    return {"ok": True, "target": slot_key}
+
+
+async def continue_target(
+    state: "DashboardState",
+    *,
+    caller_session_key: str,
+    target: str,
+    caller_fenced: bool | None = None,
+) -> dict[str, Any]:
+    """Hand *target*'s thread back to its agent, as the Continue button does.
+
+    The same call as :func:`retry_target` without ``require_interrupted``: a
+    force-quit turn runs no ``finally`` and leaves no error row, so it reads as
+    finished, and only this verb can pick it up. ``continue_slot_turn`` chooses
+    the body exactly as it does for the button, and the result reports which one
+    it queued in ``body``: ``"resumed"`` (the interrupted pick-up) or
+    ``"continued"`` (carry on from a turn that ended cleanly). No prompt text is
+    accepted; the body is always one of the two fixed continuation messages.
+
+    Not readiness-gated, for the reason :func:`retry_target` gives.
+    ``caller_fenced`` has the meaning :func:`stop_target` documents.
+    """
+    slot_key, body = await _continue_turn_of_target(
+        state,
+        caller_session_key=caller_session_key,
+        target=target,
+        caller_fenced=caller_fenced,
+        operation="continue",
+        require_interrupted=False,
+    )
+    return {"ok": True, "target": slot_key, "body": body}
+
+
+async def _continue_turn_of_target(
+    state: "DashboardState",
+    *,
+    caller_session_key: str,
+    target: str,
+    caller_fenced: bool | None,
+    operation: str,
+    require_interrupted: bool,
+) -> tuple[str, str]:
+    """Authorize *target* and queue a continuation on it; the core of retry and continue.
+
+    Returns the target's slot key and the body ``continue_slot_turn`` queued
+    (``"resumed"`` or ``"continued"``). *operation* names the verb on every audit
+    line and on the gate's refusals.
+    """
     # Same prewarm ordering as `close_target`: the SEL and config reads must be
     # warm before the synchronous gate, and the fence verdict is resolved once so
     # the re-check under the slot lock never loads config on the loop.
     try:
         await asyncio.to_thread(sel)
-    except Exception:  # noqa: BLE001 - a prewarm failure must not fail the retry
+    except Exception:  # noqa: BLE001 - a prewarm failure must not fail the call
         logger.warning("session-control SEL prewarm failed", exc_info=True)
     await prewarm_enabled_check()
 
@@ -4539,14 +4596,14 @@ async def retry_target(
         state,
         caller_session_key=caller_session_key,
         target=target,
-        operation="retry",
+        operation=operation,
         precomputed_ownership_fenced=caller_fenced,
     )
     slot_key = slot.key
     # Deferred for the same import cycle `stop_target` documents.
     from kiro_crew.dashboard.chat_handlers import SlotContinueRefusal, continue_slot_turn
 
-    def _reassert_retryable() -> None:
+    def _reassert_reachable() -> None:
         # The slot lock `continue_slot_turn` takes, and its sub-agent probe, are
         # awaits: a target that was reachable at the gate above can become
         # channel-linked or mirrored, or be replaced under the same key, before
@@ -4558,7 +4615,7 @@ async def retry_target(
                 state,
                 caller_session_key=caller_session_key,
                 target=slot_key,
-                operation="retry",
+                operation=operation,
                 skip_enabled_check=True,
                 precomputed_ownership_fenced=caller_fenced,
             )
@@ -4566,43 +4623,44 @@ async def retry_target(
             raise SlotContinueRefusal(exc.message, exc.code, status=exc.status) from exc
         if live is not slot:
             raise SlotContinueRefusal(
-                "the target session was replaced during the retry", "target_replaced"
+                f"the target session was replaced during the {operation}", "target_replaced"
             )
 
     with _audit_denials(
-        caller_session_key=caller_session_key, operation="retry", slot_key=slot_key
+        caller_session_key=caller_session_key, operation=operation, slot_key=slot_key
     ):
         # The same predicate the Continue endpoint refuses on, so the button and
-        # the verb cannot drift: a crew-bound slot would run the retried turn on
-        # this machine and diverge from the peer.
+        # the verbs cannot drift: a crew-bound slot would run the turn on this
+        # machine and diverge from the peer.
         if remote_bound_refusal(slot) is not None:
             raise SessionControlError(
-                "that session runs on a remote crew; retrying its turn from another "
-                "session is not supported yet",
+                f"that session runs on a remote crew; {operation} of its turn from "
+                "another session is not supported yet",
                 code="remote_target_unsupported",
                 status=409,
             )
         try:
-            await continue_slot_turn(
+            body = await continue_slot_turn(
                 state,
                 slot,
                 # An agent asked for this, not the person at the keyboard: the
                 # turn must not gain the authenticated-human flag.
                 directive_user_origin=False,
                 via="session_control",
-                require_interrupted=True,
-                before_dispatch=_reassert_retryable,
+                require_interrupted=require_interrupted,
+                before_dispatch=_reassert_reachable,
                 extra_meta=send_origin_meta(state, caller_key),
             )
         except SlotContinueRefusal as exc:
             raise SessionControlError(exc.message, status=exc.status, code=exc.code) from exc
     _audit(
         caller_session_key=caller_session_key,
-        operation="retry",
+        operation=operation,
         slot_key=slot_key,
         outcome="allowed",
+        detail={"body": body},
     )
-    return {"ok": True, "target": slot_key}
+    return slot_key, body
 
 
 async def end_wait_target(

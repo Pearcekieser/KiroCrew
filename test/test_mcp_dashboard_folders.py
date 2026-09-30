@@ -1894,6 +1894,7 @@ class TestAdvertisedSet:
             "session_stop",
             "session_end_wait",
             "session_retry",
+            "session_continue",
             "session_set_model",
             "session_reload",
             "session_close",
