@@ -167,6 +167,16 @@ MAX_QUEUE_EXCERPT_CHARS = 200
 
 QUEUE_ACTIONS = ("list", "cancel", "move")
 
+# How many awaited saves a cancel or move gets before it is rolled back. A pass
+# can be refused without failing (another writer committed first, or a queued
+# send landed mid-write), so one retry covers the race and a third is slack.
+QUEUE_DURABLE_ATTEMPTS = 3
+QUEUE_DURABLE_RETRY_SECS = 0.05
+# How long one attempt waits for a guard that makes ``flush_slot_now`` skip the
+# write (a metadata write or a close in flight) before it counts as not saved.
+# Those guards clear in well under a second; this only bounds a stuck one.
+QUEUE_DURABLE_SKIP_WAIT_SECS = 2.0
+
 # Who queued an entry, as ``queue_target`` reports it.
 QUEUE_FROM_CALLER = "yours"
 QUEUE_FROM_PERSON = "person"
@@ -7692,18 +7702,25 @@ def _queue_entry_from(entry: dict[str, Any], caller_key: str, caller_tab: str) -
     A person's own typed message is checked first so that no stamp, however it
     got there, can make one read as the caller's.
 
-    Only a PLAIN entry can be the caller's: one with no producer ``kind`` and no
-    consumption callback. ``session_send`` queues exactly that shape. A recovery
-    requeue or a plan-stage delivery can inherit the sender stamp through its
+    Only a PLAIN entry can be the caller's: one with no producer ``kind``, no
+    consumption callback and no steer delivery. ``session_send`` queues exactly
+    that shape. A plan-stage delivery can inherit the sender stamp through its
     meta, yet it carries a kind the drain acts on and callbacks a waiter settles
-    on, so removing or reordering it here would strand that waiter. Those read as
-    ``other``.
+    on, so removing or reordering it here would strand that waiter. A steer that
+    ``_requeue_unconsumed_steers`` put back because its turn ended first carries
+    the send's stamp too, with no kind and no callback, but its persisted steer
+    row already says it will run as its own turn, and that row is not a
+    ``queued`` row a cancel reaches; ``steer_delivery_id``, which
+    ``steer_into_running_turn`` mints for every steer, marks it. All of these
+    read as ``other``.
     """
     if queue_entry_is_user_origin(entry):
         return QUEUE_FROM_PERSON
     if entry.get("kind") or "_on_consumed" in entry or "_on_irreversibly_consumed" in entry:
         return QUEUE_FROM_OTHER
     meta = entry.get("meta")
+    if isinstance(meta, dict) and meta.get("steer_delivery_id"):
+        return QUEUE_FROM_OTHER
     if caller_tab and send_origin_slot(meta) == caller_key and send_origin_tab(meta) == caller_tab:
         return QUEUE_FROM_CALLER
     return QUEUE_FROM_OTHER
@@ -7727,16 +7744,129 @@ def _queue_entry_id(item: dict[str, Any]) -> str:
 
     Ids this process mints are 12 hex characters, but an entry restored from disk
     keeps whatever id its line carried (``sanitize_restored_queue`` bounds only the
-    whole entry). An id over the ``entry`` argument's own cap could never be named
-    back to cancel or move anyway, so it is cut to that cap and marked.
+    whole entry), and that file can be edited outside the gateway. So the id
+    passes the same ``sanitize_outbound`` chain as every other outbound field
+    before it is cut. An id that redaction or the cut changed could never be
+    named back to cancel or move anyway, so nothing usable is lost.
     """
-    raw = str(item.get("id") or "")
+    raw = sanitize_outbound(str(item.get("id") or ""))
     if len(raw) <= QUEUE_ENTRY_ID_MAX_CHARS:
         return raw
-    return raw[:QUEUE_ENTRY_ID_MAX_CHARS] + "…"
+    return raw[: QUEUE_ENTRY_ID_MAX_CHARS - 1] + "…"
 
 
-def queue_target(
+async def _await_queue_durable(state: "DashboardState", slot: Any) -> bool:
+    """Save *slot* now and report whether its queue on disk matches memory.
+
+    ``flush_slot_now`` swallows a failed write (the periodic flush owes it) and
+    skips a slot whose metadata write or close is in flight, so its return says
+    nothing. ``queue_persist_pending`` is the check: it compares the in-memory
+    queue against the signature of the last committed save.
+
+    A slot with no transcript to write into has no disk copy for a restart to
+    bring back, so there is nothing to wait for. That is the persistence layer's
+    own rule, not a shortcut here: ``flush_slot_now`` returns before writing when
+    there is no log or no message row, so no writer could ever persist this queue.
+    """
+    if not state.conversation_log or not slot.messages:
+        return True
+    for attempt in range(QUEUE_DURABLE_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(QUEUE_DURABLE_RETRY_SECS)
+        # A write ``flush_slot_now`` would SKIP (a guarded metadata write or a
+        # close is in flight) is not a write that failed, so it does not spend an
+        # attempt: wait for the guard to clear, up to a real deadline.
+        waited = 0.0
+        while _queue_write_skipped(slot) and waited < QUEUE_DURABLE_SKIP_WAIT_SECS:
+            await asyncio.sleep(QUEUE_DURABLE_RETRY_SECS)
+            waited += QUEUE_DURABLE_RETRY_SECS
+        # NEVER on the loop: this writes the transcript file.
+        await asyncio.to_thread(state.flush_slot_now, slot)
+        if not slot.queue_persist_pending:
+            return True
+    return False
+
+
+def _queue_write_skipped(slot: Any) -> bool:
+    """Whether ``flush_slot_now`` would return without writing *slot* right now."""
+    return bool(getattr(slot, "_metadata_persist_inflight", 0)) or bool(
+        getattr(slot, "is_closing", False)
+    )
+
+
+@dataclass
+class _QueueChange:
+    """A cancel or move applied in memory, held back until it is on disk.
+
+    ``before_ids`` and ``after_ids`` are the entries that sat ahead of and behind
+    the changed one BEFORE the change, which is what an undo restores against.
+    """
+
+    slot: Any
+    entry: str
+    from_index: int
+    frame: tuple[str, dict[str, Any]] | None
+    before_ids: tuple[str, ...] = ()
+    after_ids: tuple[str, ...] = ()
+    removed_item: dict[str, Any] | None = None
+    removed_rows: tuple[dict, ...] = ()
+
+
+def _restore_index(queue: list[dict[str, Any]], change: _QueueChange) -> int:
+    """Where an undone entry goes back, judged by its old neighbours, not its index.
+
+    The queue can change while the save runs: the drain takes the head, a recovery
+    goes in at the front, a send is appended. An old index would then put the entry
+    on the wrong side of something. Instead it goes right after the last entry that
+    was ahead of it and is still queued, which keeps every one of those (a person's
+    message included) ahead of it. With none of those left it goes right before the
+    first entry that was behind it, so a recovery put at the front still runs first.
+    Only with neither does the old index, clamped, decide.
+    """
+    ids = [item.get("id") for item in queue]
+    ahead = [i for i, qid in enumerate(ids) if qid in change.before_ids]
+    if ahead:
+        return ahead[-1] + 1
+    behind = [i for i, qid in enumerate(ids) if qid in change.after_ids]
+    if behind:
+        return behind[0]
+    return min(change.from_index, len(queue))
+
+
+def _undo_queue_change(state: "DashboardState", change: _QueueChange) -> bool:
+    """Put a change that never reached disk back the way it was.
+
+    Nothing was broadcast, so no tab saw it. The queue may have moved while the
+    write ran (a drain, a new send, a recovery at the front), so the undo works on
+    the entry's old neighbours rather than on a snapshot or an index
+    (:func:`_restore_index`). The rows follow the restored order through the same
+    reseat the move used.
+
+    Returns False when there is nothing left to undo: a moved entry the drain
+    started during the write has already run where the caller put it, so the
+    move took its whole effect and no queue state remains for a restart to
+    bring back.
+    """
+    slot = change.slot
+    queue: list[dict[str, Any]] = slot._queue
+    ids = [item.get("id") for item in queue]
+    if change.removed_item is not None:
+        if change.entry not in ids:
+            queue.insert(_restore_index(queue, change), change.removed_item)
+            slot.messages.extend(change.removed_rows)
+    elif change.entry in ids:
+        moved = queue.pop(ids.index(change.entry))
+        queue.insert(_restore_index(queue, change), moved)
+    else:
+        return False
+    _reorder_queued_rows(slot.messages, [item["id"] for item in queue])
+    slot.invalidate_source_links()
+    # Not saved here: the caller awaits the restored queue's own save before it
+    # tells anyone the change was undone (see queue_target).
+    return True
+
+
+async def queue_target(
     state: "DashboardState",
     *,
     caller_session_key: str,
@@ -7769,6 +7899,18 @@ def queue_target(
     the ownership check and the queue write, so the entry that was checked is
     the entry that moves. The handler warms the config read before calling in,
     as ``read_summary``'s does.
+
+    A cancel or move is published only once it is on disk. The change lands in
+    memory first (that is the queue's authority), then this awaits a save and
+    checks it (:func:`_await_queue_durable`). Only then does any tab hear the
+    frame or the caller get success: a cancel reported done and brought back by
+    a restart is the one outcome a caller that took its message back must not
+    see. If the save does not land, the change is undone
+    (:func:`_undo_queue_change`) and the restored queue's own save is awaited
+    the same way. Only when that lands is the call refused ``queue_not_durable``,
+    so the caller can retry knowing nothing changed. When the undo cannot be
+    saved either, the call is refused ``queue_state_unknown``: memory is back as
+    it was, but a restart before the next save could bring the change back.
     """
     deny = _deny_factory(caller_session_key=caller_session_key, operation="queue", target=target)
     if action not in QUEUE_ACTIONS:
@@ -7788,6 +7930,7 @@ def queue_target(
     queue: list[dict[str, Any]] = slot._queue
     detail: dict[str, Any] = {"action": action}
     result: dict[str, Any] = {}
+    audited = False
 
     if action in ("cancel", "move"):
         if not entry:
@@ -7802,8 +7945,12 @@ def queue_target(
                 "not_your_entry",
             )
         detail["entry"] = entry
+        change: _QueueChange | None = None
+        queued_ids = tuple(str(item.get("id") or "") for item in queue)
 
         if action == "cancel":
+            queued_rows = [m for m in slot.messages if m.get("role") == "queued"]
+            removed_item = queue[index]
             slot.queue_remove_by_id(entry)
             _remove_queued_by_id(slot.messages, entry)
             slot.invalidate_source_links()
@@ -7811,7 +7958,18 @@ def queue_target(
             # the card. Content is withheld: the client restores a cancelled
             # entry's text into the composer only on the tab that pressed cancel,
             # and nobody pressed it here.
-            state.broadcast_ws("queue_cancel", {"slot": slot.key, "queue_id": entry, "content": ""})
+            change = _QueueChange(
+                slot=slot,
+                entry=entry,
+                from_index=index,
+                frame=("queue_cancel", {"slot": slot.key, "queue_id": entry, "content": ""}),
+                before_ids=queued_ids[:index],
+                after_ids=queued_ids[index + 1 :],
+                removed_item=removed_item,
+                removed_rows=tuple(
+                    m for m in queued_rows if not any(m is kept for kept in slot.messages)
+                ),
+            )
             result["cancelled"] = entry
         else:
             if position is None:
@@ -7836,19 +7994,104 @@ def queue_target(
                 order = [item["id"] for item in queue]
                 _reorder_queued_rows(slot.messages, order)
                 slot.invalidate_source_links()
-                state.broadcast_ws("queue_reorder", {"slot": slot.key, "order": order})
+                change = _QueueChange(
+                    slot=slot,
+                    entry=entry,
+                    from_index=index,
+                    frame=("queue_reorder", {"slot": slot.key, "order": order}),
+                    before_ids=queued_ids[:index],
+                    after_ids=queued_ids[index + 1 :],
+                )
             detail["from"] = index
             detail["to"] = new_index
             result["moved"] = entry
             result["position"] = new_index
 
-        # A cancel that does not reach disk comes back on the next restart, which
-        # is the one outcome a caller that took its message back must not see.
-        start_queue_persist(state, slot)
-        try:
-            state.push_slots_update()
-        except Exception:  # pragma: no cover - sidebar refresh is best-effort
-            logger.debug("session_queue: push_slots_update failed", exc_info=True)
+        if change is not None:
+            # The first suspension point, AFTER the mutation. Nothing has been
+            # broadcast yet, so an undo here is invisible to every tab.
+            durable = await _await_queue_durable(state, slot)
+            if not durable and _undo_queue_change(state, change):
+                # "Nothing changed" is only true once the RESTORED queue is on
+                # disk too: the failed pass may have committed the change, and a
+                # restart before the undo is saved would bring it back.
+                if await _await_queue_durable(state, slot):
+                    raise deny(
+                        "the change could not be saved, so it was undone; nothing "
+                        "changed in the queue, and the call can be retried",
+                        "queue_not_durable",
+                        status=503,
+                    )
+                # Still owed to the periodic flush; until it lands, what a
+                # restart brings back is not known, so say exactly that.
+                start_queue_persist(state, slot)
+                raise deny(
+                    "the change could not be saved and neither could its undo; the "
+                    "queue is back as it was in memory, but a restart before the next "
+                    "save may bring the change back, so list the queue before retrying",
+                    "queue_state_unknown",
+                    status=503,
+                )
+            if change.frame is not None:
+                event, data = change.frame
+                if event == "queue_reorder":
+                    # The order captured before the save is stale if anything
+                    # (a person's drag, a drain, a new send) touched the queue
+                    # while it ran; tabs re-slot rows blind from this frame, so it
+                    # carries the live order, read with no suspension before send.
+                    data = {**data, "order": [item["id"] for item in slot._queue]}
+                state.broadcast_ws(event, data)
+            try:
+                state.push_slots_update()
+            except Exception:  # pragma: no cover - sidebar refresh is best-effort
+                logger.debug("session_queue: push_slots_update failed", exc_info=True)
+            # The await above is the only suspension between the gate and the
+            # listing, and a mirror or channel link can attach to either slot
+            # inside it. The change itself is done and already told to the tabs;
+            # what is still ahead is handing queue text to the caller, so both
+            # gates run again and must resolve the SAME slot object. The config read
+            # is warmed first, with nothing between it and the gate, as the handler
+            # does before the first gate: the save suspended, so the cache the first
+            # gate used may have been invalidated, and a cold read would load the
+            # config on the event loop.
+            await prewarm_enabled_check()
+            # The change is committed and broadcast, so it is audited as allowed
+            # now: every exit below is about the listing, not the change.
+            detail["queued"] = len(queue)
+            _audit(
+                caller_session_key=caller_session_key,
+                operation="queue",
+                slot_key=slot.key,
+                outcome="allowed",
+                detail=detail,
+            )
+            audited = True
+
+            def _changed() -> SessionControlError:
+                # ``deny`` writes its audit row when called, so it is called only
+                # on the paths that actually refuse the listing.
+                return deny(
+                    "the target changed while the change was being saved; the "
+                    "change was applied, but the queue is not listed",
+                    "target_changed",
+                    status=409,
+                )
+
+            try:
+                again = authorize_target(
+                    state,
+                    caller_session_key=caller_session_key,
+                    target=target,
+                    operation="queue",
+                    precomputed_ownership_fenced=caller_fenced,
+                )
+            except SessionControlError:
+                # A closed or newly mirrored target raises codes that mean
+                # "nothing happened" everywhere else; here something did.
+                raise _changed() from None
+            if again is not slot or _created_by_other(slot, caller_key):
+                raise _changed()
+            caller_tab = str(getattr(state._slots.get(caller_key), "_tab_id", "") or "")
 
     entries: list[dict[str, Any]] = []
     for pos, item in enumerate(queue[:MAX_QUEUE_LIST_ENTRIES]):
@@ -7861,17 +8104,18 @@ def queue_target(
             }
         )
     detail["queued"] = len(queue)
-    _audit(
-        caller_session_key=caller_session_key,
-        operation="queue",
-        slot_key=slot.key,
-        outcome="allowed",
-        detail=detail,
-    )
+    if not audited:
+        _audit(
+            caller_session_key=caller_session_key,
+            operation="queue",
+            slot_key=slot.key,
+            outcome="allowed",
+            detail=detail,
+        )
     return {
         "ok": True,
         "target": slot.key,
-        "title": sanitize_outbound(slot.display_title),
+        "title": _bounded_status_title(slot.display_title),
         "running": bool(slot.running or getattr(slot, "_in_stage_execution", False)),
         "action": action,
         "count": len(queue),
