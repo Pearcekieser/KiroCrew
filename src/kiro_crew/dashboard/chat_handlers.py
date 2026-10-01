@@ -10457,17 +10457,19 @@ async def _undo_committed_autocompact(
     legacy line read with no ``created_at`` is recorded as
     ``_LEGACY_NO_CREATED_AT`` and matches only a line that still has none. An
     unreadable identity (``None``) fails the guard rather than guessing. The
-    guarded write is retried directly, because the periodic flush skips a
-    slot with no messages. Only if every attempt is unconfirmed is the slot
-    marked dirty (while it still writes that transcript) as a last resort.
+    guarded write is retried directly and is the ONLY durable write: no slot
+    is marked dirty, because the periodic flush writes slot fields whole and
+    skips this identity check for a line with no ``created_at``, so a dirty
+    mark could land the restored value on a same-key replacement. If every
+    attempt is unconfirmed, the refused value stays on disk until the next
+    edit of this session's threshold.
     """
     # Every slot still on the committed transcript gets prior_pct, the value
-    # written back below: restoring a divergent sibling to its own prior would
-    # let its dirty flush overwrite the restored durable record.
+    # written back below, so a later save of any sibling agrees with the
+    # restored durable record. None is marked dirty (see docstring).
     for other, _other_prior in mirrored:
         if slot_history_key(other) == history_key:
             other.autocompact_pct = prior_pct
-            other._dirty = True
     slot.autocompact_pct = prior_pct
     log = state.conversation_log
     if not log:
@@ -10483,8 +10485,9 @@ async def _undo_committed_autocompact(
         return same_identity and meta.get("autocompact_pct") == committed_pct
 
     # Retry the guarded write directly: the predicate is idempotent, and the
-    # dirty-slot flush below cannot be relied on (it skips a slot with no
-    # messages, and a rebound slot's flush lands on a different file).
+    # dirty-slot flush is not a safe fallback (it skips a slot with no
+    # messages, a rebound slot's flush lands on a different file, and it has
+    # no identity check for a line without created_at).
     restored = False
     for attempt in range(_ROLLBACK_ATTEMPTS):
         try:
@@ -10503,14 +10506,10 @@ async def _undo_committed_autocompact(
         if restored:
             break
     if not restored:
-        # False is either a deleted transcript (nothing to restore) or a
-        # transient unreadable metadata line. For the second, hand the
-        # restored field to the periodic flush, but only while the slot still
-        # writes the committed transcript: a rebound slot's flush lands on a
-        # different file.
+        # False is a deleted or replaced transcript (nothing of ours to
+        # restore) or a metadata line unreadable on every attempt. Neither is
+        # handed to the flush; see the docstring.
         logger.warning("Slot %s autocompact_pct rollback not confirmed", name)
-        if slot_history_key(slot) == history_key:
-            slot._dirty = True
 
 
 async def commit_slot_autocompact(

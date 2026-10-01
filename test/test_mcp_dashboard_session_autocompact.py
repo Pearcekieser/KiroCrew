@@ -338,27 +338,41 @@ def test_the_tool_reports_a_refusal_as_an_error():
     assert out == "Error: could not change that session's threshold: not yours"
 
 
-def test_an_unconfirmed_rollback_hands_the_restored_field_to_the_flush(tmp_path, monkeypatch):
-    """``update_metadata_if`` answering False (a transient unreadable line) is not success."""
+def test_an_unconfirmed_rollback_marks_nothing_dirty(tmp_path, monkeypatch):
+    """An unconfirmed rollback restores the live field but never hands it to the
+    periodic flush: that flush writes slot fields whole and skips the identity
+    check for a line with no ``created_at``, so it could land on a same-key
+    replacement transcript."""
     state, caller, target = _pair(tmp_path)
+    log = state.conversation_log
     real = sc.authorize_target
-    calls = {"n": 0}
+    real_if = log.update_metadata_if
+    calls = {"n": 0, "rollback": 0}
 
     def _flaky(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] >= 3:
+            # The committing save has already landed; clear the flag so the
+            # assertion below sees only what the rollback does.
+            target._dirty = False
             raise sc.SessionControlError("gone", status=403, code="linked_session_target")
         return real(*args, **kwargs)
 
+    def _rollback_unconfirmed(*a, **kw):
+        # Only the compensating write (prior value None, require_existing) is
+        # unconfirmed; the committing save goes through normally.
+        if len(a) >= 2 and a[1] == {"autocompact_pct": None} and kw.get("require_existing"):
+            calls["rollback"] += 1
+            return False
+        return real_if(*a, **kw)
+
     monkeypatch.setattr(sc, "authorize_target", _flaky)
-    monkeypatch.setattr(
-        state.conversation_log, "update_metadata_if", lambda *a, **kw: False, raising=False
-    )
-    target._dirty = False
+    monkeypatch.setattr(log, "update_metadata_if", _rollback_unconfirmed, raising=False)
     with pytest.raises(sc.SessionControlError):
         _call(state, caller, pct=60)
+    assert calls["rollback"] >= 1
     assert target.autocompact_pct is None
-    assert target._dirty is True
+    assert target._dirty is False
 
 
 def test_an_unconfirmed_rollback_is_retried_before_the_refusal_returns(tmp_path, monkeypatch):
@@ -419,6 +433,7 @@ def test_a_rollback_never_writes_into_a_same_key_replacement(tmp_path, monkeypat
     with pytest.raises(sc.SessionControlError):
         _call(state, caller, pct=60)
     assert target.autocompact_pct is None
+    assert target._dirty is False
     meta = log._read_metadata(key) or {}
     assert meta.get("created_at") == "2099-01-01T00:00:00Z"
     assert meta.get("autocompact_pct") == 70.0
@@ -467,8 +482,8 @@ def test_a_rollback_restores_a_legacy_record_with_no_created_at(tmp_path, monkey
 
 def test_a_rollback_restores_a_divergent_alias_to_the_written_back_value():
     """An alias sibling that held a different value before the mirror must be
-    restored to the value written back to disk, not its own prior: its dirty
-    flush writes its field whole and would otherwise overwrite the restore."""
+    restored to the value written back to disk, not its own prior, and no
+    sibling is marked dirty: the guarded write-back is the only durable write."""
     from kiro_crew.dashboard.chat_handlers import _undo_committed_autocompact
     from kiro_crew.dashboard.state import _ChatSlot
 
@@ -488,6 +503,7 @@ def test_a_rollback_restores_a_divergent_alias_to_the_written_back_value():
     )
     assert a.autocompact_pct is None
     assert b.autocompact_pct is None
-    assert b._dirty is True
+    assert a._dirty is False
+    assert b._dirty is False
     patch_ = state.conversation_log.update_metadata_if.call_args.args[1]
     assert patch_ == {"autocompact_pct": None}
