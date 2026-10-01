@@ -126,7 +126,17 @@ to follow the current default; `--keep` affirms it.
 When `agent.max_subagents == 0`, `compute_max_subagents()` sizes the cap from
 host memory alone, clamped to `[3, agent.subagent_auto_max]` (CPU is not a
 term: over-committing it only slows work the adaptive controller already backs
-off from, whereas memory over-commit is an unrecoverable OOM). The
+off from, whereas memory over-commit is an unrecoverable OOM). The subagent
+cap (`resolve_max_subagents`, `recent=True`) prices one slot at
+`max(agent.subagent_cost_gb, read_recent_cost("mem_gb"))`: the start price the
+spawn gate reserves, or the p90 of the most recent `_RECENT_WINDOW` (40, below the per-bucket `_DEFAULT_WINDOW` of 50) cost
+samples across every agent, whichever is higher, so it is never above the cap
+`subagent_cost_gb` alone gives. The reaper re-sizes an auto cap from the latest
+samples on every sweep (`SubagentManager._refresh_auto_cap`), so heavier recent
+runs lower it and it rises back as they age out; a live reload that lands
+during that read wins. The task runner (`compute_max_subagents(cfg)`) and the
+warm-pool reserve keep the worst case, `read_learned_cost` (the max of
+per-agent p90s), because their starts do not pass the spawn gate. The
 available-memory term is read by `_available_memory_gb()`, which is dispatched
 per operating system (see `dynamic-subagent-sizing.md`):
 

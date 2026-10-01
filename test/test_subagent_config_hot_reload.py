@@ -465,3 +465,124 @@ class TestEndToEndThroughConfigWatch:
         assert {"agent.max_subagents", "agent.subagent_max_turns"} <= change.changed
         assert mgr.max_concurrent == 6
         assert mgr._default_turn_limit == 9
+
+
+class TestTheAutoCapFollowsRecentRuns:
+    """The reaper re-sizes an auto cap each sweep, with no restart or reload."""
+
+    @pytest.mark.asyncio
+    async def test_heavier_recent_runs_lower_the_cap_on_the_next_sweep(self) -> None:
+        mgr = _mgr(max_concurrent=32)
+        auto = KiroCrewConfig()
+        auto.agent.max_subagents = 0
+        with (
+            patch("kiro_crew.config.live.snapshot", return_value=auto),
+            patch("kiro_crew.subagent.resolve_max_subagents", return_value=8),
+        ):
+            await mgr._refresh_auto_cap()
+        assert mgr.max_concurrent == 8
+        with (
+            patch("kiro_crew.config.live.snapshot", return_value=auto),
+            patch("kiro_crew.subagent.resolve_max_subagents", return_value=32),
+        ):
+            await mgr._refresh_auto_cap()  # the heavy runs aged out
+        assert mgr.max_concurrent == 32
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_pin_is_never_re_sized(self) -> None:
+        mgr = _mgr(max_concurrent=9)
+        pinned = KiroCrewConfig()
+        pinned.agent.max_subagents = 9
+        with (
+            patch("kiro_crew.config.live.snapshot", return_value=pinned),
+            patch("kiro_crew.subagent.resolve_max_subagents") as resolve,
+        ):
+            await mgr._refresh_auto_cap()
+        resolve.assert_not_called()
+        assert mgr.max_concurrent == 9
+
+    @pytest.mark.asyncio
+    async def test_a_reload_landing_during_the_read_wins(self) -> None:
+        mgr = _mgr(max_concurrent=32)
+        auto = KiroCrewConfig()
+        auto.agent.max_subagents = 0
+        pinned = KiroCrewConfig()
+        pinned.agent.max_subagents = 6
+
+        def _resolve_while_a_reload_lands(cfg):
+            mgr.apply_limits(pinned, max_concurrent=6)
+            return 8
+
+        with (
+            patch("kiro_crew.config.live.snapshot", return_value=auto),
+            patch(
+                "kiro_crew.subagent.resolve_max_subagents",
+                side_effect=_resolve_while_a_reload_lands,
+            ),
+        ):
+            await mgr._refresh_auto_cap()
+        assert mgr.max_concurrent == 6
+
+    @pytest.mark.asyncio
+    async def test_a_reload_landing_during_the_config_load_wins(self) -> None:
+        """The snapshot precedes the config read, so a pin applied during it holds."""
+        mgr = _mgr(max_concurrent=32)
+        auto = KiroCrewConfig()
+        auto.agent.max_subagents = 0
+        pinned = KiroCrewConfig()
+        pinned.agent.max_subagents = 6
+
+        def _load_while_a_pin_lands():
+            mgr.apply_limits(pinned, max_concurrent=6)
+            return auto  # the stale read still says auto
+
+        with (
+            patch("kiro_crew.config.live.snapshot", return_value=None),
+            patch("kiro_crew.subagent.KiroCrewConfig.load", side_effect=_load_while_a_pin_lands),
+            patch("kiro_crew.subagent.resolve_max_subagents", return_value=20),
+        ):
+            await mgr._refresh_auto_cap()
+        assert mgr.max_concurrent == 6
+
+    @pytest.mark.asyncio
+    async def test_a_torn_config_file_cannot_discard_a_pin(self) -> None:
+        """The re-size reads the watcher's adopted config, not the file.
+
+        A torn ``config.json`` loads as defaults (``max_subagents = 0``); the
+        watcher keeps the last valid config, so the pin stays in force.
+        """
+        mgr = _mgr(max_concurrent=8)
+        pinned = KiroCrewConfig()
+        pinned.agent.max_subagents = 8
+        torn_defaults = KiroCrewConfig()
+        with (
+            patch("kiro_crew.config.live.snapshot", return_value=pinned),
+            patch("kiro_crew.subagent.KiroCrewConfig.load", return_value=torn_defaults) as load,
+            patch("kiro_crew.subagent.resolve_max_subagents") as resolve,
+        ):
+            await mgr._refresh_auto_cap()
+        load.assert_not_called()
+        resolve.assert_not_called()
+        assert mgr.max_concurrent == 8
+
+    @pytest.mark.asyncio
+    async def test_the_reaper_calls_it_every_sweep(self) -> None:
+        import contextlib
+
+        import kiro_crew.subagent as sa
+
+        mgr = _mgr(max_concurrent=4)
+        refresh = AsyncMock()
+        with (
+            patch.object(sa, "_REAPER_INTERVAL", 0),
+            patch.object(sa, "compact_cost_log"),
+            patch.object(mgr, "_sample_live_costs"),
+            patch.object(mgr, "_rebuild_conversation_registry", new=AsyncMock()),
+            patch.object(mgr, "_refresh_auto_cap", new=refresh),
+        ):
+            task = asyncio.ensure_future(mgr._reaper_loop())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        assert refresh.await_count >= 1

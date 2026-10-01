@@ -731,7 +731,7 @@ def _collect_system_metrics() -> dict[str, object]:
     # that drives the dynamic sub-agent cap and the injected [RESOURCES] line.
     try:
         from kiro_crew.resource_status import probe as _resource_probe
-        from kiro_crew.subagent import compute_max_subagents
+        from kiro_crew.subagent import resolve_max_subagents
 
         status = _resource_probe()
         data["resource_posture"] = status.posture
@@ -740,7 +740,7 @@ def _collect_system_metrics() -> dict[str, object]:
         data["resource_critical_gb"] = status.critical_gb
         try:
             cfg = KiroCrewConfig.load()
-            data["subagent_cap"] = compute_max_subagents(cfg)
+            data["subagent_cap"] = resolve_max_subagents(cfg)
         except Exception:
             # Fallback: derive from available memory directly
             if status.available_gb > 0:

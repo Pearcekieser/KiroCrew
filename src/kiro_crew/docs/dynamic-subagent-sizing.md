@@ -90,7 +90,20 @@ Kiro Crew doesn't hard-code how much an agent costs — it measures it:
   only; sizing reads `mem_gb`.
 - At the next startup, Kiro Crew takes the **p90 of the last N memory samples
   per agent name** (robust to the occasional outlier run), then the worst case
-  across agent types, as the divisor.
+  across agent types. That worst case sizes the task runner's parallel steps
+  and the memory held back for the warm pool, which start without the spawn
+  gate.
+- The subagent cap prices one slot at the larger of `agent.subagent_cost_gb`
+  (the price the spawn gate reserves for every start) and the **p90 of the most
+  recent 40 samples across every agent** (fewer than the 50 compaction keeps
+  per agent, so a stopped agent cannot hold the window). With no history that is
+  `subagent_cost_gb`. The reaper re-sizes the cap from the latest samples on
+  every sweep, so a run of heavier work lowers it within a minute and it rises
+  back once those runs age out of the window, with no restart or reload. The
+  cap is never above what `subagent_cost_gb` alone would give. One agent whose
+  window includes occasional release builds no longer sizes every slot at its
+  own p90; the live gates (`spawn_min_memory_gb`, the posture gate and the
+  adaptive controller) guard memory growth after a start.
 
 The longer the gateway runs, the more accurate the learned cost becomes. The
 sample log is bounded to the last N records per agent (FIFO compaction at

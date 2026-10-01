@@ -229,3 +229,48 @@ class TestOverCapRecordDoesNotLoseData:
         rows, complete = sc._read_samples_checked()
         assert len(rows) == 5, "records before the over-cap one must survive"
         assert complete is False, "the caller that writes must be able to see the truncation"
+
+
+# --- read_recent_cost ------------------------------------------------------
+
+
+def test_recent_cost_is_none_without_history(cost_log):
+    assert sc.read_recent_cost("mem_gb") is None
+
+
+def test_recent_cost_is_the_p90_across_agents(cost_log):
+    recs = [{"agent": "a", "mem_gb": 1.0, "cpu_cores": 0.1} for _ in range(9)]
+    recs += [{"agent": "b", "mem_gb": 1.0, "cpu_cores": 0.1}]
+    _seed(cost_log, recs)
+    assert sc.read_recent_cost("mem_gb") == pytest.approx(1.0)
+
+
+def test_recent_cost_reads_only_the_newest_window(cost_log):
+    old_heavy = [{"agent": "builder", "mem_gb": 24.0, "cpu_cores": 9.0} for _ in range(10)]
+    newer = [{"agent": "kirocrew", "mem_gb": 1.5, "cpu_cores": 0.1} for _ in range(20)]
+    _seed(cost_log, old_heavy + newer)
+    assert sc.read_recent_cost("mem_gb", window=20) == pytest.approx(1.5)
+    # The same heavy runs inside the window price it.
+    _seed(cost_log, newer + old_heavy)
+    assert sc.read_recent_cost("mem_gb", window=20) == pytest.approx(24.0)
+
+
+def test_recent_cost_skips_unusable_values(cost_log):
+    _seed(
+        cost_log,
+        [
+            {"agent": "a", "mem_gb": 0, "cpu_cores": 0.1},
+            {"agent": "a", "mem_gb": True, "cpu_cores": 0.1},
+            {"agent": "a", "mem_gb": "9", "cpu_cores": 0.1},
+            {"agent": "a", "mem_gb": 2.0, "cpu_cores": 0.1},
+        ],
+    )
+    assert sc.read_recent_cost("mem_gb", min_samples=1) == pytest.approx(2.0)
+
+
+def test_recent_cost_needs_min_samples(cost_log):
+    # One heavy first run does not price every slot on a fresh host.
+    _seed(cost_log, [{"agent": "builder", "mem_gb": 24.0, "cpu_cores": 9.0}])
+    assert sc.read_recent_cost("mem_gb") is None
+    _seed(cost_log, [{"agent": "builder", "mem_gb": 24.0, "cpu_cores": 9.0} for _ in range(3)])
+    assert sc.read_recent_cost("mem_gb") == pytest.approx(24.0)

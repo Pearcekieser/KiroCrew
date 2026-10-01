@@ -869,6 +869,12 @@ class OrphanStallMonitor(ManagerComponent):
                 )
             except Exception:
                 logger.debug("Reaper: live-cost sample failed", exc_info=True)
+            # The auto cap prices a slot from recent runs, so re-size it as they
+            # land: no restart or reload is needed for it to follow the host.
+            try:
+                await self._manager._refresh_auto_cap()
+            except Exception:
+                logger.debug("Reaper: auto-cap re-size failed", exc_info=True)
             # Wave liveness backstop: reconcile waves wedged by submissions
             # lost before the process boundary (see _sweep_stuck_waves).
             try:

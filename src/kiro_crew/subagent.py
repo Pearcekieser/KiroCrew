@@ -173,6 +173,7 @@ from kiro_crew.subagent_cost import (
     append_cost_sample,
     compact_cost_log,
     read_learned_cost,
+    read_recent_cost,
 )
 from kiro_crew.subagent_manager import (
     CancellationCoordinator,
@@ -1928,7 +1929,7 @@ def _agents_slice_available_gb() -> float:
     return max(0.0, (min(ceilings) - _working_set(slice_dir, True, current)) / (1024**3))
 
 
-def compute_max_subagents(cfg: KiroCrewConfig) -> int:
+def compute_max_subagents(cfg: KiroCrewConfig, *, recent: bool = False) -> int:
     """Compute the concurrent sub-agent cap from host memory.
 
     Memory is the ONLY host resource that sizes the cap: a buffered memory
@@ -1947,10 +1948,20 @@ def compute_max_subagents(cfg: KiroCrewConfig) -> int:
     memory guard), never above the absolute ``subagent_auto_max`` (which
     stands in for the unmodeled LLM-provider concurrency limit).
 
-    The per-agent memory cost comes from the learned cost store
-    (``read_learned_cost``); when no learned value exists yet, the configured
-    first-boot fallback (``subagent_cost_gb``) is used. Fails open to the legacy
-    default when memory can't be read (e.g. non-Linux hosts).
+    By default the per-agent memory cost comes from the learned cost store
+    (``read_learned_cost``, the heaviest agent's p90); when no learned value
+    exists yet, the configured first-boot fallback (``subagent_cost_gb``) is
+    used. The task runner sizes its parallel step groups this way.
+
+    ``recent=True`` is the subagent cap (:func:`resolve_max_subagents`): one
+    slot is priced at ``max(subagent_cost_gb, read_recent_cost)``, the price the
+    spawn gate reserves for every start or the p90 of the most recent runs on
+    this host, whichever is higher. With no history it is ``subagent_cost_gb``;
+    heavier recent runs lower the cap on the next compute, and old heavy runs
+    age out of the bounded window. The memory held back for the warm pool keeps
+    the worst-case price either way, because warm-pool runtimes start without
+    the spawn gate. Fails open to the legacy default when memory can't be read
+    (e.g. non-Linux hosts).
 
     See ``dynamic-subagent-sizing.md`` §3.
     """
@@ -1962,7 +1973,7 @@ def compute_max_subagents(cfg: KiroCrewConfig) -> int:
     hard_cap = max(_LEGACY_DEFAULT_MAX, agent.subagent_auto_max)
     lo = _LEGACY_DEFAULT_MAX
 
-    mem_term = _host_mem_term(cfg)
+    mem_term = _host_mem_term(cfg, recent=recent)
     if mem_term is None:
         # Memory unreadable (non-Linux / read error) — fail open.
         logger.info(
@@ -1991,7 +2002,7 @@ def compute_max_subagents(cfg: KiroCrewConfig) -> int:
     return result
 
 
-def _host_mem_term(cfg: KiroCrewConfig) -> int | None:
+def _host_mem_term(cfg: KiroCrewConfig, *, recent: bool = False) -> int | None:
     """How many agents fit in this host's available memory, or None when unreadable.
 
     THE one place the sizing arithmetic lives, so the auto-sized cap
@@ -2006,9 +2017,22 @@ def _host_mem_term(cfg: KiroCrewConfig) -> int | None:
     if avail_gb <= 0:
         return None
     buf = 1.0 - agent.subagent_mem_buffer_pct / 100.0
-    mem_cost = read_learned_cost("mem_gb") or agent.subagent_cost_gb or 0.5
+    # A non-positive configured start cost would make the divisor zero.
+    start_cost = agent.subagent_cost_gb if agent.subagent_cost_gb > 0 else 0.5
     pool_size = cfg.session.pool_size
-    return math.floor((avail_gb * buf - pool_size * mem_cost) / mem_cost)
+    if recent:
+        # One slot: the start price the spawn gate reserves, or what recent
+        # runs on this host peaked at, whichever is higher.
+        mem_cost = max(start_cost, read_recent_cost("mem_gb") or 0.0)
+        # Warm-pool runtimes start without the spawn gate: worst case. The
+        # worst-case read is only needed when there is a pool to price.
+        pool_cost = mem_cost
+        if pool_size > 0:
+            pool_cost = max(mem_cost, read_learned_cost("mem_gb") or 0.0)
+    else:
+        mem_cost = read_learned_cost("mem_gb") or start_cost
+        pool_cost = mem_cost
+    return math.floor((avail_gb * buf - pool_size * pool_cost) / mem_cost)
 
 
 # Sweeps that must have measured a dedicated worker before it counts as settled
@@ -2091,7 +2115,7 @@ def resolve_max_subagents(cfg: KiroCrewConfig) -> int:
         # defend here so a directly-constructed config can't drop the runtime cap
         # below the floor.
         return max(configured, _LEGACY_DEFAULT_MAX)
-    return compute_max_subagents(cfg)
+    return compute_max_subagents(cfg, recent=True)
 
 
 _CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
@@ -3395,6 +3419,10 @@ class SubagentManager:
         # always resolves the cap rather than comparing against a snapshot that
         # was never taken.
         self._last_sizing_fields: tuple[object, ...] | None = None
+        # Bumped by every apply_limits, so the reaper's periodic auto-cap
+        # re-size (``_refresh_auto_cap``) can tell a live reload landed while
+        # it was reading the log and must not overwrite it.
+        self._limits_generation = 0
         self._config_sub: live.Subscription | None = None
         try:
             self._config_sub = live.watch_object(
@@ -3623,6 +3651,7 @@ class SubagentManager:
         """
         agent = cfg.agent
         old_cap = self._max_concurrent
+        self._limits_generation = getattr(self, "_limits_generation", 0) + 1
         if max_concurrent is None:
             try:
                 max_concurrent = resolve_max_subagents(cfg)
@@ -3670,6 +3699,44 @@ class SubagentManager:
             self._spawn_stagger_secs,
             self._startup_cap(),
             self._result_ttl_secs,
+        )
+        if self._max_concurrent > old_cap:
+            self._notify_cap_raised()
+
+    async def _refresh_auto_cap(self) -> None:
+        """Re-size an auto cap from the latest cost samples. Called by the reaper.
+
+        The auto cap prices a slot from recent runs (``read_recent_cost``), so
+        it moves as runs land: heavier recent runs lower it, and it rises back
+        as they age out of the window, with no restart or reload. An explicit
+        ``max_subagents`` pin is the ceiling as written and is never touched.
+        The log read runs off the loop; a live reload that lands during it wins.
+        """
+        # Snapshot BEFORE the first await: a live reload applied while either
+        # read below is in flight has sized the cap from newer config and wins.
+        generation = self._limits_generation
+        # The config the live watcher has adopted, not a fresh disk read: a
+        # torn or unreadable file loads as defaults (max_subagents = 0), which
+        # would discard an operator's pin. Without a watcher, read the file.
+        cfg = live.snapshot()
+        if cfg is None:
+            cfg = await asyncio.to_thread(KiroCrewConfig.load)
+        if cfg is None or int(cfg.agent.max_subagents) > 0:
+            return
+        cap = max(1, int(await asyncio.to_thread(resolve_max_subagents, cfg)))
+        if self._limits_generation != generation or cap == self._user_max_concurrent:
+            return
+        old_ceiling = self._user_max_concurrent
+        old_cap = self._max_concurrent
+        self._user_max_concurrent = cap
+        self._max_concurrent = self._clamp_effective_cap()
+        logger.info(
+            "auto subagent cap re-sized from recent runs: ceiling %d (was %d), "
+            "effective %d (was %d)",
+            self._user_max_concurrent,
+            old_ceiling,
+            self._max_concurrent,
+            old_cap,
         )
         if self._max_concurrent > old_cap:
             self._notify_cap_raised()

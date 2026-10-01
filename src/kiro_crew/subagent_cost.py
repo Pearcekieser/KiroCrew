@@ -258,6 +258,43 @@ def read_learned_cost(
     return max(costs.values()) if costs else None
 
 
+# How many of the most recent run samples, across every agent, price one slot
+# of the auto cap (:func:`read_recent_cost`). Bounded so an old heavy run ages
+# out as new runs arrive: only the newest this-many samples count. It is kept
+# below ``_DEFAULT_WINDOW``, the per-bucket count compaction retains, so a
+# bucket that stopped running cannot hold the window by itself: once another
+# bucket has this many newer samples, the old ones fall outside it.
+_RECENT_WINDOW = _DEFAULT_WINDOW * 4 // 5
+
+
+def read_recent_cost(
+    key: str,
+    *,
+    window: int = _RECENT_WINDOW,
+    min_samples: int = _DEFAULT_MIN_SAMPLES,
+    percentile: float = _DEFAULT_PERCENTILE,
+) -> float | None:
+    """The p90 of the last ``window`` samples of *key* in the log, or None.
+
+    The auto cap prices one slot at ``max(subagent_cost_gb, this)``. It reads
+    the most recent ``window`` samples across every agent, in log order, so the
+    figure follows what runs on this host cost lately: a run of heavier work
+    raises it on the next compute, and old heavy runs age out once ``window``
+    newer samples have arrived. None until the log holds ``min_samples`` usable
+    samples, the same floor :func:`read_learned_costs` applies, so one first
+    run does not price every slot on a fresh host. The log is streamed and only
+    the window is held.
+    """
+    recent: deque[float] = deque(maxlen=max(1, window))
+    for rec in _iter_samples(_ReadStatus()):
+        v = rec.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            recent.append(float(v))
+    if not recent or len(recent) < min_samples:
+        return None
+    return _percentile(list(recent), percentile)
+
+
 def compact_cost_log(window: int = _DEFAULT_WINDOW) -> None:
     """FIFO-trim the log to the last ``window`` samples per (agent, shared) (atomic).
 

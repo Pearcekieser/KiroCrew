@@ -34,6 +34,7 @@ def _no_learned_cost(monkeypatch):
     assert against the wrong cap. These cases exercise the fallback path by
     design, so force the learned lookup to miss."""
     monkeypatch.setattr(subagent, "read_learned_cost", lambda *a, **k: None)
+    monkeypatch.setattr(subagent, "read_recent_cost", lambda *a, **k: None)
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +73,131 @@ def patch_host(monkeypatch):
         monkeypatch.setattr(subagent.os, "cpu_count", lambda: cpu_count)
 
     return _apply
+
+
+# --- the auto cap follows recent runs --------------------------------------
+
+
+class TestAutoCapFollowsRecentRuns:
+    """The subagent cap prices a slot at max(subagent_cost_gb, recent p90).
+
+    ``subagent_cost_gb`` is the price the spawn gate reserves for every start;
+    the recent p90 is read from the last ``_RECENT_WINDOW`` samples in the cost
+    log, so the cap drops as heavier runs land and rises as they age out.
+    """
+
+    @pytest.fixture
+    def cost_log(self, monkeypatch, tmp_path):
+        import kiro_crew.subagent_cost as sc
+
+        log = tmp_path / "cost_samples.jsonl"
+        monkeypatch.setattr(sc, "_cost_log_path", lambda: log)
+        monkeypatch.setattr(subagent, "read_recent_cost", sc.read_recent_cost)
+        monkeypatch.setattr(subagent, "read_learned_cost", sc.read_learned_cost)
+        return log
+
+    @staticmethod
+    def _write(log, runs):
+        import json
+
+        log.write_text(
+            "".join(
+                json.dumps({"agent": agent, "mem_gb": gb, "cpu_cores": 0.1, "ts": time.time()})
+                + "\n"
+                for agent, gb in runs
+            ),
+            encoding="utf-8",
+        )
+
+    def test_no_history_prices_a_slot_at_subagent_cost_gb(self, patch_host, cost_log) -> None:
+        patch_host(40.0, 16)
+        cfg = _cfg(mem_cost=0.5, hard_cap=1000)
+        # floor(40 * 0.8 / 0.5) = 64
+        assert resolve_max_subagents(cfg) == 64
+
+    def test_a_heavier_recent_window_lowers_the_cap(self, patch_host, cost_log) -> None:
+        patch_host(40.0, 16)
+        cfg = _cfg(mem_cost=0.5, hard_cap=1000)
+        self._write(cost_log, [("kirocrew", 0.4)] * 100)
+        assert resolve_max_subagents(cfg) == 64  # 0.4 < 0.5: the start price binds
+        self._write(cost_log, [("kirocrew", 0.4)] * 50 + [("builder", 4.0)] * 50)
+        # recent p90 = 4.0: floor(32 / 4) = 8
+        assert resolve_max_subagents(cfg) == 8
+
+    def test_aged_out_heavy_runs_raise_it_back(self, patch_host, cost_log) -> None:
+        import kiro_crew.subagent_cost as sc
+
+        patch_host(40.0, 16)
+        cfg = _cfg(mem_cost=0.5, hard_cap=1000)
+        heavy = [("builder", 4.0)] * sc._DEFAULT_WINDOW
+        self._write(cost_log, heavy)
+        assert resolve_max_subagents(cfg) == 8
+        # Newer light runs land and compaction trims each bucket to its window,
+        # as the reaper does. The heavy bucket keeps all its retained samples,
+        # but they are older than the newest _RECENT_WINDOW, so they sit
+        # outside the window that prices a slot.
+        self._write(cost_log, heavy + [("kirocrew", 1.0)] * (2 * sc._DEFAULT_WINDOW))
+        sc.compact_cost_log()
+        # recent p90 = 1.0: floor(32 / 1) = 32
+        assert resolve_max_subagents(cfg) == 32
+
+    def test_the_recent_window_is_shorter_than_a_compacted_bucket(self) -> None:
+        import kiro_crew.subagent_cost as sc
+
+        # Otherwise one stopped bucket's retained samples could fill the window.
+        assert sc._RECENT_WINDOW < sc._DEFAULT_WINDOW
+
+    def test_a_non_positive_start_cost_does_not_divide_by_zero(self, patch_host, cost_log) -> None:
+        patch_host(40.0, 16)
+        for bad in (0.0, -1.0):
+            cfg = _cfg(mem_cost=bad, hard_cap=1000)
+            # Falls back to 0.5: floor(32 / 0.5) = 64
+            assert resolve_max_subagents(cfg) == 64
+
+    def test_the_cap_never_exceeds_the_start_price_alone(self, patch_host, cost_log) -> None:
+        patch_host(171.8, 128)
+        cfg = _cfg(mem_cost=0.5, hard_cap=1000)
+        ceiling = int(171.8 * 0.8 / 0.5)
+        for runs in (
+            [],
+            [("kirocrew", 0.1)] * 100,
+            [("kirocrew", 1.5)] * 60 + [("builder", 24.0)] * 6,
+            [("builder", 24.0)] * 100,
+        ):
+            self._write(cost_log, runs)
+            assert resolve_max_subagents(cfg) <= ceiling
+
+    def test_one_build_heavy_agent_no_longer_sizes_every_slot(self, patch_host, cost_log) -> None:
+        """The reported host: one agent's window is 12% release builds.
+
+        Its own p90 is above 20 GB, so the worst-case price the task runner
+        keeps sizes 5 slots. The recent window across every agent is mostly
+        light runs, so the subagent cap reaches the hard cap of 32.
+        """
+        patch_host(171.8, 128)
+        cfg = _cfg(mem_cost=0.5, hard_cap=32)
+        runs = [("build-heavy", 1.2)] * 44 + [("build-heavy", 24.0)] * 6
+        runs += [("kirocrew", 1.5)] * 50 + [("kirocrew-worker", 1.5)] * 50
+        self._write(cost_log, runs)
+        assert resolve_max_subagents(cfg) == 32
+        assert compute_max_subagents(cfg) == 5  # the task runner's worst case
+
+    def test_the_warm_pool_reserve_keeps_the_worst_case(self, patch_host, cost_log) -> None:
+        patch_host(100.0, 64)
+        self._write(cost_log, [("kirocrew", 2.0)] * 100 + [("builder", 20.0)] * 3)
+        # recent p90 is 2.0; the worst case (builder's own p90) is 20.0.
+        cfg = _cfg(mem_cost=0.5, hard_cap=1000, pool_size=2)
+        # floor((80 - 2 * 20) / 2.0) = 20, not floor((80 - 2 * 2) / 2) = 38
+        assert compute_max_subagents(cfg, recent=True) == 20
+
+    def test_without_a_pool_the_worst_case_is_not_read(self, patch_host, monkeypatch) -> None:
+        # The worst-case read prices only the warm pool; with no pool it is skipped.
+        calls = []
+        monkeypatch.setattr(subagent, "read_recent_cost", lambda key: 2.0)
+        monkeypatch.setattr(subagent, "read_learned_cost", lambda key: calls.append(key) or 20.0)
+        patch_host(100.0, 64)
+        assert compute_max_subagents(_cfg(mem_cost=0.5, hard_cap=1000), recent=True) == 40
+        assert calls == []
 
 
 # --- memory is the only host term ------------------------------------------
