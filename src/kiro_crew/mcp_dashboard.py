@@ -856,6 +856,34 @@ def _session_tools() -> tuple[Tool, ...]:
             routes=("POST /api/session-control/end-wait",),
         ),
         Tool(
+            name="session_retry",
+            description=(
+                "Re-run another session's last turn when it FAILED: it ended in an "
+                "error (for example 'Request initialize timed out' at start) or with no "
+                "reply. Does the same thing as pressing Resume in that tab: the session "
+                "picks up its most recent request, and no second copy of the prompt is "
+                "added. Use this instead of re-sending the prompt with session_send. "
+                "Refused while the target is running, busy or has queued messages, and "
+                "refused when its last turn finished normally or was stopped, so it "
+                "cannot regenerate a good answer. After two failed starts in a row it is "
+                "refused with session_start_repeat: the host needs attention, not a "
+                "third retry."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Session key from list_sessions, or its exact title.",
+                    },
+                },
+                "required": ["target"],
+            },
+            run=_run_session_retry,
+            identity="strict",
+            routes=("POST /api/session-control/retry",),
+        ),
+        Tool(
             name="session_set_model",
             description=(
                 "Change the model and/or reasoning effort another session runs on; "
@@ -2726,6 +2754,22 @@ def _run_session_end_wait(args: dict[str, Any], ctx: ToolContext) -> str:
     return (
         f"\u23f0 End-wait sent to `{target}`. Its wait returns on the next "
         "keepalive ping (within about 5s) and the turn continues."
+    )
+
+
+def _run_session_retry(args: dict[str, Any], ctx: ToolContext) -> str:
+    try:
+        resp = ctx.client.post(
+            "/api/session-control/retry",
+            {"target": args["target"]},
+            session_key=ctx.caller_key,
+        )
+    except DashboardError as refused:
+        return f"Error: could not retry that session's turn: {refused.error}"
+    target = resp.get("target", args["target"])
+    return redact(
+        f"\U0001f501 Retry started in `{target}`. Its transcript shows the resume row; "
+        "read it with session_read_message."
     )
 
 

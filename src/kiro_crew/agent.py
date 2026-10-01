@@ -4714,6 +4714,11 @@ handle immediately.
 #:   and relaunches it. The conversation survives, but a reload is still a
 #:   process-level action on a session a person may be watching, and no
 #:   conductor step needs it.
+#: * ``session_retry`` — WITHHELD here, GRANTED to members (below). It sends no
+#:   new text: it re-runs a failed last turn through Resume's path, and it refuses
+#:   any turn that did not fail. But it still starts a turn in a session that is
+#:   not the caller's own, and the conductor has no ownership fence to bound which
+#:   session that is.
 #:
 #: Every withheld verb stays MOUNTED (``@kirocrew-dashboard`` is still in
 #: ``tools``) — it just passes through ``hooks.on_tool_call`` like any ungranted
@@ -4750,10 +4755,18 @@ _CONDUCTOR_DASHBOARD_GRANTS: tuple[str, ...] = (
 #: several targets instead of one. A member telling its whole fleet "the base moved"
 #: is the ordinary case of the dispatch loop these grants exist for, and the
 #: alternative is one approval prompt per worker on an unattended cycle.
+#: ``session_retry`` joins under the same fence and is narrower than
+#: ``session_send``. It runs ``authorize_target`` for the caller, so it reaches
+#: only worker sessions the member opened. It sends no text: the resumed turn is
+#: the one the worker already had, queued without the authenticated-human flag.
+#: And it refuses a turn that finished or was stopped (``turn_not_failed``).
+#: Restarting a worker whose turn timed out is the patrol step the verb exists
+#: for, and that step runs with nobody at the keyboard.
 _MEMBER_DASHBOARD_GRANTS: tuple[str, ...] = _CONDUCTOR_DASHBOARD_GRANTS + (
     "@kirocrew-dashboard/session_send",
     "@kirocrew-dashboard/session_broadcast",
     "@kirocrew-dashboard/session_stop",
+    "@kirocrew-dashboard/session_retry",
 )
 
 

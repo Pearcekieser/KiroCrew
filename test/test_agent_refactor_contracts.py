@@ -110,7 +110,7 @@ BASE_SURFACE: dict[str, str] = {
     "_MAX_TOTAL_USER_HOOKS": "value int f5ca38f748a1d6ea",
     "_MAX_USER_HOOKS_PER_EVENT": "value int 4a44dc15364204a8",
     "_MCP_REGISTRY_TYPE": "value str 06c63899e16a32c5",
-    "_MEMBER_DASHBOARD_GRANTS": "value tuple 2903d7e5ad4146d8",
+    "_MEMBER_DASHBOARD_GRANTS": "value tuple 217848c3e96f9a58",
     "_MEMBER_PANEL_GRANTS": "value tuple c03fa46dc2d0f774",
     "_NATIVE_PROMPT_STUB": "value str ceed0be70c1f6da8",
     "_PIPELINE_CONDUCTOR_AGENT_FILENAME": "value str 3b5e111de6d1d305",
@@ -907,6 +907,7 @@ def test_the_member_grants_extend_the_conductor_grants_in_order() -> None:
         "@kirocrew-dashboard/session_send",
         "@kirocrew-dashboard/session_broadcast",
         "@kirocrew-dashboard/session_stop",
+        "@kirocrew-dashboard/session_retry",
     )
     assert agent._MEMBER_PANEL_GRANTS == (
         "@kirocrew-panel/panel_templates",
@@ -940,7 +941,13 @@ def test_no_conductor_is_granted_a_fleet_write_or_a_model_switch() -> None:
         agent._SECURITY_CONDUCTOR_DASHBOARD_GRANTS,
     )
     for grants in conductor_tuples:
-        for verb in ("session_broadcast", "session_send", "session_stop", "session_set_model"):
+        for verb in (
+            "session_broadcast",
+            "session_send",
+            "session_stop",
+            "session_retry",
+            "session_set_model",
+        ):
             assert f"@kirocrew-dashboard/{verb}" not in grants
     every = conductor_tuples + (agent._MEMBER_DASHBOARD_GRANTS, agent._MEMBER_PANEL_GRANTS)
     assert all("@kirocrew-dashboard/session_set_model" not in grants for grants in every)

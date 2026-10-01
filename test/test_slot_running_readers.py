@@ -127,7 +127,6 @@ def test_running_and_turn_running_slot_readers_are_enumerated() -> None:
                 ("chat_handlers.py", "_switch_target_busy"),
                 # The agent route's transaction; the in-turn /agent command shares it.
                 ("chat_handlers.py", "switch_slot_agent"),
-                ("chat_handlers.py", "api_chat_slot_continue"),
                 ("chat_api/slot_detail.py", "api_chat_slot_detail"),
                 ("chat_handlers.py", "api_chat_slot_interrupt"),
                 ("chat_handlers.py", "api_chat_slot_model"),
@@ -138,6 +137,7 @@ def test_running_and_turn_running_slot_readers_are_enumerated() -> None:
                 ("chat_handlers.py", "api_chat_slot_workspace"),
                 ("chat_api/slot_lifecycle.py", "api_chat_slots_cleanup"),
                 ("chat_handlers.py", "api_chat_slots_model"),
+                ("chat_handlers.py", "continue_slot_turn"),
                 ("chat_handlers.py", "stop_slot_turn"),
                 ("chat_rewind.py", "api_chat_slot_rewind"),
                 # The memory-ready queue drain starts a turn only on a slot no
