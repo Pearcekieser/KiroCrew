@@ -1689,6 +1689,16 @@ async def api_artifact_asset(request: web.Request) -> web.Response:
             state = request.app.get("state") if hasattr(request, "app") else None
             log = getattr(state, "conversation_log", None)
             owned = await asyncio.to_thread(descends_from, log, session, owner)
+            # The owner decision is a permission decision, so both outcomes
+            # are audited (the SEL rule every other decision in this module
+            # follows). The requesting session is the caller's claim and the
+            # owner is store metadata; both go through the redacting writer.
+            _audit(
+                tool="artifact_asset_owner_check",
+                request=request,
+                outcome="success" if owned else "denied",
+                extra={"slug": slug, "session": session, "owner": owner or ""},
+            )
             if not owned:
                 return _err("artifact not found", status=404)
     except ArtifactNotFoundError as exc:

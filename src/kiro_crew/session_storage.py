@@ -102,7 +102,12 @@ from kiro_crew.config.paths import (
     kiro_sessions_dir,
     legacy_home,
 )
-from kiro_crew.dashboard.fork_lineage import UNPROVABLE, parent_key, recorded_chain
+from kiro_crew.dashboard.fork_lineage import (
+    MAX_METADATA_LINE_BYTES,
+    UNPROVABLE,
+    parent_key,
+    recorded_chain,
+)
 from kiro_crew.history import (
     ARCHIVE_DIR_NAME,
     ARCHIVE_SEGMENT_DELIMITER,
@@ -2781,6 +2786,49 @@ def _read_manifest(
     return header, entries
 
 
+class _UnreadableManifest(Exception):
+    """A streamed manifest could not be read to the end (absent, unopenable, no
+    valid header, or a record over the cap): whatever was yielded before is NOT a
+    complete listing, and the caller must not act on it."""
+
+
+def _stream_manifest_entries(batch: Path, *, dir_fd: int | None = None) -> Iterator[dict[str, Any]]:
+    """Yield a manifest's session entries one at a time, never holding the list.
+
+    The streamed counterpart of :func:`_read_manifest` for readers that retain a
+    BOUNDED structure of their own from an O(sessions) manifest (the staged
+    lineage and staged-stem readers): the manifest lives in an agent-writable
+    tree, so the entries list :func:`_read_manifest` builds is an allocation
+    the tree's author sizes, and bounding the retained structure after that list
+    exists bounds nothing. Guards match :func:`_read_manifest` exactly, raised
+    as :class:`_UnreadableManifest` instead of returning ``None``: the same
+    skipped-line tolerance, the same schema rejection, the same treatment of an
+    unopenable file or an over-cap record. A caller that has already consumed
+    entries when it is raised holds a PARTIAL listing and must discard it.
+    """
+    header: dict[str, Any] | None = None
+    try:
+        with _open_manifest(batch, dir_fd) as handle:
+            for record in _manifest_records(handle, batch):
+                if header is None:
+                    header = record
+                    if header.get("schema") != MANIFEST_SCHEMA:
+                        raise _UnreadableManifest(batch.name)
+                    continue
+                yield record
+    except OSError as exc:
+        raise _UnreadableManifest(batch.name) from exc
+    except _OversizedManifestRecord as exc:
+        logger.warning(
+            "trash manifest in %r has a record over %d chars; treating it as unreadable",
+            batch.name,
+            _MANIFEST_RECORD_CAP,
+        )
+        raise _UnreadableManifest(batch.name) from exc
+    if header is None:
+        raise _UnreadableManifest(batch.name)
+
+
 def _open_manifest(batch: Path, dir_fd: int | None) -> IO[str]:
     """Open *batch*'s manifest, by path or relative to an already-pinned descriptor.
 
@@ -5131,37 +5179,52 @@ def staged_transcript_stems(batch_ids: list[str]) -> dict[str, set[str]]:
     retained = 0
     with _mutation_lock():
         for batch_id in batch_ids:
+            # Every batch is a retained entry too, even an empty or unreadable
+            # one, so the shared cap bounds the batch count as well as the stems.
+            if batch_id not in out and len(out) >= MAX_STAGED_LINEAGE_TRANSCRIPTS:
+                raise SessionStorageError(
+                    f"more than {MAX_STAGED_LINEAGE_TRANSCRIPTS} trash batches named; "
+                    "lineage is unprovable"
+                )
             stems: set[str] = set()
             try:
-                parsed = _read_manifest(_batch_dir(batch_id))
+                batch_dir = _batch_dir(batch_id)
             except SessionStorageError:
-                parsed = None
-            for entry in parsed[1] if parsed else ():
-                files = entry.get("files") if isinstance(entry, dict) else None
-                for record in files if isinstance(files, list) else ():
-                    rel = record.get("rel") if isinstance(record, dict) else None
-                    parts = PurePosixPath(rel).parts if isinstance(rel, str) else ()
-                    if (
-                        len(parts) == 2
-                        and parts[0] == STAGE_CREW_LEAF
-                        and parts[1].endswith(_TRANSCRIPT_SUFFIX)
-                    ):
-                        stem = parts[1][: -len(_TRANSCRIPT_SUFFIX)]
-                        # Same two bounds as every other reader of this
-                        # population (:func:`staged_transcript_lineage`), applied
-                        # before the stem is kept; the manifest is agent-writable.
-                        if len(stem) > MAX_TRANSCRIPT_STEM_CHARS:
-                            raise SessionStorageError(
-                                f"trash batch {batch_id!r} stages a transcript name over "
-                                f"{MAX_TRANSCRIPT_STEM_CHARS} chars"
-                            )
-                        retained += 1
-                        if retained > MAX_STAGED_LINEAGE_TRANSCRIPTS:
-                            raise SessionStorageError(
-                                f"trash stages more than {MAX_STAGED_LINEAGE_TRANSCRIPTS} "
-                                "transcripts; lineage is unprovable"
-                            )
-                        stems.add(stem)
+                out[batch_id] = stems
+                continue
+            try:
+                # Streamed: the manifest is O(sessions) and agent-writable, so
+                # the entries are never held as a list; only the bounded stem
+                # set below is retained, and a listing that cannot be read to
+                # the end is discarded whole rather than kept in part.
+                for entry in _stream_manifest_entries(batch_dir):
+                    files = entry.get("files") if isinstance(entry, dict) else None
+                    for record in files if isinstance(files, list) else ():
+                        rel = record.get("rel") if isinstance(record, dict) else None
+                        parts = PurePosixPath(rel).parts if isinstance(rel, str) else ()
+                        if (
+                            len(parts) == 2
+                            and parts[0] == STAGE_CREW_LEAF
+                            and parts[1].endswith(_TRANSCRIPT_SUFFIX)
+                        ):
+                            stem = parts[1][: -len(_TRANSCRIPT_SUFFIX)]
+                            # Same two bounds as every other reader of this
+                            # population (:func:`staged_transcript_lineage`), applied
+                            # before the stem is kept; the manifest is agent-writable.
+                            if len(stem) > MAX_TRANSCRIPT_STEM_CHARS:
+                                raise SessionStorageError(
+                                    f"trash batch {batch_id!r} stages a transcript name over "
+                                    f"{MAX_TRANSCRIPT_STEM_CHARS} chars"
+                                )
+                            retained += 1
+                            if retained > MAX_STAGED_LINEAGE_TRANSCRIPTS:
+                                raise SessionStorageError(
+                                    f"trash stages more than {MAX_STAGED_LINEAGE_TRANSCRIPTS} "
+                                    "transcripts; lineage is unprovable"
+                                )
+                            stems.add(stem)
+            except _UnreadableManifest:
+                stems = set()
             out[batch_id] = stems
     return out
 
@@ -5261,49 +5324,75 @@ def _retain_staged_lineage(
         return retained
     try:
         batch_dir = _batch_dir(candidate.name)
-        parsed = _read_manifest(batch_dir)
     except SessionStorageError as exc:
         raise SessionStorageError(f"trash batch {candidate.name!r} cannot be inspected") from exc
-    if parsed is None:
-        raise SessionStorageError(f"trash batch {candidate.name!r} has no readable manifest")
-    for entry in parsed[1]:
-        files = entry.get("files") if isinstance(entry, dict) else None
-        for record in files if isinstance(files, list) else ():
-            rel = record.get("rel") if isinstance(record, dict) else None
-            if not isinstance(rel, str):
-                continue
-            parts = PurePosixPath(rel).parts
-            if not (
-                len(parts) == 2
-                and parts[0] == STAGE_CREW_LEAF
-                and parts[1].endswith(_TRANSCRIPT_SUFFIX)
-            ):
-                continue
-            stem = parts[1][: -len(_TRANSCRIPT_SUFFIX)]
-            if len(stem) > MAX_TRANSCRIPT_STEM_CHARS:
-                raise SessionStorageError(
-                    f"trash batch {candidate.name!r} stages a transcript name over "
-                    f"{MAX_TRANSCRIPT_STEM_CHARS} chars"
-                )
-            retained += 1
-            if retained > MAX_STAGED_LINEAGE_TRANSCRIPTS:
-                # The trash is agent-writable: a manifest can name any
-                # number of transcripts, so what is retained here is
-                # bounded like every other lineage structure, and the
-                # caller fails the reap closed past it.
-                raise SessionStorageError(
-                    f"trash stages more than {MAX_STAGED_LINEAGE_TRANSCRIPTS} "
-                    "transcripts; lineage is unprovable"
-                )
-            staged = _staged_path(batch_dir, rel)
-            out[stem] = _read_lineage_meta(staged, batch_dir) if staged is not None else None
+    try:
+        # Streamed, never held as a list: the manifest is O(sessions) and
+        # agent-writable, and what this reader retains is bounded below.
+        for entry in _stream_manifest_entries(batch_dir):
+            retained = _retain_staged_entry(entry, batch_dir, out, retained)
+    except _UnreadableManifest as exc:
+        raise SessionStorageError(
+            f"trash batch {candidate.name!r} has no readable manifest"
+        ) from exc
     return retained
 
 
-#: Longest metadata line the staged-lineage reader will parse. A real metadata
-#: line is a few hundred bytes; the trash is agent-writable, so the read is
-#: capped rather than trusting the file.
-_META_LINE_CAP = 64 * 1024
+def _retain_staged_entry(
+    entry: Any, batch_dir: Path, out: dict[str, dict[str, Any] | None], retained: int
+) -> int:
+    """Fold ONE manifest entry's transcripts into ``out`` (see
+    :func:`_retain_staged_lineage`); returns the running retained count."""
+    files = entry.get("files") if isinstance(entry, dict) else None
+    for record in files if isinstance(files, list) else ():
+        rel = record.get("rel") if isinstance(record, dict) else None
+        if not isinstance(rel, str):
+            continue
+        parts = PurePosixPath(rel).parts
+        if not (
+            len(parts) == 2
+            and parts[0] == STAGE_CREW_LEAF
+            and parts[1].endswith(_TRANSCRIPT_SUFFIX)
+        ):
+            continue
+        stem = parts[1][: -len(_TRANSCRIPT_SUFFIX)]
+        if len(stem) > MAX_TRANSCRIPT_STEM_CHARS:
+            raise SessionStorageError(
+                f"trash batch {batch_dir.name!r} stages a transcript name over "
+                f"{MAX_TRANSCRIPT_STEM_CHARS} chars"
+            )
+        retained += 1
+        if retained > MAX_STAGED_LINEAGE_TRANSCRIPTS:
+            # The trash is agent-writable: a manifest can name any
+            # number of transcripts, so what is retained here is
+            # bounded like every other lineage structure, and the
+            # caller fails the reap closed past it.
+            raise SessionStorageError(
+                f"trash stages more than {MAX_STAGED_LINEAGE_TRANSCRIPTS} "
+                "transcripts; lineage is unprovable"
+            )
+        staged = _staged_path(batch_dir, rel)
+        meta = _read_lineage_meta(staged, batch_dir) if staged is not None else None
+        if stem in out and out[stem] != meta:
+            # The same stem staged twice with different lineage: a
+            # stable-stem session (a cron's, say) trashed once, recreated,
+            # forked and trashed again, or an agent-written manifest naming
+            # a stem another batch already holds. Neither record can be
+            # preferred without a rule the reap could be steered by, so the
+            # stem reads as unreadable and the caller fails closed on it
+            # (keeps every copy) instead of letting the later batch decide
+            # which source images survive. `None` is sticky: a conflict is
+            # never resolved by a third, agreeing record.
+            meta = None
+        out[stem] = meta
+    return retained
+
+
+#: Longest metadata line the staged-lineage reader will parse: the bound shared
+#: with the live-catalog reader (``fork_lineage.MAX_METADATA_LINE_BYTES``). A
+#: real metadata line is a few hundred bytes; the trash is agent-writable, so
+#: the read is capped rather than trusting the file.
+_META_LINE_CAP = MAX_METADATA_LINE_BYTES
 #: Most staged transcripts whose stems or lineage are retained in one read: the
 #: transcript directory's own entry bound, so the trash and the live directory
 #: are one population under one policy. Each retained entry is bounded (a key up

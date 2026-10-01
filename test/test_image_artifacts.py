@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import sys
-import threading
 import types
 from pathlib import Path
 
@@ -43,6 +43,24 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ArtifactStore:
     s = ArtifactStore(root=tmp_path / "artifacts")
     monkeypatch.setattr(image_artifacts, "get_default_store", lambda: s)
     return s
+
+
+class _StatView:
+    """A real ``os.stat_result`` with selected fields overridden.
+
+    Lets a test drive the descriptor checks (link count, file type) on every
+    host, instead of skipping where the filesystem cannot make a hardlink or a
+    FIFO.
+    """
+
+    def __init__(self, real: os.stat_result, **overrides: int) -> None:
+        self._real = real
+        self._overrides = overrides
+
+    def __getattr__(self, name: str) -> object:
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._real, name)
 
 
 def _png_bytes(width: int = 3, height: int = 2) -> bytes:
@@ -821,6 +839,15 @@ class TestAssetReadHardening:
         def _req(session: str) -> types.SimpleNamespace:
             return types.SimpleNamespace(match_info={"slug": art.slug}, query={"session": session})
 
+        audits: list[tuple[str, str, dict]] = []
+        monkeypatch.setattr(
+            handlers,
+            "_audit",
+            lambda *, tool, request, outcome, extra=None, error=None: audits.append(
+                (tool, outcome, dict(extra or {}))
+            ),
+        )
+
         # Owner, in every spelling the dashboard uses.
         for spelling in ("chat-7", "dashboard:chat-7", "dashboard_chat-7"):
             resp = asyncio.run(handlers.api_artifact_asset(_req(spelling)))  # type: ignore[arg-type]
@@ -828,9 +855,19 @@ class TestAssetReadHardening:
         # Another session.
         resp = asyncio.run(handlers.api_artifact_asset(_req("chat-8")))  # type: ignore[arg-type]
         assert resp.status == 404
-        # No session named (artifact library): unchanged behaviour.
+        # No session named (artifact library): unchanged behaviour, and no owner
+        # decision was made, so nothing is audited for it.
         resp = asyncio.run(handlers.api_artifact_asset(types.SimpleNamespace(match_info={"slug": art.slug})))  # type: ignore[arg-type]
         assert resp.status == 200
+        # The owner decision is a permission decision: every one of the four
+        # decisions above is audited with its outcome, allowed and denied alike.
+        assert [(t, o) for t, o, _ in audits] == [
+            ("artifact_asset_owner_check", "success"),
+            ("artifact_asset_owner_check", "success"),
+            ("artifact_asset_owner_check", "success"),
+            ("artifact_asset_owner_check", "denied"),
+        ]
+        assert audits[-1][2] == {"slug": art.slug, "session": "chat-8", "owner": "chat-7"}
 
     def test_asset_is_served_to_a_fork_of_the_owning_session(
         self, store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
@@ -926,55 +963,132 @@ class TestAssetReadHardening:
         with pytest.raises(ArtifactNotFoundError):
             store._read_image_asset_bytes(asset, identity=pinned)
 
-    def test_pinned_read_still_refuses_a_hardlinked_sidecar(self, store: ArtifactStore) -> None:
+    def test_pinned_read_refuses_bytes_overwritten_in_place_between_check_and_read(
+        self, store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The store never writes a sidecar in place (atomic tmp + replace), but
+        the directory is agent-writable, so an in-place overwrite of the SAME
+        inode can land between the descriptor's identity check and its read, and
+        with the same length inside one clock tick the inode identity cannot
+        tell. The bytes are therefore also bound to the record's SHA-256,
+        captured under the metadata lock with the owner: the hook below rewrites
+        the file the moment the first ``fstat`` has passed (same inode, same
+        length) and the asset read refuses it. A read with no digest to bind to
+        (a legacy record) keeps the identity check alone; a digest that matches
+        is served; the identity is re-read after the bytes too, so a file grown
+        mid-read is refused by size even when its clock is pinned back."""
+        art = store.create_image(
+            name="Pic", image_bytes=_png_bytes(2, 2), mime="image/png", session_key="chat-a"
+        )
+        asset = next(store._artifact_dir(art.slug).glob("asset.*"))
+        pinned = store._sidecar_identity(asset)
+        assert pinned is not None
+        original = asset.read_bytes()
+        digest = art.image.sha256 if art.image is not None else None
+        assert digest == hashlib.sha256(original).hexdigest()
+        same_length = bytes(len(original))
+        inode = os.stat(asset).st_ino
+
+        real_fstat = os.fstat
+        calls: list[int] = []
+
+        def _overwrite_after_first_fstat(fd: int) -> os.stat_result:
+            st = real_fstat(fd)
+            calls.append(fd)
+            if len(calls) == 1:
+                with open(asset, "r+b") as handle:  # in place: same inode
+                    handle.write(same_length)
+                os.utime(asset, ns=(pinned[3], pinned[3]))  # clock pinned back
+            return st
+
+        monkeypatch.setattr(os, "fstat", _overwrite_after_first_fstat)
+        with pytest.raises(ArtifactNotFoundError, match="does not match its record"):
+            store._read_image_asset_bytes(asset, identity=pinned, sha256=digest)
+        assert os.stat(asset).st_ino == inode and asset.read_bytes() == same_length
+        monkeypatch.undo()
+        # The public read path binds to the record the same way.
+        with pytest.raises(ArtifactNotFoundError):
+            store.read_image_bytes_with_owner(art.slug)
+
+        asset.write_bytes(original)
+        os.utime(asset, ns=(pinned[3], pinned[3]))
+        assert store._sidecar_identity(asset) == pinned
+        assert store._read_image_asset_bytes(asset, identity=pinned, sha256=digest) == original
+        assert store.read_image_bytes_with_owner(art.slug)[0] == original
+
+        calls.clear()
+
+        def _grow_after_first_fstat(fd: int) -> os.stat_result:
+            st = real_fstat(fd)
+            calls.append(fd)
+            if len(calls) == 1:
+                with open(asset, "ab") as handle:
+                    handle.write(b"\0" * 7)
+                os.utime(asset, ns=(pinned[3], pinned[3]))
+            return st
+
+        monkeypatch.setattr(os, "fstat", _grow_after_first_fstat)
+        with pytest.raises(ArtifactNotFoundError, match="not readable"):
+            store._read_image_asset_bytes(asset, identity=pinned)
+
+    def test_pinned_read_still_refuses_a_hardlinked_sidecar(
+        self, store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The identity pin is an ADDITIONAL check, not a replacement: the
         regular-file and link-count checks of the unpinned read apply to the
         same descriptor, so an aliased sidecar is refused even when its inode
-        is the one captured under the lock."""
+        is the one captured under the lock. The descriptor's link count is
+        faked, so the check runs on every host whether or not its filesystem
+        supports hardlinks."""
         art = store.create_image(
             name="Pic", image_bytes=_png_bytes(2, 2), mime="image/png", session_key="chat-a"
         )
         asset = next(store._artifact_dir(art.slug).glob("asset.*"))
         pinned = store._sidecar_identity(asset)
         assert pinned is not None
-        try:
-            os.link(asset, asset.with_name("alias.bin"))
-        except OSError:
-            pytest.skip("filesystem does not support hardlinks")
+        assert store._read_image_asset_bytes(asset, identity=pinned)
+        real_fstat = os.fstat
+        monkeypatch.setattr(
+            os, "fstat", lambda fd: _StatView(real_fstat(fd), st_nlink=2)
+        )
         with pytest.raises(ArtifactNotFoundError):
             store._read_image_asset_bytes(asset, identity=pinned)
 
-    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are a POSIX construct")
     def test_pinned_read_refuses_a_fifo_instead_of_blocking_on_it(
-        self, store: ArtifactStore
+        self, store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A FIFO planted at the sidecar path must be REFUSED, not waited on: a
         blocking ``open`` would run before the regular-file check and pin an
-        executor thread per request. The pinned read opens non-blocking, like the
-        unpinned one, so the ``S_ISREG`` check is reachable."""
+        executor thread per request. The pinned read must open non-blocking, like
+        the unpinned one, and refuse a descriptor that is not a regular file even
+        when its identity matches the pin. Both halves are driven through faked
+        open and ``fstat`` so the check runs on every host, FIFO support or not."""
+        import stat as stat_mod
+
+        from kiro_crew import artifacts as mod
+
         art = store.create_image(
             name="Pic", image_bytes=_png_bytes(2, 2), mime="image/png", session_key="chat-a"
         )
         asset = next(store._artifact_dir(art.slug).glob("asset.*"))
         pinned = store._sidecar_identity(asset)
         assert pinned is not None
-        asset.unlink()
-        os.mkfifo(asset)
-        fifo_identity = store._sidecar_identity(asset)
-        assert fifo_identity is not None
-        done = threading.Event()
-        result: list[object] = []
+        real_open = mod.platform_compat.open_file_no_reparse
+        opens: list[bool] = []
 
-        def _read() -> None:
-            try:
-                result.append(store._read_image_asset_bytes(asset, identity=fifo_identity))
-            except Exception as exc:  # noqa: BLE001 - the outcome is asserted below
-                result.append(exc)
-            done.set()
+        def _recording_open(path, *, nonblocking: bool = False) -> int:
+            opens.append(nonblocking)
+            return real_open(path, nonblocking=nonblocking)
 
-        threading.Thread(target=_read, daemon=True).start()
-        assert done.wait(5.0), "the read blocked on the FIFO"
-        assert isinstance(result[0], ArtifactNotFoundError)
+        real_fstat = os.fstat
+        fifo_mode = stat_mod.S_IFIFO | 0o600
+        monkeypatch.setattr(mod.platform_compat, "open_file_no_reparse", _recording_open)
+        monkeypatch.setattr(
+            os, "fstat", lambda fd: _StatView(real_fstat(fd), st_mode=fifo_mode)
+        )
+        with pytest.raises(ArtifactNotFoundError):
+            store._read_image_asset_bytes(asset, identity=pinned)
+        assert opens and all(opens), "the pinned read must open non-blocking"
 
     def test_delete_waits_for_an_in_flight_registration(self) -> None:
         """A permanent delete right after finalize must not reap before the
@@ -1248,6 +1362,124 @@ class TestChatImageLifetime:
         with pytest.raises(ArtifactNotFoundError):
             store.get("copy-0")
         assert store.get("copy-1").slug == "copy-1"
+
+    def test_the_reap_walk_bounds_the_fields_it_retains_and_aborts_on_an_oversized_record(
+        self, tmp_path
+    ):
+        """The snapshot retains two strings per entry, `slug` and `session_key`,
+        decoded from an agent-writable meta.json with no length cap on the read.
+        A record carrying either field over its bound aborts the walk with
+        ArtifactError (the reap is skipped fail-closed, nothing deleted) instead of
+        being retained; a conforming record next to it is unaffected once the
+        oversized one is gone."""
+        from kiro_crew import artifacts as mod
+
+        store = ArtifactStore(tmp_path / "store")
+        store.create_image(
+            name="copy",
+            image_bytes=_png_bytes(),
+            mime="image/png",
+            slug="copy-a",
+            session_key="chat-1",
+            auto_registered=True,
+        )
+        assert store.auto_image_slugs() == {"copy-a": "chat-1"}
+        meta_path = tmp_path / "store" / "copy-a" / "meta.json"
+        original = meta_path.read_text()
+        meta = json.loads(original)
+
+        meta["session_key"] = "c" * (mod.MAX_SESSION_KEY_CHARS + 1)
+        meta_path.write_text(json.dumps(meta))
+        with pytest.raises(ArtifactError, match="session image reap aborted"):
+            store.auto_image_slugs()
+        with pytest.raises(ArtifactError):
+            store.delete_auto_images_for_sessions({"chat-1"})
+        assert meta_path.exists()
+
+        meta = json.loads(original)
+        meta["slug"] = "s" * (mod.MAX_SLUG_CHARS + 1)
+        meta_path.write_text(json.dumps(meta))
+        with pytest.raises(ArtifactError, match="session image reap aborted"):
+            store.auto_image_slugs()
+
+        meta_path.write_text(original)
+        assert store.auto_image_slugs() == {"copy-a": "chat-1"}
+
+    def test_a_planted_dot_slug_never_reaches_the_reap_and_the_store_root_survives(
+        self, tmp_path
+    ):
+        """The reap turns a retained slug into a directory to remove. A planted
+        record whose slug is "." (plus a root-level meta.json with the same
+        eligible fields) would collapse `_artifact_dir` to the store root. Such a
+        record is never retained by the walk, a snapshot naming "." is refused by
+        the eligibility check, and every artifact in the store survives."""
+        store = ArtifactStore(tmp_path / "store")
+        store.create_image(
+            name="keep",
+            image_bytes=_png_bytes(),
+            mime="image/png",
+            slug="keep-me",
+            session_key="chat-other",
+            auto_registered=True,
+        )
+        planted = json.loads((tmp_path / "store" / "keep-me" / "meta.json").read_text())
+        planted["slug"] = "."
+        planted["session_key"] = "chat-1"
+        (tmp_path / "store" / "x").mkdir()
+        (tmp_path / "store" / "x" / "meta.json").write_text(json.dumps(planted))
+        (tmp_path / "store" / "meta.json").write_text(json.dumps(planted))
+        # A record naming a sibling's directory is not retained either.
+        sibling = dict(planted, slug="keep-me")
+        (tmp_path / "store" / "y").mkdir()
+        (tmp_path / "store" / "y" / "meta.json").write_text(json.dumps(sibling))
+
+        assert store.auto_image_slugs() == {"keep-me": "chat-other"}
+        assert store.delete_auto_images_for_sessions({"chat-1"}) == 0
+        assert store.delete_auto_images_for_sessions({"chat-1"}, only_slugs={"."}) == 0
+        assert (tmp_path / "store").is_dir()
+        assert (tmp_path / "store" / "keep-me" / "meta.json").exists()
+
+    def test_the_reap_walk_bounds_the_meta_file_before_decoding_it(self, tmp_path):
+        """`meta.json` sits in an agent-writable directory. The reap sizes each
+        record before it is read and aborts the walk fail-closed on one past
+        MAX_META_BYTES (nothing deleted, the file untouched); the shared meta
+        reader is itself a bounded read, so a direct load of the record refuses
+        to decode it too and a plain reader never materializes the whole file.
+        A record just inside the bound reads as before."""
+        from kiro_crew import artifacts as mod
+
+        store = ArtifactStore(tmp_path / "store")
+        store.create_image(
+            name="copy",
+            image_bytes=_png_bytes(),
+            mime="image/png",
+            slug="copy-a",
+            session_key="chat-1",
+            auto_registered=True,
+        )
+        meta_path = tmp_path / "store" / "copy-a" / "meta.json"
+        original = meta_path.read_text()
+        meta = json.loads(original)
+
+        meta["description"] = "d" * mod.MAX_META_BYTES
+        meta_path.write_text(json.dumps(meta))
+        assert meta_path.stat().st_size > mod.MAX_META_BYTES
+        with pytest.raises(ArtifactError, match="session image reap aborted"):
+            store.auto_image_slugs()
+        with pytest.raises(ArtifactError):
+            store.delete_auto_images_for_sessions({"chat-1"})
+        assert meta_path.exists()
+        with pytest.raises(ArtifactError, match="exceeds"):
+            store.get("copy-a")
+
+        padded = json.loads(original)
+        padded["description"] = "d" * (mod.MAX_META_BYTES - len(json.dumps(padded)) - 1)
+        meta_path.write_text(json.dumps(padded))
+        assert meta_path.stat().st_size <= mod.MAX_META_BYTES
+        assert store.auto_image_slugs() == {"copy-a": "chat-1"}
+
+        meta_path.write_text(original)
+        assert store.auto_image_slugs() == {"copy-a": "chat-1"}
 
     def test_the_reap_walk_skips_an_unreadable_meta_and_a_stray_file(self, tmp_path):
         store = ArtifactStore(tmp_path / "store")

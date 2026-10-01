@@ -240,3 +240,26 @@ async def test_a_chat_message_cannot_mint_a_slot_with_an_over_bound_name(tmp_pat
         assert response.status == 400
         assert (await response.json())["code"] == "name_too_long"
         assert not any(len(k) > MAX_SLOT_NAME_CHARS for k in state._slots)
+
+
+def test_the_slot_name_bound_keeps_the_transcript_lock_sidecar_a_legal_filename(tmp_path):
+    """An admitted name must not only fit the store's owner-key bound; the
+    transcript it names, `dashboard_<slot>.jsonl`, carries a `.jsonl.lock`
+    sidecar that the history layer opens on every save, and a filesystem name
+    component is capped at 255 bytes. A bound that admits a longer name would
+    let one ordinary POST create a session whose every save fails with
+    ENAMETOOLONG, swallowed by the best-effort saver. The bound is pinned to
+    the sidecar's real path, not to a copied constant."""
+    from kiro_crew.dashboard import fork_lineage
+    from kiro_crew.history import ConversationLog
+
+    longest = "n" * fork_lineage.MAX_SLOT_NAME_CHARS
+    log = ConversationLog(tmp_path / "sessions")
+    lock_path = log._lock_path(f"dashboard:{longest}")
+    assert lock_path.name.endswith(".jsonl.lock")
+    assert len(lock_path.name.encode()) == fork_lineage.MAX_FILENAME_COMPONENT_BYTES
+    # One more character and the sidecar name would be over the limit.
+    over = log._lock_path(f"dashboard:{longest}n")
+    assert len(over.name.encode()) > fork_lineage.MAX_FILENAME_COMPONENT_BYTES
+    # The owner-key bound still holds for a fork's source key.
+    assert len(f"dashboard:{longest}") <= fork_lineage.MAX_ANCESTOR_KEY_CHARS

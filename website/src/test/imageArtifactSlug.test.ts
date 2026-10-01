@@ -77,6 +77,30 @@ describe('buildImageOrdinalMap', () => {
     expect(parseMarkdownImageDestination(`${justUnder})`)).toBe(justUnder)
   })
 
+  it('reads the destination in place from an offset, escapes included', () => {
+    const text = 'lead ![a](/tmp/sh\\)ot(1).png "t") tail'
+    const start = text.indexOf('](') + 2
+    expect(parseMarkdownImageDestination(text, start)).toBe('/tmp/sh)ot(1).png')
+    // The bound is measured from the offset, not from the start of the text.
+    const padded = 'p'.repeat(100) + '/tmp/' + 'x'.repeat(MAX_IMAGE_DESTINATION_CHARS - 10) + '.png)'
+    expect(parseMarkdownImageDestination(padded, 100)).toBe(padded.slice(100, -1))
+    expect(parseMarkdownImageDestination(padded, 90)).toBeNull()
+  })
+
+  it('scans a message dense with openers in time linear in the destinations found', () => {
+    // 20,000 short openers back to back: a per-opener slice of the 32 KiB bound
+    // would copy ~650 MB here; the in-place walk copies only the destinations.
+    const count = 20_000
+    const raw = Array.from({ length: count }, (_, i) => `![i](/tmp/${i}.png)`).join('')
+    const started = performance.now()
+    const openers = scanImageOpeners(raw)
+    const elapsed = performance.now() - started
+    expect(openers).toHaveLength(count)
+    expect(openers[0].dest).toBe('/tmp/0.png')
+    expect(openers[count - 1].dest).toBe(`/tmp/${count - 1}.png`)
+    expect(elapsed).toBeLessThan(2_000)
+  })
+
   it('accepts a Windows extended-length path the backend can register', () => {
     // 32,767 characters is the longest path Windows opens (extended-length,
     // `\\\\?\\` semantics); the backend has no destination bound of its own, so
@@ -151,9 +175,11 @@ describe('imageOrdinalCandidates', () => {
     expect(imageOrdinalCandidates(raw, raw.indexOf('![b]'), map)).toEqual([1])
   })
 
-  it('resolves a repeated destination exactly when the raw span is known, other copies after', () => {
-    expect(imageOrdinalCandidates(raw, raw.lastIndexOf('![a]'), map, whole)).toEqual([3, 0, 2])
-    expect(imageOrdinalCandidates(raw, 0, map, whole)).toEqual([0, 2, 3])
+  it('resolves a repeated destination to exactly its own ordinal when the raw span is known', () => {
+    // The other copies of the same destination are never offered: a source
+    // file rewritten between two captures leaves them holding different bytes.
+    expect(imageOrdinalCandidates(raw, raw.lastIndexOf('![a]'), map, whole)).toEqual([3])
+    expect(imageOrdinalCandidates(raw, 0, map, whole)).toEqual([0])
   })
 
   it('never guesses: a repeated destination without a raw span gets no fallback', () => {
@@ -176,7 +202,7 @@ describe('imageOrdinalCandidates', () => {
     const m = buildImageOrdinalMap(message)
     expect(imageOrdinalCandidates(block, 0, m, {
       message, blockStart, blockEnd: blockStart + block.length,
-    })).toEqual([1, 0])
+    })).toEqual([1])
   })
 
   it('gives no fallback when preprocessing removed a copy from the block (counts disagree)', () => {

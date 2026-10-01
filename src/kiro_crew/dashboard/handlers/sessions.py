@@ -2831,6 +2831,19 @@ def _transcript_stems_on_disk(log: Any) -> set[str]:
         return {"<unlistable>"}
 
 
+def _metadata_line_within_bound(log: Any, key: str) -> bool:
+    """Whether transcript ``key``'s first line fits
+    :data:`fork_lineage.MAX_METADATA_LINE_BYTES`; the one check every lineage
+    reader shares (:func:`fork_lineage.metadata_line_within_bound`).
+
+    The lineage snapshot decodes the metadata line of every transcript in an
+    agent-writable directory; ``recorded_chain`` bounds the ``fork_ancestors``
+    array only after the decoder has materialized it, so the line is bounded
+    FIRST, here.
+    """
+    return fork_lineage.metadata_line_within_bound(log, key)
+
+
 def _fork_lineage(log: Any) -> _ForkLineage:
     """Read the fork edges of every transcript in the store.
 
@@ -2855,6 +2868,14 @@ def _fork_lineage(log: Any) -> _ForkLineage:
             continue
         if len(key) > fork_lineage.MAX_ANCESTOR_KEY_CHARS:
             entries.append(("<over-bound>", None, [], False))
+            continue
+        if not _metadata_line_within_bound(log, key):
+            # The first line is longer than any metadata record the lineage
+            # readers admit, so it is never handed to the JSON decoder: the
+            # transcript directory is agent-writable and a huge
+            # `fork_ancestors` array would otherwise be materialized (and
+            # cached) whole before `recorded_chain` could refuse it.
+            entries.append((fork_lineage.fold(key), None, [], False))
             continue
         try:
             meta, ok = log.get_metadata_status(key)
@@ -2999,6 +3020,22 @@ def _image_reap_set(
     staged_lineage = _staged_fork_lineage(staged or {})
     if staged_lineage.unreadable:
         return None
+    # A stem staged in the trash AND present in a live snapshot with DIFFERENT
+    # lineage is two distinct sessions sharing one stem (a session recreated
+    # under a trashed session's key and forked from elsewhere). Neither record
+    # may win the merge below: taking the live edge would drop the staged fork's
+    # source from the walk, and deleting that source would reap copies the
+    # staged fork renders once restored. Fail closed instead; the trash-internal
+    # duplicate takes the same path in ``session_storage._retain_staged_lineage``.
+    for snapshot in (before, after):
+        for stem, staged_parent in staged_lineage.parent_of.items():
+            live_parent = snapshot.parent_of.get(stem)
+            if live_parent is not None and live_parent != staged_parent:
+                return None
+        for stem, staged_chain in staged_lineage.known_ancestors.items():
+            live_chain = snapshot.known_ancestors.get(stem)
+            if live_chain is not None and live_chain != staged_chain:
+                return None
     merged = _ForkLineage(
         keys=before.keys | after.keys | staged_lineage.keys,
         parent_of={**before.parent_of, **staged_lineage.parent_of, **after.parent_of},
@@ -3119,9 +3156,9 @@ async def _reap_session_images(
             # anything still running after this is wedged. Say so LOUDLY, then
             # keep waiting for it anyway: the reap is the transcript's only
             # reclamation path, and dropping it would let the copies outlive the
-            # deleted transcript for good. The registration task is bounded by
-            # its own timeouts and by process lifetime, so this cannot park
-            # forever; while it runs the reap task is held in _DEFERRED_REAPS.
+            # deleted transcript for good. This second wait has no timeout: the
+            # reap task stays held in _DEFERRED_REAPS until the registration
+            # finishes or the process exits.
             if not await drain_registrations(bare, timeout=_DEFERRED_REAP_WAIT_SECS):
                 logger.error(
                     "image cleanup for %s still waiting: an image registration is wedged "

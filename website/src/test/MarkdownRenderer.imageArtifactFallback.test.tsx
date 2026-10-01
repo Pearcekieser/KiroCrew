@@ -75,11 +75,11 @@ describe('MarkdownRenderer durable chat image fallback', () => {
     })
   })
 
-  it('prefers its exact raw ordinal, then the other copies, never a different image', async () => {
+  it('prefers its exact raw ordinal and never a different copy or image', async () => {
     // Backend raw-text order: fence body (0), widget title (1), rendered image (2).
     // The block's raw span is known and nothing in it was stripped, so the
-    // rendered image resolves to its own ordinal 2 first; ordinal 0 (same
-    // destination) is the fallback; the ghost (1) is never tried.
+    // rendered image resolves to its own ordinal 2 and nothing else: not the
+    // fence copy (0) of the same destination, not the ghost (1).
     const ts = 'ts-repeated-body'
     const md = [
       '```md',
@@ -109,18 +109,15 @@ describe('MarkdownRenderer durable chat image fallback', () => {
       )
     })
     fireEvent.error(container.querySelector('img')!)
-    await waitFor(() => {
-      expect(container.querySelector('img')?.getAttribute('src')).toBe(
-        `/api/artifacts/${deriveImageArtifactSlug(ts, 0)}/asset?session=chat-7`,
-      )
-    })
+    await waitFor(() => expect(container.querySelector('img')).toBeNull())
+    expect(container.textContent).toContain('real')
   })
 
   it('resolves an image after a same-line widget close whose title repeats it', async () => {
     // Raw order: widget title opener (0), then the rendered image which starts
     // mid-line right after `</mcwidget>` (1). The block's raw span begins after
     // the tag, so the title copy counts as a raw occurrence BEFORE the block and
-    // the rendered image resolves to its exact ordinal 1; 0 is the fallback.
+    // the rendered image resolves to its exact ordinal 1 and to nothing else.
     const ts = 'ts-empty-widget'
     const md = '<mcwidget title="![real](/tmp/real.png)"></mcwidget> ![real](/tmp/real.png)'
     vi.spyOn(api, 'sandboxDocUrl').mockResolvedValue({ url: '/sandbox-doc/test/tok' })
@@ -141,14 +138,9 @@ describe('MarkdownRenderer durable chat image fallback', () => {
         `/api/artifacts/${deriveImageArtifactSlug(ts, 1)}/asset?session=chat-7`,
       )
     })
-    // Exact copy missing -> the other copy of the same destination is tried…
-    fireEvent.error(container.querySelector('img')!)
-    await waitFor(() => {
-      expect(container.querySelector('img')?.getAttribute('src')).toBe(
-        `/api/artifacts/${deriveImageArtifactSlug(ts, 0)}/asset?session=chat-7`,
-      )
-    })
-    // …and only then the broken-image chip.
+    // Exact copy missing -> the broken-image chip. The title's copy (0) is the
+    // same destination but is never tried: a source rewritten between the two
+    // captures would make it a different picture.
     fireEvent.error(container.querySelector('img')!)
     await waitFor(() => expect(container.querySelector('img')).toBeNull())
     expect(container.textContent).toContain('real')

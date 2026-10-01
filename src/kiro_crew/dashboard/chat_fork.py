@@ -1116,6 +1116,65 @@ async def fork_slot(
             str(getattr(slot, "workspace", "default") or "default"),
         )
 
+    forked_from_key = effective_session_key(slot)
+    # The FULL chain, so lineage stays provable after an intermediate fork is
+    # deleted (its own metadata goes with it). A source forked before the chain
+    # was recorded carries only `forked_from`; walk the catalog once so the new
+    # fork records every ancestor, not one link. See dashboard/fork_lineage.py.
+    # The walk suspends, so it runs BEFORE the child is minted: nothing is
+    # half-born while it is in flight, a refusal here has no slot to withdraw,
+    # and `get_or_create_slot` never schedules a user-session count for a fork
+    # that is then refused. Containment and the frozen source identity are
+    # re-asserted below, adjacent to the mint, as for every other suspension.
+    source_chain: list[str] | None = getattr(slot, "fork_ancestors", None) or None
+    if not source_chain and getattr(slot, "forked_from", None) and state.conversation_log:
+        try:
+            source_chain = await asyncio.to_thread(
+                ancestry_chain, state.conversation_log, forked_from_key
+            )
+            # The walk suspended; re-assert the caller's containment answers
+            # and the frozen source identity before the chain is judged, so a
+            # source that moved meanwhile is refused with ITS code rather than
+            # as an unprovable ancestry.
+            if recheck is not None:
+                recheck()
+            if not _source_identity_unchanged():
+                raise UnknownMemoryStore("The fork source changed before its history was copied")
+        except (OSError, ValueError) as exc:
+            return _store_unavailable_response(source_memory_identity[2], exc)
+        if source_chain is None:
+            # The walk could not be completed (an unreadable link, a record over
+            # the shared bounds): persisting the readable prefix would claim a
+            # complete ancestry the fork does not have, and every lineage reader
+            # would then trust it. Refuse instead.
+            return web.json_response(
+                {
+                    "error": "the source's fork ancestry cannot be read completely",
+                    "code": "fork_ancestry_unprovable",
+                },
+                status=422,
+            )
+    # `source_slot_key`: image copies are owned by the source TAB's `slot.key`,
+    # which differs from the effective session key for a linked session; the
+    # chain records both so the fork can still reach those copies.
+    materialized = materialize_ancestors(forked_from_key, source_chain, source_slot_key=slot.key)
+    if materialized is None or len(materialized) >= MAX_FORK_ANCESTORS:
+        # The chain could not be recorded whole (an entry — the source key
+        # included — over the shared bounds, or the whole chain over its
+        # serialized budget, so it could not fit the metadata line it is written
+        # into) or sits at the count bound, which
+        # `recorded_chain` reads back as UNPROVABLE: persisting it would mint a
+        # fork whose ancestry no reader can admit (asset owner check refused,
+        # images never reaped as its source's descendant). Refuse the fork
+        # instead, before it exists.
+        return web.json_response(
+            {
+                "error": "fork ancestry is at its bound; fork the root session instead",
+                "code": "fork_ancestry_over_bound",
+            },
+            status=422,
+        )
+
     try:
         inherited_store = inherited_execution.store.legacy_name
         inherited_memory_mode = inherited_execution.memory_mode
@@ -1171,74 +1230,7 @@ async def fork_slot(
             if isinstance(exc, (OSError, ValueError)):
                 return _store_unavailable_response(inherited_store, exc)
             raise
-    new_slot.forked_from = effective_session_key(slot)
-    # The FULL chain, so lineage stays provable after an intermediate fork is
-    # deleted (its own metadata goes with it). A source forked before the chain
-    # was recorded carries only `forked_from`; walk the catalog once so the new
-    # fork records every ancestor, not one link. See dashboard/fork_lineage.py.
-    source_chain: list[str] | None = getattr(slot, "fork_ancestors", None) or None
-    if not source_chain and getattr(slot, "forked_from", None) and state.conversation_log:
-        # The walk suspends with the child already registered, so it runs INSIDE
-        # the withdrawal guard: a cancellation (or any raise) while it is in
-        # flight unregisters the half-born child exactly as the bind path does,
-        # rather than leaving a slot with no rows and no lineage behind. After
-        # it, re-assert the caller's containment answers and the frozen source
-        # identity; no rows are copied yet, so the withdrawal is a plain
-        # unregister, and the refusal surfaces the way the bind path's does.
-        try:
-            source_chain = await asyncio.to_thread(
-                ancestry_chain, state.conversation_log, new_slot.forked_from
-            )
-            if recheck is not None:
-                recheck()
-            if not _source_identity_unchanged():
-                raise UnknownMemoryStore("The fork source changed before its history was copied")
-        except BaseException as exc:
-            clear_session_execution(effective_session_key(new_slot))
-            state._slots.pop(new_slot.key, None)
-            state._restricted_keys.discard(effective_session_key(new_slot))
-            if isinstance(exc, (OSError, ValueError)):
-                return _store_unavailable_response(source_memory_identity[2], exc)
-            raise
-        if source_chain is None:
-            # The walk could not be completed (an unreadable link, a record over
-            # the shared bounds): persisting the readable prefix would claim a
-            # complete ancestry the fork does not have, and every lineage reader
-            # would then trust it. Refuse instead; no rows are copied yet.
-            clear_session_execution(effective_session_key(new_slot))
-            state._slots.pop(new_slot.key, None)
-            state._restricted_keys.discard(effective_session_key(new_slot))
-            return web.json_response(
-                {
-                    "error": "the source's fork ancestry cannot be read completely",
-                    "code": "fork_ancestry_unprovable",
-                },
-                status=422,
-            )
-    # `source_slot_key`: image copies are owned by the source TAB's `slot.key`,
-    # which differs from the effective session key for a linked session; the
-    # chain records both so the fork can still reach those copies.
-    materialized = materialize_ancestors(
-        new_slot.forked_from, source_chain, source_slot_key=slot.key
-    )
-    if materialized is None or len(materialized) >= MAX_FORK_ANCESTORS:
-        # The chain could not be recorded whole (an entry — the source key
-        # included — over the shared bounds) or sits at the count bound, which
-        # `recorded_chain` reads back as UNPROVABLE: persisting it would mint a
-        # fork whose ancestry no reader can admit (asset owner check refused,
-        # images never reaped as its source's descendant). Refuse the fork
-        # instead. No rows are copied yet, so the withdrawal is the same plain
-        # unregister the bind path uses.
-        clear_session_execution(effective_session_key(new_slot))
-        state._slots.pop(new_slot.key, None)
-        state._restricted_keys.discard(effective_session_key(new_slot))
-        return web.json_response(
-            {
-                "error": "fork ancestry is at its bound; fork the root session instead",
-                "code": "fork_ancestry_over_bound",
-            },
-            status=422,
-        )
+    new_slot.forked_from = forked_from_key
     new_slot.fork_ancestors = materialized
     new_slot.reasoning_effort = slot.reasoning_effort
     # Inherited beside the model it belongs to: the constructor takes `model` and

@@ -789,6 +789,27 @@ def test_a_fork_staged_in_the_trash_keeps_protecting_its_live_source() -> None:
     assert _reaped(before, after, {"src"}, staged={"dashboard_other": {}}) == {"src"}
 
 
+def test_a_staged_fork_whose_stem_is_live_with_other_lineage_fails_the_reap_closed() -> None:
+    """A session recreated under a trashed fork's key and forked from a different
+    source gives one stem two lineages: the staged record says `s -> x`, the live
+    catalog says `s -> y`. Letting the live edge win the merge would drop `x`
+    from the walk and reap the copies the staged `s` renders once restored. The
+    decision fails closed instead. An AGREEING live record keeps the reap."""
+    staged = {"dashboard_s": {"forked_from": "dashboard:x", "fork_ancestors": ["dashboard:x"]}}
+    # Conflict: the live `s` descends from `y`, the staged `s` from `x`.
+    before = _catalog({"x": None, "y": None, "s": "y"})
+    after = _catalog({"y": None, "s": "y"})
+    assert _reaped(before, after, {"x"}, staged=staged) is None
+    # Agreement: the live `s` also descends from `x`; `x` is protected by the
+    # survivor `s` the ordinary way and the decision is made.
+    before = _catalog({"x": None, "s": "x"})
+    after = _catalog({"s": "x"})
+    assert _reaped(before, after, {"x"}, staged=staged) is None
+    before = _catalog({"x": None, "s": "x", "z": None})
+    after = _catalog({"s": "x"})
+    assert _reaped(before, after, {"z"}, staged=staged) == {"z"}
+
+
 def test_an_unreadable_trash_fails_the_reap_closed() -> None:
     before = _catalog({"src": None, "fork": "src"})
     after = _catalog({})
@@ -1205,6 +1226,55 @@ def test_the_on_disk_stem_scan_is_bounded_before_it_retains(tmp_path, monkeypatc
     with pytest.raises(OSError):
         log.transcript_stems_on_disk()
     assert _transcript_stems_on_disk(log) == {"<unlistable>"}
+
+
+def test_the_lineage_snapshot_bounds_the_metadata_line_before_decoding_it(tmp_path) -> None:
+    """The transcript directory is agent-writable and `recorded_chain` bounds a
+    `fork_ancestors` array only after the JSON decoder has materialized it. The
+    snapshot therefore reads each first line with a bounded `readline` and
+    refuses to decode one past MAX_METADATA_LINE_BYTES: the transcript is marked
+    unreadable (the reap keeps everything) and its metadata is never parsed. A
+    line within the bound is read as before, whether or not it ends in a newline."""
+    import json
+
+    from kiro_crew.dashboard import fork_lineage
+    from kiro_crew.dashboard.handlers.sessions import _fork_lineage
+    from kiro_crew.history import ConversationLog
+
+    d = tmp_path / "sessions"
+    d.mkdir()
+    fine = {
+        "_type": "metadata",
+        "forked_from": "dashboard:src",
+        "fork_ancestors": ["dashboard:src"],
+    }
+    (d / "dashboard_src.jsonl").write_text("{}\n")
+    (d / "dashboard_fine.jsonl").write_text(json.dumps(fine) + "\n")
+    (d / "dashboard_nonewline.jsonl").write_text(json.dumps(fine))
+    huge = {
+        "_type": "metadata",
+        "forked_from": "dashboard:src",
+        "fork_ancestors": ["dashboard:" + "x" * 200]
+        * (fork_lineage.MAX_METADATA_LINE_BYTES // 100),
+    }
+    huge_line = json.dumps(huge)
+    assert len(huge_line) > fork_lineage.MAX_METADATA_LINE_BYTES
+    (d / "dashboard_huge.jsonl").write_text(huge_line + "\n")
+    log = ConversationLog(base_dir=d)
+
+    calls: list[str] = []
+    real = log.get_metadata_status
+
+    def counting(key):
+        calls.append(key)
+        return real(key)
+
+    log.get_metadata_status = counting  # type: ignore[method-assign]
+    lineage = _fork_lineage(log)
+    assert lineage.parent_of["fine"] == "src"
+    assert lineage.parent_of["nonewline"] == "src"
+    assert "huge" in lineage.unreadable
+    assert "dashboard_huge" not in calls, "an over-bound line must never reach the decoder"
 
 
 @pytest.mark.asyncio

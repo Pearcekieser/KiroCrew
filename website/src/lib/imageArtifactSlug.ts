@@ -74,30 +74,44 @@ const MD_ESCAPABLE = new Set(['(', ')', '[', ']', '\\', '<', '>', '"', "'"])
 export const MAX_IMAGE_DESTINATION_CHARS = 32768
 
 /**
- * The markdown destination in `rest`, the text right after `![alt](` — a port
- * of `md_destination` (`_walk_destination` + `_finish_destination`) in
- * kiro_crew/messaging/outbound_files.py. `null` when the destination never
- * closes, is malformed, or runs past MAX_IMAGE_DESTINATION_CHARS. Parity with
- * the backend is the whole point: the same text must yield the same key on
- * both sides for every destination the backend can store.
+ * The markdown destination that begins at `start` in `text`, the position
+ * right after `![alt](` — a port of `md_destination` (`_walk_destination` +
+ * `_finish_destination`) in kiro_crew/messaging/outbound_files.py. `null`
+ * when the destination never closes, is malformed, or runs past
+ * MAX_IMAGE_DESTINATION_CHARS. Parity with the backend is the whole point:
+ * the same text must yield the same key on both sides for every destination
+ * the backend can store.
+ *
+ * The walk reads `text` in place: nothing is copied until the destination
+ * closes, and then only the destination itself. A caller scanning a message
+ * dense with openers therefore pays for the destinations it finds, never a
+ * fixed 32 KiB slice per opener.
  */
-export function parseMarkdownImageDestination(rest: string): string | null {
+export function parseMarkdownImageDestination(text: string, start = 0): string | null {
   let depth = 1
-  let out = ''
-  const limit = Math.min(rest.length, MAX_IMAGE_DESTINATION_CHARS)
-  for (let i = 0; i < limit; i++) {
-    const ch = rest[i]
-    if (ch === '\\' && i + 1 < rest.length && MD_ESCAPABLE.has(rest[i + 1])) {
-      out += rest[i + 1]
+  const n = text.length
+  const end = Math.min(n, start + MAX_IMAGE_DESTINATION_CHARS)
+  // Pieces of the destination with escapes resolved; `segStart` is the start
+  // of the piece not yet pushed. Left untouched on the no-escape fast path.
+  let pieces: string[] | null = null
+  let segStart = start
+  for (let i = start; i < end; i++) {
+    const ch = text[i]
+    if (ch === '\\' && i + 1 < n && MD_ESCAPABLE.has(text[i + 1])) {
+      if (pieces === null) pieces = []
+      pieces.push(text.slice(segStart, i), text[i + 1])
       i++
+      segStart = i + 1
       continue
     }
     if (ch === '(') depth++
     else if (ch === ')') {
       depth--
-      if (depth === 0) return finishDestination(out)
+      if (depth === 0) {
+        const tail = text.slice(segStart, i)
+        return finishDestination(pieces === null ? tail : pieces.join('') + tail)
+      }
     }
-    out += ch
   }
   return null
 }
@@ -140,7 +154,7 @@ export function scanImageOpeners(text: string): ImageOpener[] {
     if (r >= 0) {
       out.push({
         start: i,
-        dest: parseMarkdownImageDestination(text.slice(r, r + MAX_IMAGE_DESTINATION_CHARS)),
+        dest: parseMarkdownImageDestination(text, r),
       })
       i = text.indexOf('![', r)
     } else {
@@ -160,7 +174,7 @@ export function scanImageOpeners(text: string): ImageOpener[] {
  * A destination that appears more than once lists each ordinal in order: the
  * backend normally copies the same bytes under each, but a replay after a
  * per-message budget stop can store a LATER ordinal from a since-changed
- * file, so the caller matches its own occurrence and falls through the rest.
+ * file, so the caller matches its own occurrence and tries no other.
  *
  * The map also carries the scan itself (`openers`, ordinal → opener), so a
  * caller locating an occurrence by raw position never rescans the message.
@@ -206,9 +220,10 @@ function countOccurrencesBefore(openers: readonly ImageOpener[], dest: string, e
  * is resolved only when the raw slice of this block holds the same number of
  * `dest` openers as the rendered block text — nothing was stripped or added by
  * preprocessing — so the node's in-block occurrence maps onto the raw
- * occurrences before the block. Copies stored for the same destination are
- * appended as fallbacks AFTER the exact ordinal (they normally hold identical
- * bytes; they are only reached when the exact copy is missing).
+ * occurrences before the block. The result is at most ONE ordinal: the other
+ * copies stored for the same destination are never tried, because a source
+ * file rewritten between two captures of one message leaves them holding
+ * different bytes, and a stale picture is a worse answer than the chip.
  */
 export function imageOrdinalCandidates(
   text: string,
@@ -232,8 +247,7 @@ export function imageOrdinalCandidates(
   if (inRawBlock !== inRendered) return []
   const k = before + countOccurrencesBefore(rendered, dest, offset)
   if (k >= list.length) return []
-  const exact = list[k]
-  return [exact, ...list.filter(i => i !== exact)]
+  return [list[k]]
 }
 
 /**
@@ -245,5 +259,5 @@ export function imageDestinationAt(text: string, offset: number): string | null 
   const at = Math.max(0, offset)
   const after = walkImageOpener(text, at)
   if (after < 0) return null
-  return parseMarkdownImageDestination(text.slice(after, after + MAX_IMAGE_DESTINATION_CHARS))
+  return parseMarkdownImageDestination(text, after)
 }

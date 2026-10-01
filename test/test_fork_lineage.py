@@ -3,6 +3,7 @@ artifact asset endpoint and the permanent-delete reap consult."""
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 from kiro_crew.dashboard import fork_lineage as fl
@@ -182,6 +183,30 @@ def test_an_over_bounds_chain_is_unprovable_not_truncated() -> None:
     assert fl.ancestry_chain(log, "dashboard:b") is None
 
 
+def test_a_chain_over_the_serialized_budget_is_unprovable_under_the_count_bound() -> None:
+    """The count and per-entry bounds alone admit a chain far larger than the
+    metadata line it is written into (1024 keys of 256 chars). A chain whose
+    serialized form exceeds MAX_FORK_ANCESTRY_BYTES (half the line bound) is
+    unprovable to the reader and refused at materialization, so admission can
+    never persist a chain that would push its own line past the reader's bound."""
+    assert fl.MAX_FORK_ANCESTRY_BYTES * 2 == fl.MAX_METADATA_LINE_BYTES
+    key = "dashboard:" + "k" * (fl.MAX_ANCESTOR_KEY_CHARS - len("dashboard:") - 4)
+    per_entry = len(json.dumps([key + "0000"])) - 1
+    fits = fl.MAX_FORK_ANCESTRY_BYTES // per_entry - 1
+    long_keys = [f"{key}{i:04d}" for i in range(fits + 2)]
+    assert len(long_keys) < fl.MAX_FORK_ANCESTORS
+    assert len(json.dumps(long_keys).encode()) > fl.MAX_FORK_ANCESTRY_BYTES
+    assert fl.recorded_chain({"fork_ancestors": long_keys}) is None
+    assert fl.chain_unprovable({"fork_ancestors": long_keys})
+    assert fl.materialize_ancestors("dashboard:src", long_keys) is None
+
+    within = long_keys[: fits - 1]
+    assert len(json.dumps(within).encode()) <= fl.MAX_FORK_ANCESTRY_BYTES
+    assert fl.recorded_chain({"fork_ancestors": within}) == within
+    made = fl.materialize_ancestors("dashboard:src", within)
+    assert made is not None and len(json.dumps(made).encode()) <= fl.MAX_FORK_ANCESTRY_BYTES
+
+
 def test_non_string_lineage_values_are_unprovable_before_any_conversion() -> None:
     """Transcript metadata is agent-writable: a nested list or dict planted as
     an ancestry entry or as `forked_from` must be rejected on TYPE, before a
@@ -247,9 +272,10 @@ def test_the_legacy_forked_from_walk_retains_nothing_past_the_bounds() -> None:
     assert fl.materialize_ancestors(long_parent, ["dashboard:a"]) is None
     assert fl.materialize_ancestors("dashboard:b", ["dashboard:a", long_parent]) is None
     assert fl.materialize_ancestors("dashboard:b", [], source_slot_key=long_parent) is None
-    # A slot name at the admission bound still fits once prefixed.
+    # A slot name at the admission bound still fits once prefixed: the bound is
+    # the tighter of the owner-key room and the transcript-filename room.
     at_bound = "dashboard:" + "n" * fl.MAX_SLOT_NAME_CHARS
-    assert len(at_bound) == fl.MAX_ANCESTOR_KEY_CHARS
+    assert len(at_bound) <= fl.MAX_ANCESTOR_KEY_CHARS
     assert fl.materialize_ancestors(at_bound, []) == [at_bound]
     # Duplicates and blanks are dropped.
     assert fl.materialize_ancestors("dashboard:b", ["dashboard:b", "", "dashboard:a"]) == [
@@ -378,6 +404,17 @@ def test_walk_ancestors_applies_the_shared_bounds_and_reads_back_unprovable() ->
     # A recorded chain that is itself wider than the bound.
     wide = [f"w{i}" for i in range(fl.MAX_FORK_ANCESTORS + 1)]
     assert fl.walk_ancestors("c", {}.get, lambda s: wide if s == "c" else []) is None
+    # An over-long START (the asset route's caller-supplied `?session=`) is
+    # refused before it is folded or retained, and no callback is consulted.
+    calls: list[str] = []
+
+    def _recording(s: str) -> list[str]:
+        calls.append(s)
+        return []
+
+    assert fl.walk_ancestors(long_key, {}.get, _recording) is None
+    assert calls == []
+    assert fl.walk_ancestors("k" * fl.MAX_ANCESTOR_KEY_CHARS, {}.get, _recording) == set()
 
 
 def test_ancestors_of_treats_an_unprovable_walk_as_no_ancestors() -> None:
@@ -417,3 +454,82 @@ def test_an_absent_alias_does_not_make_an_unreadable_record_look_readable() -> N
     # A spelling that DOES exist and reads empty is a readable root, as before.
     assert fl._read_meta(log, "dashboard:a") == ({}, True)
     assert fl.ancestry_chain(log, "dashboard:a") == []
+
+
+def test_the_live_catalog_walk_bounds_the_metadata_line_before_decoding_it(tmp_path) -> None:
+    """The transcript directory is agent-writable and the catalog's metadata read
+    decodes (and caches) the whole first line before `recorded_chain` can bound
+    the `fork_ancestors` array inside it. `_read_meta` therefore pre-reads each
+    spelling's first line with a bounded `readline` and refuses to decode one
+    past MAX_METADATA_LINE_BYTES: the record is unreadable, so the chain is
+    unprovable and no positive ancestry match can be drawn. A line within the
+    bound reads as before, newline or not. The same check serves the lineage
+    snapshot in `handlers.sessions`, so the two readers cannot drift apart."""
+    import json
+
+    from kiro_crew.dashboard.handlers import sessions as handlers
+    from kiro_crew.history import ConversationLog
+
+    d = tmp_path / "sessions"
+    d.mkdir()
+    fine = {
+        "_type": "metadata",
+        "forked_from": "dashboard:src",
+        "fork_ancestors": ["dashboard:src"],
+    }
+    (d / "dashboard_src.jsonl").write_text("{}\n")
+    (d / "dashboard_fine.jsonl").write_text(json.dumps(fine) + "\n")
+    (d / "dashboard_nonewline.jsonl").write_text(json.dumps(fine))
+    huge = {
+        "_type": "metadata",
+        "forked_from": "dashboard:src",
+        "fork_ancestors": ["dashboard:" + "x" * 200] * (fl.MAX_METADATA_LINE_BYTES // 100),
+    }
+    huge_line = json.dumps(huge)
+    assert len(huge_line) > fl.MAX_METADATA_LINE_BYTES
+    (d / "dashboard_huge.jsonl").write_text(huge_line + "\n")
+    log = ConversationLog(base_dir=d)
+
+    assert fl.metadata_line_within_bound(log, "dashboard:fine")
+    assert fl.metadata_line_within_bound(log, "dashboard:nonewline")
+    assert not fl.metadata_line_within_bound(log, "dashboard:huge")
+    assert handlers._metadata_line_within_bound(log, "dashboard:huge") is False
+
+    assert fl._read_meta(log, "dashboard:fine")[0]["forked_from"] == "dashboard:src"
+    assert fl._read_meta(log, "dashboard:nonewline")[0]["forked_from"] == "dashboard:src"
+    assert fl.ancestry_chain(log, "dashboard:fine") == ["dashboard:src"]
+    # The oversized line is never handed to the decoder: unreadable, unprovable.
+    assert fl._read_meta(log, "dashboard:huge") == ({}, False)
+    assert fl.ancestry_chain(log, "dashboard:huge") is None
+    assert fl.descends_from(log, "dashboard:huge", "dashboard:src") is False
+    assert fl.ancestors_of(log, "dashboard:huge") == set()
+
+    # The pre-read goes through the no-link chokepoint pinned to the transcript
+    # directory, which admits regular files only: a transcript NAME that is not
+    # one (here a directory; a link or a hardlink outside the directory takes
+    # the same refusal in the chokepoint) is refused by the read itself, so the
+    # record is unreadable and the walk is unprovable.
+    (d / "dashboard_notafile.jsonl").mkdir()
+    assert not fl.metadata_line_within_bound(log, "dashboard:notafile")
+    assert fl._read_meta(log, "dashboard:notafile") == ({}, False)
+    assert fl.ancestry_chain(log, "dashboard:notafile") is None
+
+
+def test_the_session_key_and_transcript_stem_bounds_are_one_constant() -> None:
+    """A transcript stem is a folded session key, so the store's owner-key bound,
+    the lineage ancestor-key bound and the transcript directory's stem bound
+    describe one population. They are three re-exports of
+    `constants.SESSION_KEY_MAX_CHARS`, never separate literals: a stem bound
+    that drifted below the key bound would make `transcript_stems_on_disk`
+    refuse an admitted session, the lineage snapshot would read as unreadable,
+    and chat-image reclamation would be off process-wide."""
+    from kiro_crew import artifacts, constants, history
+
+    assert (
+        fl.MAX_ANCESTOR_KEY_CHARS
+        == artifacts.MAX_SESSION_KEY_CHARS
+        == history.MAX_TRANSCRIPT_STEM_CHARS
+        == constants.SESSION_KEY_MAX_CHARS
+    )
+    assert fl.MAX_ANCESTOR_KEY_CHARS is constants.SESSION_KEY_MAX_CHARS
+    assert history.MAX_TRANSCRIPT_STEM_CHARS is constants.SESSION_KEY_MAX_CHARS

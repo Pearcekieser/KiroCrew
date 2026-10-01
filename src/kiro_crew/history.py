@@ -31,6 +31,7 @@ from kiro_crew import platform_compat
 from kiro_crew.atomic_write import atomic_write, atomic_write_at
 from kiro_crew.chat_attachments import persist_inline_images, same_text_modulo_images
 from kiro_crew.config.loader import KiroCrewConfig, config_dir
+from kiro_crew.constants import SESSION_KEY_MAX_CHARS
 from kiro_crew.executors import run_in_embed_pool  # noqa: F401 - facade re-export
 from kiro_crew.frontmatter import (  # noqa: F401 - facade re-exports
     SKILL_UPDATE,
@@ -1442,9 +1443,13 @@ def can_hold_tab_id_index_entry(key: str) -> bool:
 #: it (the lineage catalog snapshot, the staged-trash stem readers) applies at the
 #: point of retention: at most this many entries, none named longer than this.
 #: One population, one policy; a listing past either bound is unprovable and the
-#: reader fails closed.
+#: reader fails closed. The stem bound IS the session-key bound
+#: (``constants.SESSION_KEY_MAX_CHARS``, the one ``artifacts.MAX_SESSION_KEY_CHARS``
+#: and ``fork_lineage.MAX_ANCESTOR_KEY_CHARS`` re-export): a stem is a folded
+#: session key, so a key admitted by slot creation must list here, or the
+#: lineage snapshot would read as unreadable for an admitted session.
 MAX_TRANSCRIPT_DIRECTORY_ENTRIES = 200_000
-MAX_TRANSCRIPT_STEM_CHARS = 256
+MAX_TRANSCRIPT_STEM_CHARS = SESSION_KEY_MAX_CHARS
 
 
 def transcript_stems(key: str) -> tuple[str, ...]:

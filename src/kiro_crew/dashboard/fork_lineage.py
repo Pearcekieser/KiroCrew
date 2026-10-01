@@ -25,9 +25,12 @@ stems, ``forked_from`` is a live key, and the dashboard spells one session as
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from kiro_crew import hooks
 from kiro_crew.artifacts import MAX_SESSION_KEY_CHARS
 from kiro_crew.history import transcript_stem, transcript_stems
 
@@ -35,6 +38,7 @@ _log = logging.getLogger(__name__)
 
 __all__ = [
     "MAX_FORK_ANCESTORS",
+    "MAX_FORK_ANCESTRY_BYTES",
     "MAX_ANCESTOR_KEY_CHARS",
     "fold",
     "recorded_chain",
@@ -42,6 +46,8 @@ __all__ = [
     "owner_spellings",
     "parent_key",
     "MAX_SLOT_NAME_CHARS",
+    "MAX_METADATA_LINE_BYTES",
+    "metadata_line_within_bound",
     "chain_unprovable",
     "chain_record_for_save",
     "UNPROVABLE_CHAIN_RECORD",
@@ -145,14 +151,44 @@ def fold(key: str) -> str:
 #: an unreadable record, so an overflowing one takes the same path: the asset
 #: endpoint refuses, the reap keeps the copies.
 MAX_FORK_ANCESTORS = 1024
+#: Longest transcript metadata line a lineage reader parses. A real metadata
+#: line is a few hundred bytes; the transcript directory and the trash are both
+#: agent-writable, so a reader that must decode ``fork_ancestors`` bounds the
+#: LINE before the JSON decoder materializes it, not the array afterwards. The
+#: live-catalog reader (``handlers.sessions._fork_lineage``) and the staged
+#: reader (``session_storage._read_lineage_meta``) share this one bound.
+MAX_METADATA_LINE_BYTES = 64 * 1024
+#: Largest a ``fork_ancestors`` chain may be ONCE SERIALIZED: half the metadata
+#: line bound, so the chain can never by itself push the line it is written
+#: into over :data:`MAX_METADATA_LINE_BYTES` and the rest of the line keeps the
+#: other half for its own fields. The count and per-entry bounds alone do not
+#: give that (1024 entries of 256 chars is ~260 KiB), so a deep chain of long
+#: keys could be ADMITTED and then written into a line every lineage reader
+#: refuses. Admission (:func:`materialize_ancestors`) and the reader
+#: (:func:`recorded_chain`) share this bound, so what one admits the other reads.
+MAX_FORK_ANCESTRY_BYTES = MAX_METADATA_LINE_BYTES // 2
 #: The store's own owner-key bound, so a key admitted here is one the store
 #: can record whole and the asset route can match whole.
 MAX_ANCESTOR_KEY_CHARS = MAX_SESSION_KEY_CHARS
-#: Longest slot NAME admission accepts: the lineage records a dashboard session
-#: as ``dashboard:<slot>``, so the name must leave room for that prefix or a
-#: fork of an admitted session would carry a source key over the bound.
+#: Longest slot NAME admission accepts. Two bounds; the tighter wins. The
+#: lineage records a dashboard session as ``dashboard:<slot>``, so the name must
+#: leave room for that prefix inside the store's owner-key bound, or a fork of
+#: an admitted session would carry a source key over it. And the slot's
+#: transcript is the file ``dashboard_<slot>.jsonl`` with a ``.jsonl.lock``
+#: sidecar beside it (``history.ConversationLog._lock_path``), so the longest
+#: name the transcript stem carries must fit a filesystem name component of
+#: :data:`MAX_FILENAME_COMPONENT_BYTES`; the slot key is folded to printable
+#: ASCII before it names a file (``state._normalize_slot_key``), so characters
+#: are bytes here. A name admitted past that would open ``ENAMETOOLONG`` on
+#: the sidecar, and the best-effort save would swallow it on every retry.
 DASHBOARD_KEY_PREFIX = "dashboard:"
-MAX_SLOT_NAME_CHARS = MAX_SESSION_KEY_CHARS - len(DASHBOARD_KEY_PREFIX)
+TRANSCRIPT_STEM_PREFIX = "dashboard_"
+TRANSCRIPT_LOCK_SUFFIX = ".jsonl.lock"
+MAX_FILENAME_COMPONENT_BYTES = 255
+MAX_SLOT_NAME_CHARS = min(
+    MAX_SESSION_KEY_CHARS - len(DASHBOARD_KEY_PREFIX),
+    MAX_FILENAME_COMPONENT_BYTES - len(TRANSCRIPT_STEM_PREFIX) - len(TRANSCRIPT_LOCK_SUFFIX),
+)
 
 
 #: What a slot whose recorded chain was UNPROVABLE writes back in place of the
@@ -204,7 +240,18 @@ def recorded_chain(meta: Any) -> list[str] | None:
             )
             return None
         out.append(a)
+    if _chain_bytes(out) > MAX_FORK_ANCESTRY_BYTES:
+        _log.warning(
+            "fork_ancestors over %d serialized bytes; treating as unprovable",
+            MAX_FORK_ANCESTRY_BYTES,
+        )
+        return None
     return out
+
+
+def _chain_bytes(chain: list[str]) -> int:
+    """Size of ``chain`` as a metadata save serializes it (``json.dumps``)."""
+    return len(json.dumps(chain).encode("utf-8"))
 
 
 #: A ``forked_from`` value that is present but not admissible: not a string,
@@ -276,6 +323,11 @@ def walk_ancestors(
     """
     out: set[str] = set()
     visited: set[str] = set()
+    # ``start`` is caller-supplied (the asset route's ``?session=``), so it is
+    # bounded like every key the walk retains, before it is folded or kept.
+    if len(start) > MAX_ANCESTOR_KEY_CHARS:
+        _log.warning("ancestry walk start over %d chars; unprovable", MAX_ANCESTOR_KEY_CHARS)
+        return None
     cur: str | None = fold(start)
     while cur and cur not in visited:
         if len(visited) >= MAX_FORK_ANCESTORS:
@@ -314,6 +366,10 @@ def _read_meta(log: Any, session: str) -> tuple[dict, bool]:
     record look like a readable root, and a fork would persist a one-link chain
     as if it were complete. A log without ``has_log`` (a test double) cannot make
     that distinction and is trusted as before.
+
+    The metadata line is agent-writable, so it is bounded BEFORE the catalog
+    decodes it (:func:`metadata_line_within_bound`); a line over the bound reads
+    as unreadable, the same as a line that fails to decode.
     """
     bare = strip_dashboard_prefix(session)
     readable = False
@@ -324,6 +380,8 @@ def _read_meta(log: Any, session: str) -> tuple[dict, bool]:
         try:
             if callable(exists) and not exists(spelling):
                 continue
+            if not metadata_line_within_bound(log, spelling):
+                continue
             meta, ok = log.get_metadata_status(spelling)
         except Exception:
             continue
@@ -332,6 +390,47 @@ def _read_meta(log: Any, session: str) -> tuple[dict, bool]:
             if meta and not found:
                 found = meta
     return found, readable
+
+
+def metadata_line_within_bound(log: Any, key: str) -> bool:
+    """Whether transcript ``key``'s first line fits :data:`MAX_METADATA_LINE_BYTES`,
+    read through the sensitive-path chokepoint with a byte cap, so the answer
+    itself costs at most that many bytes and never follows a link.
+
+    The catalog's ``get_metadata_status`` decodes the whole first line and
+    caches the result, and ``recorded_chain`` bounds the ``fork_ancestors``
+    array only after the decoder has materialized it, so every lineage reader
+    (the live-catalog walk here, the lineage snapshot in
+    ``handlers.sessions``) bounds the LINE first, through this one check. The
+    transcript directory is agent-writable, so the pre-read goes through
+    :func:`hooks.safe_read_file_bytes_nolink` pinned to that directory: a
+    transcript name swapped for a symlink, a hardlink to a file outside it, or
+    a non-regular file is refused by the read itself, not by a check made
+    before it, and the record reads as unreadable. A store without a path
+    resolver (a test double) has nothing to pre-read and passes; a file that
+    cannot be read fails closed, the same way its metadata read would, and so
+    does a line over the bound: the walk is unprovable.
+    """
+    resolve = getattr(log, "_path", None)
+    if resolve is None:
+        return True
+    try:
+        path = resolve(key)
+    except Exception:
+        return False
+    if not isinstance(path, Path):
+        return True
+    cap = MAX_METADATA_LINE_BYTES
+    head = hooks.safe_read_file_bytes_nolink(
+        str(path),
+        within_root=str(path.parent),
+        max_bytes=cap + 1,
+        allow_truncate=True,
+    )
+    if head is None:
+        return False
+    first, newline, _rest = head.partition(b"\n")
+    return bool(newline) or len(first) <= cap
 
 
 def ancestors_of(log: Any, session: str) -> set[str]:
@@ -492,6 +591,15 @@ def materialize_ancestors(
     for a in source_ancestors or ():
         if a and a not in out and not _retain(out, a, what="from the source chain"):
             return None
+    # The chain is written into the fork's metadata line, so it must also fit
+    # the serialized budget the reader enforces; a deep chain of long keys can
+    # pass the count and per-entry bounds and still not.
+    if _chain_bytes(out) > MAX_FORK_ANCESTRY_BYTES:
+        _log.warning(
+            "fork_ancestors over %d serialized bytes; chain is unprovable",
+            MAX_FORK_ANCESTRY_BYTES,
+        )
+        return None
     return out
 
 
