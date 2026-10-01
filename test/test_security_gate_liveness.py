@@ -142,12 +142,23 @@ def _url_payload_command(n: int) -> str:
 #: One route regex, one span helper, a four-line check in pass 3, and the comment
 #: naming the residual. No pass widened and no threshold moved.
 #:
+#: Raised again, from 28,025, for the ssh self-target floor's boot-time warm-up: the
+#: own-address table is read at gateway startup and published before the DNS
+#: lookups, and background threads parse the hosts-file table (in bounded chunks,
+#: keyed on the own-address set it was judged by). On a miss the gate path parses
+#: only a file that fits in one read chunk; a larger file is refused as pending
+#: until the background parse is cached. On Windows, where ``st_ctime`` is creation
+#: time, the key also carries a content digest (``hosts_file.py``, which holds the
+#: line parser and digest helpers apart from ``argv_floor``'s per-module cap). A
+#: Windows file too large to hash on the gate is never served, so a dotless target
+#: there is pending, and the ssh self-target refusal note says so.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 28_025
+_PACKAGE_LINE_BUDGET = 28_399
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

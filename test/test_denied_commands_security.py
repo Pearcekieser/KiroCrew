@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 import threading
@@ -43,6 +44,7 @@ _GOLDEN = Path(__file__).parent / "fixtures" / "denied_commands_golden.json"
 # the alias-layer tests re-bind this real function and stub the resolver
 # socket underneath it instead.
 _REAL_RESOLVED_HOST_VERDICT = _argv_floor._resolved_host_verdict
+_REAL_SCHEDULE_HOSTS_WARM = getattr(_argv_floor, "_schedule_hosts_file_warm", None)
 
 
 class _PacketlessProbeSocket(_argv_floor.socket.socket):
@@ -84,9 +86,19 @@ def _own_address_probe_stays_local(monkeypatch):
     stays packet-less and local, and the worker backoff is pushed out so no
     enrichment thread starts. Tests of the worker itself set the backoff to
     ``0.0`` explicitly, and the resolver tests stub DNS underneath it.
+
+    The hosts-file layer is pinned the same way: no hosts file (so a dotless
+    target is never a pending refusal against the operator's real
+    ``/etc/hosts``), an empty table cache, and a warm scheduler that records
+    instead of starting a thread. Hosts-file tests name their own file and
+    warm it explicitly.
     """
     monkeypatch.setattr(_argv_floor.socket, "socket", _PacketlessProbeSocket)
     monkeypatch.setattr(_argv_floor, "_OWN_HOST_RESOLVE_NEXT_TRY", float("inf"))
+    monkeypatch.setattr(_argv_floor, "_hosts_file_paths", lambda: ())
+    monkeypatch.setattr(_argv_floor, "_HOSTS_FILE_CACHE", {})
+    monkeypatch.setattr(_argv_floor, "_HOSTS_WARM_IN_FLIGHT", False, raising=False)
+    monkeypatch.setattr(_argv_floor, "_schedule_hosts_file_warm", lambda: None, raising=False)
 
 
 class TestCatalog:
@@ -8389,6 +8401,10 @@ class TestSandboxEscapeSshSelf:
         assert _argv_floor._OWN_HOST_RESOLVE_BACKOFF_SECS == 60.0
         assert "ssh_config-only alias" in note
         assert "address list cannot be read, so use a resolvable name" in note
+        assert (
+            "a dotless name on Windows when the hosts file is over 64 KiB, since its content "
+            "cannot be verified, so use the full hostname or an IP address" in note
+        )
         assert "(3) FORWARDED port" in note
         assert "per-rule toggle in Settings" in note
         # One line: the note is the refusal's second line, which the recovery
@@ -10464,3 +10480,625 @@ class TestHostsAliasPublicationWindow:
         # ``ssh dev-dsk`` shape).
         assert _denied_by("ssh farbox uptime") is None
         assert started == []
+
+
+class TestHostsFileWarmUp:
+    """Background threads warm the hosts table; the gate parses only a small file.
+
+    The enrichment worker (started at gateway boot) parses the table before
+    its DNS lookups and again after the DNS merge.  A dotless ssh target
+    that finds no table for the current key (file, publication and own set)
+    is judged in the same call when the file fits in one read chunk; a
+    larger file is refused as pending and one background warm is scheduled.
+    Once a table is cached the allow/deny verdict per name is the same as
+    before.
+    """
+
+    _RULE = "sandbox-escape-ssh-self"
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch, tmp_path):
+        # No live DNS, no netlink read, no real /etc/hosts, and no thread is
+        # ever started: every spawn is recorded instead.  Every global the
+        # code under test writes is pinned here so monkeypatch restores it.
+        self.started: "list[str]" = []
+        started = self.started
+
+        class _RecordingThread:
+            def __init__(self, *args, **kwargs):
+                started.append(kwargs.get("name", ""))
+
+            def start(self):
+                pass
+
+            def is_alive(self):
+                return False
+
+        monkeypatch.setattr(_argv_floor.threading, "Thread", _RecordingThread)
+        monkeypatch.setattr(_argv_floor.socket, "getfqdn", lambda: "")
+        monkeypatch.setattr(_argv_floor.socket, "getaddrinfo", lambda *a, **k: [])
+        monkeypatch.setattr(_argv_floor, "_linux_netlink_addresses", lambda: set())
+        monkeypatch.setattr(_argv_floor, "_OWN_HOST_NAMES_CACHE", frozenset({"127.0.0.1"}))
+        monkeypatch.setattr(_argv_floor, "_OWN_HOST_RESOLVE_DONE", True)
+        monkeypatch.setattr(_argv_floor, "_OWN_HOST_RESOLVE_STAMP", time.monotonic())
+        monkeypatch.setattr(_argv_floor, "_OWN_HOST_RESOLVE_NEXT_TRY", float("inf"))
+        monkeypatch.setattr(_argv_floor, "_OWN_HOST_RESOLVE_IN_FLIGHT", False)
+        monkeypatch.setattr(_argv_floor, "_NETLINK_ADDRS_PUBLISHED", True)
+        monkeypatch.setattr(_argv_floor, "_HOSTS_FILE_CACHE", {})
+        monkeypatch.setattr(_argv_floor, "_HOSTS_WARM_IN_FLIGHT", False, raising=False)
+        # The POSIX key (ctime, no content read) on every runner; a Windows
+        # runner would otherwise refuse every dotless name on a file over the
+        # chunk cap.  The Windows tests turn the digest on with _windows().
+        monkeypatch.setattr(_argv_floor, "_hosts_content_digest_enabled", lambda: False)
+        if _REAL_SCHEDULE_HOSTS_WARM is not None:
+            monkeypatch.setattr(_argv_floor, "_schedule_hosts_file_warm", _REAL_SCHEDULE_HOSTS_WARM)
+        assert _REAL_RESOLVED_HOST_VERDICT is not None
+        monkeypatch.setattr(_argv_floor, "_resolved_host_verdict", _REAL_RESOLVED_HOST_VERDICT)
+        monkeypatch.setattr(_argv_floor, "_HOST_VERDICT_CACHE", {})
+        monkeypatch.setattr(_argv_floor, "_HOST_VERDICT_PENDING", set())
+        self.tmp_path = tmp_path
+
+    def _hosts(self, monkeypatch, text):
+        hosts = self.tmp_path / "hosts"
+        hosts.write_text(text)
+        monkeypatch.setattr(_argv_floor, "_hosts_file_paths", lambda: (str(hosts),))
+        return str(hosts)
+
+    @staticmethod
+    def _cold_worker(monkeypatch, *, netlink):
+        """A process whose enrichment pass has not run yet."""
+        monkeypatch.setattr(_argv_floor, "_OWN_HOST_NAMES_CACHE", None)
+        monkeypatch.setattr(_argv_floor, "_OWN_HOST_RESOLVE_DONE", False)
+        monkeypatch.setattr(_argv_floor, "_NETLINK_ADDRS_PUBLISHED", False)
+        monkeypatch.setattr(_argv_floor, "_linux_netlink_addresses", netlink)
+
+    def _big_hosts(self, monkeypatch, text, name="hosts"):
+        """A hosts file one byte over the in-call parse cap."""
+        hosts = self.tmp_path / name
+        pad = _argv_floor._HOSTS_FILE_READ_CHUNK + 1 - len(text.encode())
+        hosts.write_bytes((text + "#" * (pad - 1) + "\n").encode())
+        assert os.stat(hosts).st_size == _argv_floor._HOSTS_FILE_READ_CHUNK + 1
+        return str(hosts)
+
+    @staticmethod
+    def _parser_must_not_run(monkeypatch):
+        def _boom(*_a, **_k):
+            raise AssertionError("the gate path parsed the hosts file")
+
+        monkeypatch.setattr(_argv_floor, "_parse_hosts_file", _boom)
+
+    # --- the gate path: small file in call, large file pending -----------
+
+    def test_a_small_hosts_file_is_parsed_in_call_on_a_cold_gate(self, monkeypatch):
+        path = self._hosts(monkeypatch, "10.4.4.4 farbox\n127.0.0.1 loopalias\n")
+        assert _denied_by("ssh farbox uptime") is None
+        assert _denied_by("ssh dev-dsk uptime") is None
+        assert _denied_by("ssh dev-dsk 'cd /workplace && git status'") is None
+        assert _denied_by("ssh loopalias uptime") == self._RULE
+        assert _argv_floor._HOSTS_FILE_CACHE[path][1] == {"farbox": False, "loopalias": True}
+        assert "kirocrew-hosts-warm" not in self.started
+
+    def test_a_hosts_file_over_the_cap_is_never_parsed_on_the_gate(self, monkeypatch):
+        path = self._big_hosts(monkeypatch, "10.4.4.4 farbox\n")
+        monkeypatch.setattr(_argv_floor, "_hosts_file_paths", lambda: (path,))
+        self._parser_must_not_run(monkeypatch)
+        assert _denied_by("ssh farbox uptime") == self._RULE
+        assert _denied_by("ssh dev-dsk uptime") == self._RULE
+        assert self.started.count("kirocrew-hosts-warm") == 1, "warm is single-flight"
+
+    def test_the_scheduled_warm_lets_the_same_command_through(self, monkeypatch):
+        path = self._big_hosts(monkeypatch, "10.4.4.4 farbox\n127.0.0.1 loopalias\n")
+        monkeypatch.setattr(_argv_floor, "_hosts_file_paths", lambda: (path,))
+        assert _denied_by("ssh dev-dsk uptime") == self._RULE  # pending
+        _argv_floor._hosts_file_warm_worker()  # the scheduled thread's body
+        assert _argv_floor._HOSTS_WARM_IN_FLIGHT is False
+        self._parser_must_not_run(monkeypatch)
+        assert _denied_by("ssh dev-dsk uptime") is None
+        assert _denied_by("ssh farbox uptime") is None
+        assert _denied_by("ssh loopalias uptime") == self._RULE
+
+    def test_no_hosts_file_is_not_pending(self, monkeypatch):
+        monkeypatch.setattr(
+            _argv_floor, "_hosts_file_paths", lambda: (str(self.tmp_path / "missing"),)
+        )
+        assert _denied_by("ssh dev-dsk uptime") is None
+        assert "kirocrew-hosts-warm" not in self.started
+
+    # --- the key: publication, own set, and a mid-parse change ----------
+
+    def test_unstable_own_set_is_a_deny_end_to_end(self, monkeypatch):
+        # The own set changes on every read, and this host's 10.4.4.4 joins
+        # it only after several reads: a table judged against any earlier
+        # snapshot would call the alias remote.  Nothing may be cached, and
+        # the gate must refuse the alias rather than fall through to allow.
+        self._hosts(monkeypatch, "10.4.4.4 ownalias\n")
+        reads = iter(range(10_000))
+
+        def _own():
+            n = next(reads)
+            base = {f"10.200.0.{n % 250}", f"10.201.{n // 250}.0"}
+            return frozenset(base | ({"10.4.4.4"} if n >= 4 else set()))
+
+        monkeypatch.setattr(_argv_floor, "_own_host_names", _own)
+        assert _argv_floor._host_is_self("ownalias") is True
+        for _ in range(3):
+            _argv_floor._warm_hosts_file_cache()
+        assert _argv_floor._HOSTS_FILE_CACHE == {}
+        assert _argv_floor._host_is_self("ownalias") is True
+
+    def test_publication_during_a_parse_caches_nothing_and_still_denies(self, monkeypatch):
+        # The worker is mid-parse when the address table publishes this
+        # host's 203.0.113.66, and a later line aliases a name to it.  That
+        # table was judged against the old own set, so it must be dropped.
+        self._hosts(monkeypatch, "10.4.4.4 farbox\n203.0.113.66 ownalias\n")
+        monkeypatch.setattr(_argv_floor, "_NETLINK_ADDRS_PUBLISHED", False)
+        monkeypatch.setattr(_argv_floor, "_HOSTS_FILE_READ_CHUNK", 16)  # line 1 only
+        real_open = open
+
+        class _Handle:
+            def __init__(self, fh):
+                self._fh, self._reads = fh, 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._fh.close()
+
+            def read(self, n=-1):
+                data = self._fh.read(n)
+                self._reads += 1
+                if self._reads == 1 and not _argv_floor._NETLINK_ADDRS_PUBLISHED:
+                    _argv_floor._publish_netlink_addresses({"203.0.113.66"})
+                return data
+
+        monkeypatch.setattr(
+            _argv_floor, "open", lambda f, *a, **k: _Handle(real_open(f, *a, **k)), raising=False
+        )
+        _argv_floor._warm_hosts_file_cache()
+        assert _argv_floor._NETLINK_ADDRS_PUBLISHED is True
+        assert _argv_floor._HOSTS_FILE_CACHE == {}
+        assert _argv_floor._host_is_self("ownalias") is True
+        _argv_floor._warm_hosts_file_cache()  # the next pass, key now stable
+        assert _argv_floor._host_is_self("ownalias") is True
+        assert _denied_by("ssh farbox uptime") is None
+
+    def test_an_own_address_learned_later_re_marks_a_cached_alias(self, monkeypatch):
+        self._hosts(monkeypatch, "198.51.100.44 lateownalias\n")
+        _argv_floor._warm_hosts_file_cache()
+        assert _argv_floor._hosts_file_verdict("lateownalias") is False
+        monkeypatch.setattr(
+            _argv_floor, "_OWN_HOST_NAMES_CACHE", frozenset({"127.0.0.1", "198.51.100.44"})
+        )
+        assert _argv_floor._hosts_file_verdict("lateownalias") is True  # re-parsed, local
+        assert _argv_floor._HOSTS_FILE_CACHE[str(self.tmp_path / "hosts")][1] == {
+            "lateownalias": True
+        }
+
+    # --- the enrichment worker warms it ---------------------------------
+
+    def test_worker_pass_leaves_a_published_table(self, monkeypatch):
+        path = self._hosts(monkeypatch, "203.0.113.66 ownalias\n10.4.4.4 farbox\n")
+        self._cold_worker(monkeypatch, netlink=lambda: {"203.0.113.66"})
+        _argv_floor._resolve_own_host_names_into_cache()
+        key, table = _argv_floor._HOSTS_FILE_CACHE[path]
+        assert key[-2] is True
+        assert table == {"ownalias": True, "farbox": False}
+        self._parser_must_not_run(monkeypatch)
+        assert _denied_by("ssh ownalias uptime") == self._RULE
+        assert _denied_by("ssh farbox uptime") is None
+
+    def test_hosts_table_is_warm_before_the_dns_lookups_run(self, monkeypatch):
+        path = self._hosts(monkeypatch, "10.4.4.4 farbox\n")
+        self._cold_worker(monkeypatch, netlink=lambda: {"203.0.113.66"})
+        seen: "list[bool]" = []
+
+        def _getaddrinfo(*_a, **_k):
+            seen.append(path in _argv_floor._HOSTS_FILE_CACHE)
+            return []
+
+        monkeypatch.setattr(_argv_floor.socket, "getaddrinfo", _getaddrinfo)
+        _argv_floor._resolve_own_host_names()
+        assert seen and all(seen)
+
+    def test_worker_warms_even_without_a_netlink_dump(self, monkeypatch):
+        # No dump (non-Linux, or the read failed): the table is still parsed
+        # before DNS, keyed as unpublished, so a dotless target is not left
+        # pending; its remote entries defer to the async layer as before.
+        path = self._hosts(monkeypatch, "10.4.4.4 farbox\n")
+        self._cold_worker(monkeypatch, netlink=lambda: set())
+        _argv_floor._resolve_own_host_names()
+        key, table = _argv_floor._HOSTS_FILE_CACHE[path]
+        assert key[-2] is False and table == {"farbox": False}
+        assert _argv_floor._hosts_file_verdict("farbox") is None
+
+    def test_warm_parse_sees_dns_derived_own_addresses(self, monkeypatch):
+        path = self._hosts(monkeypatch, "198.51.100.44 dnsownalias\n")
+        self._cold_worker(monkeypatch, netlink=lambda: {"203.0.113.66"})
+        monkeypatch.setattr(
+            _argv_floor.socket,
+            "getaddrinfo",
+            lambda *a, **k: [(2, 1, 6, "", ("198.51.100.44", 0))],
+        )
+        _argv_floor._resolve_own_host_names_into_cache()
+        assert _argv_floor._HOSTS_FILE_CACHE[path][1] == {"dnsownalias": True}
+        assert _denied_by("ssh dnsownalias uptime") == self._RULE
+
+    def test_a_failed_warm_parse_does_not_fail_the_worker_pass(self, monkeypatch):
+        self._hosts(monkeypatch, "10.4.4.4 farbox\n")
+        self._cold_worker(monkeypatch, netlink=lambda: {"203.0.113.66"})
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("unreadable")
+
+        monkeypatch.setattr(_argv_floor, "_parse_hosts_file", _boom)
+        _argv_floor._resolve_own_host_names_into_cache()
+        assert "203.0.113.66" in _argv_floor._OWN_HOST_NAMES_CACHE
+        assert _argv_floor._OWN_HOST_RESOLVE_DONE is True
+        assert _argv_floor._HOSTS_FILE_CACHE == {}
+
+    # --- the parse itself ----------------------------------------------
+
+    def test_chunked_read_matches_one_whole_read(self, monkeypatch):
+        # Chunk edges fall inside names, inside addresses and between the
+        # \r and \n of a CRLF; the cap still cuts at the same character.
+        text = (
+            "# comment line\r\n127.0.0.1 localhost looplias\r\n"
+            "10.4.4.4 farbox farbox.example\n::1 v6alias\n"
+            "10.9.9.9 pastcap\n"
+        )
+        cap = text.index("10.9.9.9") + 4  # mid-address: the last line is unparseable
+        hosts = self.tmp_path / "hosts"
+        hosts.write_bytes(text.encode())
+        monkeypatch.setattr(_argv_floor, "_HOSTS_FILE_READ_CAP", cap)
+        tables = []
+        for chunk in (1, 3, 7, 16, 1 << 16):
+            monkeypatch.setattr(_argv_floor, "_HOSTS_FILE_READ_CHUNK", chunk)
+            tables.append(_argv_floor._parse_hosts_file(str(hosts), frozenset()))
+        assert tables[0] == {
+            "localhost": True,
+            "looplias": True,
+            "farbox": False,
+            "farbox.example": False,
+            "v6alias": True,
+        }
+        assert all(t == tables[0] for t in tables)
+
+    def test_own_name_reads_do_not_scale_with_lines(self, monkeypatch):
+        self._hosts(monkeypatch, "".join(f"10.0.0.{i} host{i}\n" for i in range(50)))
+        calls: "list[int]" = []
+
+        def _own():
+            calls.append(1)
+            return frozenset({"10.0.0.7"})
+
+        monkeypatch.setattr(_argv_floor, "_own_host_names", _own)
+        _argv_floor._warm_hosts_file_cache()
+        table = next(iter(_argv_floor._HOSTS_FILE_CACHE.values()))[1]
+        assert table["host7"] is True and table["host8"] is False
+        # One read for the key before the parse, one to confirm it after.
+        assert len(calls) == 2
+
+    # --- a remote verdict is re-checked at return -----------------------
+
+    @staticmethod
+    def _fire_after_lookup(monkeypatch, action):
+        """Run *action* between the gate's cache lookup and its return."""
+
+        class _Cache(dict):
+            def get(self, *a, **k):
+                found = dict.get(self, *a, **k)
+                action()
+                return found
+
+        monkeypatch.setattr(_argv_floor, "_HOSTS_FILE_CACHE", _Cache(_argv_floor._HOSTS_FILE_CACHE))
+
+    def test_own_set_merge_after_the_key_check_is_a_deny(self, monkeypatch):
+        # The worker merges this host's 10.4.4.4 after the gate matched the
+        # cached key: the table's "remote" was judged without it.
+        self._hosts(monkeypatch, "10.4.4.4 ownalias\n")
+        _argv_floor._warm_hosts_file_cache()
+        assert _argv_floor._hosts_file_verdict("ownalias") is False
+
+        def _merge():
+            _argv_floor._OWN_HOST_NAMES_CACHE = frozenset({"127.0.0.1", "10.4.4.4"})
+
+        self._fire_after_lookup(monkeypatch, _merge)
+        assert _argv_floor._host_is_self("ownalias") is True
+        assert "kirocrew-hosts-warm" in self.started
+
+    def test_publication_after_the_key_check_is_a_deny(self, monkeypatch):
+        # A table judged before publication must not be read as authoritative
+        # because publication flipped between the key check and the return.
+        self._hosts(monkeypatch, "10.4.4.4 ownalias\n")
+        monkeypatch.setattr(_argv_floor, "_NETLINK_ADDRS_PUBLISHED", False)
+        _argv_floor._warm_hosts_file_cache()
+
+        def _publish():
+            _argv_floor._NETLINK_ADDRS_PUBLISHED = True
+            _argv_floor._OWN_HOST_NAMES_CACHE = frozenset({"127.0.0.1", "10.4.4.4"})
+
+        self._fire_after_lookup(monkeypatch, _publish)
+        assert _argv_floor._host_is_self("ownalias") is True
+
+    def test_a_stable_remote_is_still_a_same_call_allow(self, monkeypatch):
+        self._hosts(monkeypatch, "10.4.4.4 farbox\n")
+        _argv_floor._warm_hosts_file_cache()
+        self._fire_after_lookup(monkeypatch, lambda: None)
+        assert _argv_floor._hosts_file_verdict("farbox") is False
+        assert _denied_by("ssh farbox uptime") is None
+
+    def test_a_pending_path_wins_over_another_paths_remote(self, monkeypatch):
+        first = self._big_hosts(monkeypatch, "127.0.0.1 localalias\n", name="hosts-a")
+        second = self.tmp_path / "hosts-b"
+        second.write_text("10.4.4.4 localalias\n")
+        monkeypatch.setattr(_argv_floor, "_hosts_file_paths", lambda: (str(second),))
+        _argv_floor._warm_hosts_file_cache()  # only the second path is warm
+        monkeypatch.setattr(_argv_floor, "_hosts_file_paths", lambda: (first, str(second)))
+        self._parser_must_not_run(monkeypatch)
+        assert _argv_floor._host_is_self("localalias") is True
+
+    # --- unreadable files and overlong lines ----------------------------
+
+    def test_an_unreadable_hosts_file_refuses_until_it_reads(self, monkeypatch):
+        # Fail closed: while the file cannot be read, a hosts-file alias for
+        # this machine cannot be ruled out, so a dotless target is pending on
+        # every call, nothing is cached, and each call reads again.  Once the
+        # file reads, the same command passes.  (Main allowed here.)
+        path = self._hosts(monkeypatch, "10.4.4.4 farbox\n")
+        readable = [False]
+        real_parse = _argv_floor._parse_hosts_file
+
+        def _parse(p, own, **kw):
+            if not readable[0]:
+                raise PermissionError("no read access")
+            return real_parse(p, own, **kw)
+
+        monkeypatch.setattr(_argv_floor, "_parse_hosts_file", _parse)
+        assert _denied_by("ssh dev-dsk uptime") is not None
+        assert _denied_by("ssh dev-dsk uptime") is not None
+        assert path not in _argv_floor._HOSTS_FILE_CACHE
+        readable[0] = True
+        assert _denied_by("ssh farbox uptime") is None
+
+    def test_a_long_loopback_line_is_parsed_at_any_offset(self, monkeypatch):
+        # No hosts line is dropped, however long: a valid loopback line of
+        # more than 4096 characters still makes its alias local wherever
+        # the chunk edge falls inside it.
+        line = "127.0.0.1 secretbox " + " ".join(f"a{i:04d}" for i in range(1200)) + "\n"
+        assert len(line) > 4096
+        for pad in (60000, 61500, 64000, 65535):
+            self._hosts(monkeypatch, "# pad\n" * (pad // 6) + line + "10.4.4.4 farbox\n")
+            monkeypatch.setattr(_argv_floor, "_HOSTS_FILE_CACHE", {})
+            _argv_floor._warm_hosts_file_cache()
+            assert _argv_floor._host_is_self("secretbox") is True, pad
+            assert _argv_floor._host_is_self("a1199") is True, pad
+            assert _denied_by("ssh farbox uptime") is None, pad
+
+    def test_a_line_with_no_break_reads_and_splits_each_chunk_once(self, monkeypatch):
+        # A cap-sized file with no line break at all: each chunk read is split
+        # once on its own (never re-split as part of an accumulated carry), so
+        # the characters those chunk splits cover add up to the file size, not
+        # to its square; the line is still parsed.  Only the per-chunk split
+        # is counted, not the one-piece break checks on its output.
+        chunk = 1024
+        monkeypatch.setattr(_argv_floor, "_HOSTS_FILE_READ_CHUNK", chunk)
+        text = "127.0.0.1 " + "a" * (256 * 1024)
+        hosts = self.tmp_path / "hosts"
+        hosts.write_text(text)
+        split: "list[int]" = []
+
+        class _Tracked(str):
+            def splitlines(self, *a, **k):
+                split.append(len(self))
+                return str.splitlines(self, *a, **k)
+
+        real_open = open
+
+        class _Handle:
+            def __init__(self, fh):
+                self._fh = fh
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._fh.close()
+
+            def read(self, n=-1):
+                return _Tracked(self._fh.read(n))
+
+        monkeypatch.setattr(
+            _argv_floor, "open", lambda f, *a, **k: _Handle(real_open(f, *a, **k)), raising=False
+        )
+        table = _argv_floor._parse_hosts_file(str(hosts), frozenset())
+        assert table == {"a" * (256 * 1024): True}
+        assert sum(split) == len(text)
+        assert max(split) <= chunk
+
+    def test_a_failed_read_is_never_cached_and_is_retried(self, monkeypatch):
+        # A read that fails once (a transient error, nothing about the file
+        # changes) is pending and caches nothing, so the key cannot pin that
+        # failure: the very next check reads the file again, a remote alias
+        # passes and the loopback alias is refused.  The failure is simulated
+        # through the parser; a mode of 0 does not stop the owner reading on
+        # Windows or root reading on POSIX.
+        path = self._hosts(monkeypatch, "127.0.0.1 loopalias\n10.4.4.4 farbox\n")
+        failures = [1]
+        real_parse = _argv_floor._parse_hosts_file
+
+        def _parse(p, own, **kw):
+            if failures[0]:
+                failures[0] -= 1
+                raise OSError("transient read error")
+            return real_parse(p, own, **kw)
+
+        monkeypatch.setattr(_argv_floor, "_parse_hosts_file", _parse)
+        assert _argv_floor._host_is_self("farbox") is True  # the failing read: pending
+        assert path not in _argv_floor._HOSTS_FILE_CACHE
+        assert _argv_floor._host_is_self("farbox") is False  # read again: remote
+        assert _argv_floor._host_is_self("loopalias") is True
+
+    def test_an_unreadable_large_hosts_file_stays_pending_and_re_schedules(self, monkeypatch):
+        # A file over the in-call cap whose background read fails (fd
+        # exhaustion, say) is pending on every gate call, and every call
+        # re-schedules the warm, so the retry does not hang on one thread.
+        path = self._hosts(
+            monkeypatch,
+            "# pad\n" * (_argv_floor._HOSTS_FILE_READ_CHUNK // 3) + "127.0.0.1 loopalias\n",
+        )
+
+        def _emfile(*_a, **_k):
+            raise OSError(24, "Too many open files")
+
+        monkeypatch.setattr(_argv_floor, "_parse_hosts_file", _emfile)
+        _argv_floor._warm_hosts_file_cache()  # the failing background read
+        scheduled: "list[int]" = []
+        monkeypatch.setattr(_argv_floor, "_schedule_hosts_file_warm", lambda: scheduled.append(1))
+        assert _argv_floor._host_is_self("loopalias") is True
+        assert _argv_floor._host_is_self("loopalias") is True
+        assert path not in _argv_floor._HOSTS_FILE_CACHE
+        assert scheduled == [1, 1]
+
+    def test_the_in_call_cap_counts_bytes_not_characters(self, monkeypatch):
+        # Four-byte UTF-8 text puts more than 64 KiB of bytes in fewer than
+        # 64 Ki characters.  The inline cap is enforced on the bytes read, so
+        # a file swapped in after a small stat is still stopped at the cap.
+        path = self._hosts(monkeypatch, "")
+        text = "#" + "\U0001f600" * 20000 + "\n10.4.4.4 farbox\n"
+        with open(path, "wb") as fh:
+            fh.write(text.encode("utf-8"))
+        assert len(text) < _argv_floor._HOSTS_FILE_READ_CHUNK
+        assert os.stat(path).st_size > _argv_floor._HOSTS_FILE_READ_CHUNK
+        real_key = _argv_floor._hosts_file_key
+
+        def _stale_small_key(p):
+            key = real_key(p)
+            return key[:2] + (16,) + key[3:]
+
+        monkeypatch.setattr(_argv_floor, "_hosts_file_key", _stale_small_key)
+        monkeypatch.setattr(_argv_floor, "_schedule_hosts_file_warm", lambda: None)
+        assert _argv_floor._host_is_self("farbox") is True
+        assert path not in _argv_floor._HOSTS_FILE_CACHE
+
+    def test_the_gate_never_reads_past_the_in_call_cap(self, monkeypatch):
+        # The key's stat says the file is small, but it was replaced by a
+        # larger one before the open.  The inline read is bounded by the cap
+        # itself, so the gate stops at the cap, caches nothing, answers
+        # pending and leaves the full parse to the background warm.
+        path = self._hosts(
+            monkeypatch, "# pad\n" * (_argv_floor._HOSTS_FILE_READ_CHUNK // 3) + "10.4.4.4 farbox\n"
+        )
+        real_key = _argv_floor._hosts_file_key
+
+        def _stale_small_key(p):
+            key = real_key(p)
+            return key[:2] + (16,) + key[3:]
+
+        monkeypatch.setattr(_argv_floor, "_hosts_file_key", _stale_small_key)
+        scheduled: "list[int]" = []
+        monkeypatch.setattr(_argv_floor, "_schedule_hosts_file_warm", lambda: scheduled.append(1))
+        assert _argv_floor._host_is_self("farbox") is True
+        assert path not in _argv_floor._HOSTS_FILE_CACHE
+        assert scheduled == [1]
+
+    # --- Windows: a content digest, since st_ctime is creation time ------
+
+    def _windows(self, monkeypatch):
+        """Digest mode on, and ``st_ctime`` pinned to creation time as on Windows.
+
+        The stat seen by the code under test keeps each path's first
+        ``st_ctime`` (its creation time), so a rewrite that restores mtime
+        leaves mtime, ctime and size all unchanged, which is the Windows case.
+        """
+        monkeypatch.setattr(_argv_floor, "_hosts_content_digest_enabled", lambda: True)
+        born: "dict[str, float]" = {}
+        real_os = _argv_floor.os
+
+        class _Stat:
+            def __init__(self, st, ctime):
+                self._st, self.st_ctime = st, ctime
+
+            def __getattr__(self, name):
+                return getattr(self._st, name)
+
+        class _WindowsOs:
+            def __getattr__(self, name):
+                return getattr(real_os, name)
+
+            @staticmethod
+            def stat(path, *a, **k):
+                st = real_os.stat(path, *a, **k)
+                return _Stat(st, born.setdefault(str(path), st.st_ctime))
+
+        monkeypatch.setattr(_argv_floor, "os", _WindowsOs())
+
+    @staticmethod
+    def _rewrite_keeping_mtime(path, old, new):
+        """Replace *old* with *new* (same length) in place and restore mtime."""
+        assert len(old) == len(new)
+        st = os.stat(path)
+        with open(path, "rb") as fh:
+            data = fh.read()
+        assert old.encode() in data
+        with open(path, "r+b") as fh:
+            fh.write(data.replace(old.encode(), new.encode()))
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        after = os.stat(path)
+        assert (after.st_size, after.st_mtime_ns) == (st.st_size, st.st_mtime_ns)
+
+    def test_windows_same_size_rewrite_with_restored_mtime_re_parses(self, monkeypatch):
+        self._windows(monkeypatch)
+        path = self._hosts(monkeypatch, "10.44.4.4 swapbox\n")
+        assert _argv_floor._host_is_self("swapbox") is False
+        self._rewrite_keeping_mtime(path, "10.44.4.4 swapbox", "127.0.0.9 swapbox")
+        assert _argv_floor._host_is_self("swapbox") is True
+        assert _argv_floor._HOSTS_FILE_CACHE[path][1] == {"swapbox": True}
+
+    def test_windows_large_file_never_serves_a_remote_or_absent_verdict(self, monkeypatch):
+        # A Windows hosts file over 64 KiB cannot be verified without a gate
+        # read past the chunk cap, so no cached remote or absent answer is
+        # served for a dotless name, even straight after a background warm:
+        # a same-size rewrite that restores mtime is invisible to its key.
+        self._windows(monkeypatch)
+        path = self._big_hosts(monkeypatch, "10.44.4.4 swapbox\n127.0.0.1 loopalias\n")
+        monkeypatch.setattr(_argv_floor, "_hosts_file_paths", lambda: (path,))
+        _argv_floor._hosts_file_warm_worker()
+        assert _argv_floor._host_is_self("swapbox") is True
+        assert _argv_floor._hosts_file_verdict("nobody") is True
+        assert _denied_by("ssh dev-dsk uptime") == self._RULE
+        self._rewrite_keeping_mtime(path, "10.44.4.4 swapbox", "127.0.0.9 swapbox")
+        assert _argv_floor._host_is_self("swapbox") is True
+        assert _denied_by("ssh loopalias uptime") == self._RULE
+
+    def test_windows_small_file_read_failure_on_the_digest_is_pending(self, monkeypatch):
+        self._windows(monkeypatch)
+        self._hosts(monkeypatch, "10.44.4.4 swapbox\n")
+        _argv_floor._warm_hosts_file_cache()
+
+        def _eio(*_a, **_k):
+            raise OSError(5, "I/O error")
+
+        monkeypatch.setattr(_argv_floor, "_read_hosts_bytes", _eio)
+        scheduled: "list[int]" = []
+        monkeypatch.setattr(_argv_floor, "_schedule_hosts_file_warm", lambda: scheduled.append(1))
+        assert _argv_floor._host_is_self("swapbox") is True
+        assert scheduled == [1]
+
+    def test_posix_key_does_no_content_read(self, monkeypatch):
+        def _boom(*_a, **_k):
+            raise AssertionError("POSIX read the hosts file for a digest")
+
+        monkeypatch.setattr(_argv_floor, "_hosts_content_digest", _boom, raising=False)
+        path = self._hosts(monkeypatch, "10.44.4.4 swapbox\n127.0.0.1 loopalias\n")
+        with monkeypatch.context() as m:
+            # The key itself reads nothing on POSIX; only a parse reads.
+            m.setattr(_argv_floor, "_read_hosts_bytes", _boom, raising=False)
+            assert _argv_floor._hosts_file_key(path)[3] is None
+        assert _argv_floor._host_is_self("swapbox") is False
+        assert _argv_floor._host_is_self("loopalias") is True
+        assert _argv_floor._HOSTS_FILE_CACHE[path][0][3] is None
+        big = self._big_hosts(monkeypatch, "10.44.4.4 swapbox\n", name="hosts-big")
+        monkeypatch.setattr(_argv_floor, "_hosts_file_paths", lambda: (big,))
+        _argv_floor._hosts_file_warm_worker()
+        assert _argv_floor._host_is_self("swapbox") is False
