@@ -301,13 +301,14 @@ class TestCarriedFenceVerdict:
 
 
 class TestEveryRouteForwardsTheCarriedVerdict:
-    """The carry is held by five hand-written call sites; pin all of them.
+    """The carry is held by seven hand-written call sites; pin all of them.
 
     The TOCTOU closure this gate exists for holds only if EVERY route that
     consults the fence hands ``_carried_fence(request)`` to ``session_control.py``
     as ``caller_fenced``. A route that forgets it silently reopens the window for
-    that one verb. So each of ``stop`` / ``close`` / ``send`` / ``read`` /
-    ``create`` is driven through its real handler with the core function replaced
+    that one verb. So each of ``stop`` / ``close`` / ``send`` / ``set_color`` /
+    ``set_note`` / ``read`` / ``create`` is driven through its real handler with
+    the core function replaced
     by a recorder, and the recorded ``caller_fenced`` must be ``True`` for an
     admitted member and ``None`` for an owner caller. ``create`` takes no target,
     so its verdict decides which memory store the new child may be bound to
@@ -322,6 +323,18 @@ class TestEveryRouteForwardsTheCarriedVerdict:
             "send_to_target",
             True,
             {"target": "chat-7", "message": "hello"},
+            None,
+        ),
+        "api_session_control_set_color": (
+            "set_color_target",
+            True,
+            {"target": "chat-7", "color": "2"},
+            None,
+        ),
+        "api_session_control_set_note": (
+            "authorize_note_target",
+            True,
+            {"target": "chat-7", "note": "n"},
             None,
         ),
         "api_session_control_read": ("read_messages", False, None, {"target": "chat-7"}),
@@ -352,14 +365,29 @@ class TestEveryRouteForwardsTheCarriedVerdict:
 
     def _record(self, monkeypatch, core_name, awaited):
         seen: dict = {}
+        # `set-note` is the one route whose gate hands back what the route then
+        # writes, a (slot, note) pair, instead of the route's reply; the write
+        # itself (`post_slot_note`) is stubbed so only the carry is measured.
+        result: object = {"ok": True}
+        if core_name == "authorize_note_target":
+            from types import SimpleNamespace
+
+            from kiro_crew.dashboard import chat_handlers
+
+            result = (SimpleNamespace(key="chat-7"), "n")
+
+            async def _no_write(*_a, **_k):
+                return web.json_response({"ok": True})
+
+            monkeypatch.setattr(chat_handlers, "post_slot_note", _no_write)
 
         async def _async_recorder(state, **kwargs):
             seen.update(kwargs)
-            return {"ok": True}
+            return result
 
         def _sync_recorder(state, **kwargs):
             seen.update(kwargs)
-            return {"ok": True}
+            return result
 
         monkeypatch.setattr(sc, core_name, _async_recorder if awaited else _sync_recorder)
 

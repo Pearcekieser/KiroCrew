@@ -38,13 +38,13 @@ class TestPendingContextDrainContract:
             {"source": "slack-thread", "content": "the earlier thread discussion"},
         ]
 
-        prefix = drain_pending_context(slot)
+        prefix = drain_pending_context(slot, MagicMock())
         assert '[Background context from "slack-thread"]' in prefix
         assert "[End of background context]" in prefix
         assert "the earlier thread discussion" in prefix
         # Drain is one-shot: the queue is cleared so a later turn isn't re-fed.
         assert slot._pending_context == []
-        assert drain_pending_context(slot) == ""
+        assert drain_pending_context(slot, MagicMock()) == ""
 
 
 # ── Path A: persist-map reconnect (already implemented upstream) ─────────────

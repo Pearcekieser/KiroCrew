@@ -233,7 +233,10 @@ def test_running_and_turn_running_slot_readers_are_enumerated() -> None:
                 ("chat_handlers.py", "api_chat_slot_detail"),
                 ("chat_handlers.py", "api_chat_slot_interrupt"),
                 ("chat_handlers.py", "api_chat_slot_model"),
-                ("chat_handlers.py", "api_chat_slot_note"),
+                # The note core, split out of `api_chat_slot_note` so the
+                # `session_set_note` route shares it. Same read, same reason: a
+                # turn in flight holds the note until the turn ends.
+                ("chat_handlers.py", "post_slot_note"),
                 ("chat_handlers.py", "api_chat_slot_reasoning_effort"),
                 ("chat_handlers.py", "api_chat_slot_reset_conversation"),
                 ("chat_handlers.py", "api_chat_slot_resume"),

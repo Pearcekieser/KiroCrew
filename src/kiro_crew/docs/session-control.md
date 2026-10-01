@@ -1,17 +1,18 @@
 # Session Control — driving another session
 
 One chat session can open, fork, seed, watch, stop, close and revive another one,
-change its model, and take another one under itself in the sidebar. The tools come from the
+change its model, color it or leave it a note, and take another one under itself in the sidebar. The tools come from the
 `kirocrew-dashboard` MCP server, so an agent that does not mount that server
 never has them — exactly like any other MCP server. This page is the reference
-for all 27 of its tools, written for the agent that is about to use them.
+for all 29 of its tools, written for the agent that is about to use them.
 
 The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
 
 - **Session control** — `session_create`, `session_fork`, `session_send`,
   `session_read_message`, `session_summary`, `session_stop`, `session_end_wait`,
-  `session_set_model`, `session_close`, `session_revive`, `session_broadcast`,
-  `session_status`, `session_adopt`, `session_release`. These reach another session.
+  `session_set_model`, `session_set_color`, `session_set_note`, `session_close`,
+  `session_revive`, `session_broadcast`, `session_status`, `session_adopt`,
+  `session_release`. These reach another session.
 - **Sidebar shape** — `chat_folder_tree`, `chat_folder_create`,
   `chat_folder_move`, `chat_folder_move_session`, `chat_folder_file_self`,
   `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`,
@@ -445,6 +446,64 @@ To force the change, call `session_stop`, then retry once the target is idle.
 Also refused: `auto` and `Auto (Jev)` (`model_owner_only`), because with the Jev
 preview on a slot on `auto` hands each turn's model to Jev routing, which only the
 owner may arm; and a target bound to a remote crew (`remote_target_unsupported`).
+
+### `session_set_color`
+
+| Argument | Required | Meaning |
+|---|---|---|
+| `target` | yes | Session key or exact title; your own session key names this session |
+| `color` | yes | `"0"` to `"6"` for one of the seven palette swatches the sidebar color menu shows, or `""` to clear |
+
+Sets the sidebar color, the same thing as picking a swatch from the session's
+color menu; a custom hex the person set is cleared. Swatches follow the
+viewer's theme. The menu's custom `#rrggbb` cell is not offered here, and any
+other value is refused with `invalid_color` and nothing changes. The
+transcript, model and any running turn are untouched.
+
+Reach is narrower than `session_stop`'s: the caller itself, and sessions it
+created, for every caller. A person's own tabs are refused (`not_creator`) even
+when session control is switched on for everyone. Everything else
+`authorize_target` refuses stays refused.
+
+### `session_set_note`
+
+| Argument | Required | Meaning |
+|---|---|---|
+| `target` | yes | Session key or exact title; your own session key names this session |
+| `note` | yes | The note: up to 4000 characters once redacted, and at most 40000 as sent |
+
+Writes a note through the same path cron jobs and apps use
+(`POST /api/chat/slots/{slot}/note`): a visible note line in the target's
+transcript, and the same text queued once as background context for the
+target's next turn, labelled `session_set_note`. No turn starts. If the target
+is mid-turn, both halves are held and written when that turn ends. The note
+is redacted for credentials and exfiltration URLs before either half is
+written, so the context the target reads and the held copy saved to disk carry
+the redacted text too; the 4000-character cap applies to the redacted form. The
+visible line renders through the transcript's sanitizing markdown renderer,
+which drops scripts, event handlers, frames, inline styles and `javascript:`
+links. When too many notes from this source are already
+queued, the line is still written and the reply says the next turn will not
+see it. A held note, and the context half of a note on a tab with no session
+binding yet, is delivered only if the tab still routes to the same conversation
+when it lands; the reply says so when that applies. The context half also
+carries the containment the target was admitted under. If, before the next
+turn, the target becomes channel-linked, mirrored or otherwise out of reach,
+that turn drops the note's context instead of acting on it, the same way a
+queued `session_send` prompt is dropped. A note held across a gateway restart
+keeps its visible line but loses that record, so its context is dropped too.
+
+Write the note as a statement of fact. A note that carries an `[OPTIONS: ...]`
+or `[OPTION: ...]` marker is refused (`invalid_note`): the marker would render
+as clickable choices in the person's composer, and a click would send the
+agent's label as the person's own message. A note that carries a prompt frame
+marker, such as `[End of background context]` or `[CURRENT USER REQUEST`, is
+refused the same way, so it cannot close its own context frame early. A question rides along as background
+context and may get answered on some unrelated later turn. To make the target
+act now, use `session_send`.
+
+Reach is the same as `session_set_color`'s: the caller and the sessions it
+created.
 
 ### `session_revive`
 

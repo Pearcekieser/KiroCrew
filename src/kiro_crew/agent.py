@@ -4134,6 +4134,11 @@ handle immediately.
 #:   session's turn forward (the target's ``wait`` returns early), which is a
 #:   change to state that is not the caller's own, and no conductor step needs it
 #:   unattended.
+#: * ``session_set_color`` / ``session_set_note`` — WITHHELD. Both write into a
+#:   session other than the caller's (its sidebar tint; a transcript line plus
+#:   context its next turn reads), and a note carries arbitrary text the target
+#:   acts on, the reason ``session_send`` is withheld. The route confines both to
+#:   the caller and the sessions it created, but no conductor step needs them.
 #:
 #: Every withheld verb stays MOUNTED (``@kirocrew-dashboard`` is still in
 #: ``tools``) — it just passes through ``hooks.on_tool_call`` like any ungranted

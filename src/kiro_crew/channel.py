@@ -152,6 +152,12 @@ CHANNEL_AGENT_BLOCKED_TOOLS: tuple[str, ...] = (
     # Changing a session's model decides what the user's next turn there runs
     # on and spends; same containment reason as stop.
     "session_set_model",
+    # Recoloring a session and writing a note into its transcript and next-turn
+    # context both act on a session the channel agent would name from thread text
+    # other people wrote; the note half is also text the target reads, the
+    # reason `session_send` is blocked.
+    "session_set_color",
+    "session_set_note",
     "session_send",
     "session_read_message",
     # A digest of the same transcript `session_read_message` returns, so it is

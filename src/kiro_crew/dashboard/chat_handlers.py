@@ -161,6 +161,8 @@ from kiro_crew.dashboard.remote_relay import (
     remote_bound_refusal,
 )
 from kiro_crew.dashboard.slot_buffers import (
+    AGENT_NOTE_ADMISSION_KEY,
+    AGENT_NOTE_SOURCE,
     MAX_DEFERRED_NOTE_CHARS,
     MAX_DEFERRED_NOTES,
     DeferredHoldFull,
@@ -14674,6 +14676,19 @@ def _validate_source(source: object) -> web.Response | None:
             },
             status=400,
         )
+    if normalized == AGENT_NOTE_SOURCE:
+        # Reserved for ``session_set_note``, which writes its notes through
+        # ``post_slot_note`` without passing here. The drain re-checks
+        # containment on every entry carrying this label and drops one without
+        # an admission stamp, so a /context or /note caller choosing it would
+        # have its acknowledged context silently dropped.
+        return web.json_response(
+            {
+                "error": f"source {AGENT_NOTE_SOURCE!r} is reserved for the session_set_note tool",
+                "code": "reserved_source",
+            },
+            status=400,
+        )
     return None
 
 
@@ -15345,6 +15360,50 @@ async def api_chat_slot_note(request: web.Request) -> web.Response:
     if stale is not None:
         return stale
 
+    return await post_slot_note(
+        state,
+        slot,
+        name,
+        content=content,
+        source=source,
+        max_age=body.get("maxAge", _UNSET),
+        ephemeral=body.get("ephemeral", True),
+        audit_caller=request_app or request.get("user", "dashboard"),
+        audit_source="app_kit",
+    )
+
+
+async def post_slot_note(
+    state: DashboardState,
+    slot: Any,
+    name: str,
+    *,
+    content: str,
+    source: str,
+    max_age: Any = _UNSET,
+    ephemeral: Any = True,
+    audit_caller: str,
+    audit_source: str,
+    admission: dict[str, Any] | None = None,
+) -> web.Response:
+    """Write a note's two halves to *slot*: the core of :func:`api_chat_slot_note`.
+
+    The caller has already validated *content*, *source* and *max_age* and
+    decided the caller may write to *slot*. Nothing here suspends before the
+    first write, so an authorization the caller made synchronously just before
+    this call still holds at that write. ``session_set_note`` reaches it through
+    ``POST /api/session-control/set-note``, after its own target gate, so both
+    entry points share one set of deferral, cap, redaction and durability rules.
+
+    *max_age* is the raw ``maxAge`` value: ``_UNSET`` takes the 24h default and
+    ``None`` means no expiry, as on the HTTP route.
+
+    *admission* is the target's containment snapshot at the gate
+    (``session_control.containment_meta``), stamped on the context half so the
+    drain can drop it if the target's audience widened while it waited. Only
+    ``session_set_note`` passes one; the app and cron route keeps its trusted
+    caller boundary.
+    """
     # A turn in flight owns the tail of the transcript: the replay path skips
     # exactly one recall-eligible row to drop the current-turn user message, and
     # an `inject` row appended now would take that slot and get skipped in its
@@ -15392,15 +15451,16 @@ async def api_chat_slot_note(request: web.Request) -> web.Response:
     if _source_cap_reached(slot, source):
         context_skipped = True
     else:
-        max_age = body.get("maxAge", _UNSET)
         if max_age is _UNSET:
             max_age = _NOTE_CONTEXT_MAX_AGE
-        context_entry, err = _build_pending_context_entry(
-            slot, content, source, body.get("ephemeral", True), max_age
-        )
+        context_entry, err = _build_pending_context_entry(slot, content, source, ephemeral, max_age)
         if err is not None:
             return err
         assert context_entry is not None
+        if admission is not None:
+            # The containment the note was admitted under, re-checked when the
+            # context half is drained (``chat_runner.drain_pending_context``).
+            context_entry[AGENT_NOTE_ADMISSION_KEY] = admission
         # A held note's context is queued by the flush, not here. The drain runs
         # inside the turn and after its task is assigned, so an entry queued now
         # is read by the turn already running -- the note would shape the request
@@ -15480,10 +15540,10 @@ async def api_chat_slot_note(request: web.Request) -> web.Response:
         )
 
     sel().log_api_access(
-        caller=request_app or request.get("user", "dashboard"),
+        caller=audit_caller,
         operation="note_post",
         outcome="ok",
-        source="app_kit",
+        source=audit_source,
         resources=f"slot={name}",
     )
 

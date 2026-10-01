@@ -185,6 +185,7 @@ from kiro_crew.dashboard.session_directive_apply import (
     QUESTION_CARD_SHOWN_PREFIX,
     apply_session_directive,
 )
+from kiro_crew.dashboard.slot_buffers import AGENT_NOTE_ADMISSION_KEY, AGENT_NOTE_SOURCE
 from kiro_crew.dashboard.slot_queue_repository import RESTORED_QUEUE_KEY
 from kiro_crew.dashboard.state import (
     _MAX_SLOT_MESSAGES,
@@ -632,7 +633,32 @@ _CONTEXT_FRAME_CONTRACT = (
 )
 
 
-def drain_pending_context(slot: "_ChatSlot") -> str:
+def _is_agent_note_context(entry: dict[str, Any]) -> bool:
+    """Whether a pending-context entry is an agent's ``session_set_note`` note.
+
+    Keyed on the source label the note route stamps. The ``/note`` HTTP route
+    refuses that label from any other caller (``reserved_source``), so only
+    ``session_set_note`` writes it.
+    """
+    return entry.get("source") == AGENT_NOTE_SOURCE
+
+
+def _agent_note_admission_complete(admission: Any) -> bool:
+    """Whether an agent note carries the admission stamp the drain can judge.
+
+    The stamp is ``session_control.containment_meta``'s shape: one key holding
+    the snapshot dict, which must name the admitted workspace (a string). Only
+    the note route writes it, in memory; nothing restored from disk carries it.
+    """
+    if not isinstance(admission, dict):
+        return False
+    from kiro_crew.dashboard.session_control import QUEUED_CONTAINMENT_META_KEY
+
+    snapshot = admission.get(QUEUED_CONTAINMENT_META_KEY)
+    return isinstance(snapshot, dict) and isinstance(snapshot.get("workspace"), str)
+
+
+def drain_pending_context(slot: "_ChatSlot", state: "DashboardState") -> str:
     """Drain ``slot._pending_context`` into a prepend-ready context prefix.
 
     Returns the concatenated ``[Background context from "<source>"] … [End of
@@ -663,9 +689,56 @@ def drain_pending_context(slot: "_ChatSlot") -> str:
         return ""
     now = time.time()
     ctx_parts: list[str] = []
+    # An agent's note (``session_set_note``) was admitted under the target's
+    # containment at write time, and its context half waits for a later turn.
+    # If the target became channel-linked, mirrored or otherwise out of reach
+    # meanwhile, that turn's reply would carry the note's instruction to an
+    # audience the admission never saw, so the note is dropped here the way a
+    # queued ``session_send`` is. Resolved lazily: most drains carry no note.
+    note_snapshot: dict[str, Any] | None = None
     for entry in slot._pending_context:
         if context_entry_expired(entry, now):
             continue  # expired — silently discard
+        if _is_agent_note_context(entry):
+            from kiro_crew.dashboard import session_control as _sc
+
+            if note_snapshot is None:
+                note_snapshot = _sc.containment_snapshot(state, slot, on_probe_failure=True)
+            admission = entry.get(AGENT_NOTE_ADMISSION_KEY)
+            if not _agent_note_admission_complete(admission):
+                # No trustworthy record of where the note was admitted: a held
+                # note restored from disk loses its stamp (the restore
+                # sanitizer keeps only known keys, and a stamp read back off an
+                # editable line would vouch for nothing). Without the admitted
+                # workspace a move to another workspace cannot be told apart
+                # from no move, so the note is dropped rather than checked
+                # against a guessed baseline.
+                why = "the note's admission record did not survive a restart"
+            else:
+                changed = _sc.newly_held_constraints(note_snapshot, admission)
+                # Same wording rule as the queued-prompt drop: an unreadable
+                # mirror store refuses the note, but says the state could not be
+                # verified rather than claiming a mirror appeared.
+                why = (
+                    _sc.describe_containment_change(
+                        changed, mirror_unverified=bool(note_snapshot.get("mirror_unverified"))
+                    )
+                    if changed
+                    else ""
+                )
+            if why:
+                logger.warning("Slot %s dropped an agent note's context: %s", slot.key, why)
+                # A drop is never silent: the note was acknowledged with a 200,
+                # so its refusal gets an audit row like the rebind drop above.
+                sel().log_api_access(
+                    caller="dashboard",
+                    operation="note_containment_drop",
+                    outcome="denied",
+                    source="session_control",
+                    resources=f"slot={slot.key}",
+                    error=why,
+                )
+                continue
         # `or "app"` (not a dict default): api_chat_slot_context always writes
         # the key — as "" when the caller omitted it — so a plain .get() default
         # never fires and the header would render [Background context from ""],
@@ -12651,7 +12724,7 @@ async def _run_chat(
             _user_msg_for_mirror = message
             # Drain pending context injections (silent background context
             # from apps/subagents).  Expired entries are discarded.
-            _ctx_prefix = drain_pending_context(slot)
+            _ctx_prefix = drain_pending_context(slot, state)
             if _ctx_prefix:
                 message = _ctx_prefix + message
             # Use resolved kiro agent name (e.g. "kirocrew"), not the slot

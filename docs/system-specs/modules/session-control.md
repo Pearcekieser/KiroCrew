@@ -23,6 +23,8 @@ unreachable in production because the caller's `X-Internal-Secret` is ignored.
 | `session_stop` | `POST /api/session-control/stop` | Stop another session's in-flight turn |
 | `session_end_wait` | `POST /api/session-control/end-wait` | Wake a session the caller CREATED from the `wait` tool early, keeping its turn; any other target is refused `not_creator`, for every caller class |
 | `session_set_model` | `POST /api/session-control/set-model` | Record a pending model pick on an idle session; `apply_pending_model_pick` commits it at the start of the target's next turn after re-running `authorize_target` in the same synchronous step. A busy target is refused with `target_busy` and keeps its model |
+| `session_set_color` | `POST /api/session-control/set-color` | Set the sidebar tint (palette index 0-6, or clear). `authorize_target` with `allow_self`, then a creator fence for every caller: only the caller and sessions it created |
+| `session_set_note` | `POST /api/session-control/set-note` | Post a transcript note plus once-only next-turn context through the same core as `POST /api/chat/slots/{slot}/note`, source `session_set_note`. Same reach as `session_set_color` |
 | `session_close` | `POST /api/session-control/close` | Close (archive) another session, as the tab ✕ does — heavier than stop, and recoverable rather than a delete |
 | `session_revive` | `POST /api/session-control/revive` | Bring an archived session back into the live sidebar, as clicking it in the History tab does — the mirror of close, optionally filing it into a folder |
 | `session_send` | `POST /api/session-control/send` | Deliver a message that another session runs as its next turn, or cut it into the turn already running (`steer`) |
@@ -31,8 +33,8 @@ unreachable in production because the caller's `X-Internal-Secret` is ignored.
 | `session_read_message` | `GET /api/session-control/read` | Read another session's transcript tail + liveness |
 | `session_summary` | `GET /api/session-control/summary` | Read another session's cached intent summary + liveness, authorized as `session_read_message` is; never generates one |
 
-**Two verbs here write into another session's conversation: `session_send` and
-`session_broadcast`.** Reading returns a transcript tail, stopping cancels a turn
+**Three verbs here write into another session's conversation: `session_send`,
+`session_broadcast` and `session_set_note`.** Reading returns a transcript tail, stopping cancels a turn
 the way the Stop button does, creating opens an empty session, and sending
 delivers a message that the target runs as its next turn. Delivery is the
 sharpest verb and is bounded accordingly: the body is redacted through
@@ -40,6 +42,19 @@ sharpest verb and is bounded accordingly: the body is redacted through
 session <caller> via <verb>]` envelope so the target's transcript can never
 render it as something the person typed, and channel agents are blocked from it
 outright.
+
+`session_set_note` starts no turn: it writes a transcript note line and queues
+the same text as background context for the target's next turn, through the
+`/note` route's own core. Its bounds differ from delivery's. The note is
+redacted for credentials and exfiltration URLs before either half is written,
+and channel agents are blocked from it. It carries no `[sent by ...]` envelope;
+the context frame names its source as `session_set_note` instead. Its reach is
+narrower than delivery's: the creator fence applies to every caller, so only the
+caller itself and sessions it created are reachable. And the context half
+carries the admission containment snapshot, re-checked at drain the way a
+queued delivery is, so a target that became linked or mirrored before its next
+turn drops the note. A held note restored after a restart has no stamp the
+drain can trust, so its context half is dropped.
 
 `session_broadcast` is not a second delivery path. It resolves an audience and
 then calls `send_to_target` once per target, so every bound above holds per

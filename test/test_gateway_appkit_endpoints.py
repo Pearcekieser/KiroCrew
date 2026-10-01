@@ -549,7 +549,7 @@ class TestContextDrain:
             },
         ]
 
-        out = drain_pending_context(slot)
+        out = drain_pending_context(slot, MagicMock())
 
         assert 'from "watch-check"' in out
         assert "CR approved" in out
@@ -1588,6 +1588,36 @@ class TestNoteEndpoint:
         assert slot._pending_context[0]["source"] == "note"
 
     @pytest.mark.asyncio
+    async def test_note_refuses_the_agent_note_source_label(self, tmp_path: Path):
+        """``session_set_note`` owns this label: the drain drops an unstamped note
+        carrying it, so a trusted caller using it would lose every context half."""
+        from kiro_crew.dashboard.slot_buffers import AGENT_NOTE_SOURCE
+
+        state = _make_state(tmp_path)
+        slot = _ChatSlot("s1")
+        state._slots["s1"] = slot
+
+        async with self._make_client(state) as client:
+            resp = await client.post(
+                "/api/chat/slots/s1/note", json={"content": "x", "source": AGENT_NOTE_SOURCE}
+            )
+            assert resp.status == 400
+            assert (await resp.json())["code"] == "reserved_source"
+        assert not slot._pending_context
+        assert not [m for m in slot.messages if m.get("role") == "inject"]
+
+    def test_context_refuses_the_agent_note_source_label(self):
+        """Same reservation on /context, which shares this source validator."""
+        from kiro_crew.dashboard.chat_handlers import _validate_source
+        from kiro_crew.dashboard.slot_buffers import AGENT_NOTE_SOURCE
+
+        resp = _validate_source(f"  {AGENT_NOTE_SOURCE} ")
+
+        assert resp is not None and resp.status == 400
+        assert json.loads(resp.text)["code"] == "reserved_source"
+        assert _validate_source("board-sync") is None
+
+    @pytest.mark.asyncio
     async def test_note_explicit_null_max_age_means_no_expiry(self, tmp_path: Path):
         """maxAge: null -> no expiry, matching /context. An omitted key -> 24h.
 
@@ -1789,12 +1819,12 @@ class TestNoteEndpoint:
             assert resp.status == 200
 
         # The turn in flight reaches its drain and finds nothing.
-        assert drain_pending_context(slot) == ""
+        assert drain_pending_context(slot, MagicMock()) == ""
 
         slot.task = None
         assert slot.flush_deferred_notes() == 1
         # The next turn's drain does see it.
-        prefix = drain_pending_context(slot)
+        prefix = drain_pending_context(slot, MagicMock())
         assert "moved 3 sessions" in prefix
         assert slot._pending_context == []
 
@@ -2918,7 +2948,7 @@ class TestImmediateNoteSessionBinding:
         assert not any(mark in (m.get("content") or "") for m in foreign), (
             "the note was persisted into the foreign session's transcript"
         )
-        assert mark not in drain_pending_context(slot), (
+        assert mark not in drain_pending_context(slot, MagicMock()), (
             "the note reached the foreign session's next prompt"
         )
         assert not any(mark in m.get("content", "") for m in slot.messages), (
@@ -2946,7 +2976,7 @@ class TestImmediateNoteSessionBinding:
         assert any(mark in (m.get("content") or "") for m in own), (
             "the guard dropped a note whose session never changed"
         )
-        assert mark in drain_pending_context(slot)
+        assert mark in drain_pending_context(slot, MagicMock())
         assert any(mark in m.get("content", "") for m in slot.messages)
 
     @pytest.mark.asyncio
@@ -3043,7 +3073,7 @@ class TestCleanupPersistsHeldNotes:
             # Stands in for the live turn: _run_chat calls drain_pending_context,
             # which builds the prefix and clears the queue.
             while True:
-                got = drain_pending_context(slot)
+                got = drain_pending_context(slot, MagicMock())
                 if got:
                     drained.append(got)
                 await asyncio.sleep(0)

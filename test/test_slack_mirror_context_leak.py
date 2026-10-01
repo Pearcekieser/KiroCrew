@@ -68,7 +68,7 @@ class TestPrepareMirrorMsg:
             # method would silently skip it for every such caller.
             drop_foreign_authorized_notes=lambda: 0,
         )
-        context_block = drain_pending_context(slot)
+        context_block = drain_pending_context(slot, object())
         message = context_block + "\n" + message
 
         # Prepare mirror from saved raw message

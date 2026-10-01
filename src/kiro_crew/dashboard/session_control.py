@@ -6,8 +6,9 @@ a target at all. The operations are deliberately thin: they reuse the same
 creation, stop, close and history paths the dashboard itself uses, so a controlled
 session behaves exactly like one a human is typing into.
 
-**Two verbs here write into another session's conversation: ``session_send`` and
-``session_broadcast``.**
+**Three verbs here write into another session's conversation: ``session_send``,
+``session_broadcast`` and ``session_set_note``** (a transcript note plus
+next-turn context, no turn started; see :func:`authorize_note_target`).
 Reading returns a transcript tail; stopping cancels an in-flight turn the way the
 Stop button does; closing archives the session the way the tab ✕ does (the
 conversation is saved to history and can be reopened — closing is not deletion);
@@ -43,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
@@ -93,6 +95,7 @@ from kiro_crew.dashboard.create_rate_limit import (
     allow_create,
     has_create_budget,
 )
+from kiro_crew.dashboard.slot_buffers import AGENT_NOTE_SOURCE, MAX_DEFERRED_NOTE_CHARS
 from kiro_crew.dashboard.state import (
     MAX_LIVE_SLOTS,
     MAX_SLOTS_PER_CREATOR,
@@ -116,7 +119,12 @@ from kiro_crew.members import select_provider_backend
 from kiro_crew.memory_stores import named_store_or_empty
 from kiro_crew.messaging.link import CHAT_TYPE_DIRECT, ChannelLink, parse_session_key
 from kiro_crew.messaging.transport import DM_TARGET_PREFIX, sole_direct_target
-from kiro_crew.security import redact, redact_and_truncate
+from kiro_crew.security import (
+    redact,
+    redact_and_truncate,
+    redact_credentials,
+    redact_exfiltration_urls,
+)
 from kiro_crew.sel import sel
 from kiro_crew.session_summary import derive_state
 from kiro_crew.validation import (
@@ -3335,11 +3343,12 @@ def authorize_target(
     member) the fence is evaluated inline as before.
 
     ``allow_self`` waives the self-target refusal, and with it the ownership fence for
-    that one case. Exactly one verb passes it: a release, where the target itself is a
-    legitimate caller because a session taken over must not depend on its holder still
-    running to get out. It waives nothing else -- an ephemeral, app-scoped or
-    channel-linked caller is still refused, and a target that is not the caller is
-    still judged by every rule above.
+    that one case. A release passes it, where the target itself is a legitimate caller
+    because a session taken over must not depend on its holder still running to get
+    out; so does :func:`authorize_own_or_created`, for the color and note verbs, which
+    then applies the creator fence to every other target. It waives nothing else --
+    an ephemeral, app-scoped or channel-linked caller is still refused, and a target
+    that is not the caller is still judged by every rule above.
     """
 
     deny = _deny_factory(caller_session_key=caller_session_key, operation=operation, target=target)
@@ -4582,6 +4591,228 @@ async def set_model_target(
         detail={"model": model_name or "auto", "stage": "pending"},
     )
     return {"ok": True, "target": slot_key, "model": model_name, "pending": True}
+
+
+#: Swatches in the sidebar color menu. Mirrors ``PALETTE_SIZE`` in
+#: ``website/src/utils/sessionColors.ts``; a test pins the two together. The
+#: color route itself accepts a wider index range for older palettes, but an
+#: agent is held to what the menu offers.
+SESSION_PALETTE_SIZE = 7
+
+#: The source label a ``session_set_note`` note carries. It becomes the
+#: ``[Background context from "..."]`` frame the target reads and the note's
+#: per-source cap bucket, so an agent's notes neither pose as a cron or app note
+#: nor use up the room those callers share.
+SESSION_NOTE_SOURCE = AGENT_NOTE_SOURCE
+
+#: Any choice-marker opener the frontend options grammar could parse out of a
+#: note row (``[OPTIONS:`` multi-select, ``[OPTION:`` single), in any case and
+#: with any spacing. Broader than the parser on purpose: see
+#: :func:`_clean_session_note`.
+_OPTIONS_MARKER_RE = re.compile(r"\[\s*options?\s*:", re.IGNORECASE)
+
+#: The background-context frame a note's context half is wrapped in at drain
+#: (``chat_runner.drain_pending_context``). A note carrying either delimiter
+#: could close its own frame early, so its tail would sit outside the
+#: "silent operator context" contract, right before the person's message, and
+#: read as the person's own words. Loose spacing and any case, as above.
+_CONTEXT_FRAME_MARKER_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\[\s*background\s+context\s+from\b", re.IGNORECASE),
+    re.compile(r"\[\s*end\s+of\s+background\s+context\s*\]", re.IGNORECASE),
+)
+
+
+def _parse_session_color(color: str) -> int | None:
+    """The palette index for a ``session_set_color`` value, or ``None`` to clear.
+
+    ``""`` clears and ``"0"`` to ``"6"`` is one of the menu's swatches. Anything
+    else is refused, including the menu's custom ``#rrggbb`` cell: grouping a
+    fleet needs a few distinct marks, and the swatches follow the viewer's theme
+    where a fixed hex does not.
+    """
+    if color == "":
+        return None
+    if color.isascii() and color.isdigit() and len(color) == 1:
+        index = int(color)
+        if index < SESSION_PALETTE_SIZE:
+            return index
+    raise SessionControlError(
+        f'color must be a sidebar palette swatch index "0" to "{SESSION_PALETTE_SIZE - 1}", '
+        'or "" to clear; color not changed',
+        code="invalid_color",
+        status=400,
+    )
+
+
+def authorize_own_or_created(
+    state: "DashboardState",
+    *,
+    caller_session_key: str,
+    target: str,
+    operation: str,
+    caller_fenced: bool | None = None,
+) -> "_ChatSlot":
+    """Resolve *target* for a verb that reaches only the caller and what it created.
+
+    Every rule in :func:`authorize_target` applies, with ``allow_self`` so the
+    caller may name itself. On top of that the creator fence runs for EVERY
+    caller, not only the ownership-fenced classes: a target other than the caller
+    must carry ``created_by`` equal to the caller's slot key. So an owner session
+    with session control switched on for everyone still cannot recolor or write
+    a note into the person's own tabs. Synchronous, so a write made right after
+    it returns, with no await between, is made under this decision.
+    """
+    slot = authorize_target(
+        state,
+        caller_session_key=caller_session_key,
+        target=target,
+        operation=operation,
+        precomputed_ownership_fenced=caller_fenced,
+        allow_self=True,
+    )
+    caller_key = caller_slot_key(state, caller_session_key)
+    if slot.key != caller_key and _created_by_other(slot, caller_key):
+        deny = _deny_factory(
+            caller_session_key=caller_session_key, operation=operation, target=target
+        )
+        raise deny("this verb reaches only this session and sessions it created", "not_creator")
+    return slot
+
+
+async def set_color_target(
+    state: "DashboardState",
+    *,
+    caller_session_key: str,
+    target: str,
+    color: str,
+    caller_fenced: bool | None = None,
+) -> dict[str, Any]:
+    """Set *target*'s sidebar color, the way the session color menu does.
+
+    Reach is :func:`authorize_own_or_created`'s. The write is the one a swatch
+    click in ``PATCH /api/chat/slots/{slot}/color`` makes: the index is set and
+    any custom hex the person picked is cleared, so exactly one color shows;
+    ``""`` clears both. Metadata only.
+
+    ``caller_fenced`` has the meaning :func:`stop_target` documents.
+    """
+    # Validated before any gate, as `set_model_target` does.
+    color_index = _parse_session_color(color)
+    # Same prewarm ordering as `stop_target`: nothing may suspend between the
+    # gate and the write it authorizes.
+    try:
+        await asyncio.to_thread(sel)
+    except Exception:  # noqa: BLE001 - a prewarm failure must not fail the write
+        logger.warning("session-control SEL prewarm failed", exc_info=True)
+    await prewarm_enabled_check()
+    slot = authorize_own_or_created(
+        state,
+        caller_session_key=caller_session_key,
+        target=target,
+        operation="set_color",
+        caller_fenced=caller_fenced,
+    )
+    slot.color_index = color_index
+    slot.color_hex = None
+    slot._dirty = True
+    state.push_slots_update()
+    _audit(
+        caller_session_key=caller_session_key,
+        operation="set_color",
+        slot_key=slot.key,
+        outcome="allowed",
+        detail={"color_index": color_index},
+    )
+    return {"ok": True, "target": slot.key, "color_index": color_index}
+
+
+def _clean_session_note(note: str) -> str:
+    """Validate a ``session_set_note`` note and return the form that is written.
+
+    The note is redacted here, before either half is built: the note route keeps
+    its next-turn context raw for its trusted app and cron callers, but this text
+    is agent-written, and a held note's context is persisted to the slot's
+    metadata. So both halves, and the durable hold, carry the redacted form.
+
+    Refused: a note that is empty or only whitespace, and one whose redacted
+    form is over :data:`~kiro_crew.dashboard.slot_buffers.MAX_DEFERRED_NOTE_CHARS`.
+    That is the cap the note core applies when the target is mid-turn, checked on
+    the redacted string because redaction can lengthen text, so a note that
+    passes here is accepted whether or not the target is running.
+    """
+    if not note.strip():
+        raise SessionControlError("note is required", code="invalid_note", status=400)
+    # A note row renders through the same options parser as the target's own
+    # replies: an ``[OPTIONS: ...]`` / ``[OPTION: ...]`` marker would become
+    # clickable pills in the person's composer, and a click would send the
+    # agent's chosen label into that session as the person's own message.
+    # Refused (not silently stripped) so the caller learns why. Matched loosely,
+    # anywhere and in any case, so no spelling the frontend grammar accepts
+    # slips past a narrower backend pattern.
+    if _OPTIONS_MARKER_RE.search(note):
+        raise SessionControlError(
+            "a note cannot carry an [OPTIONS: ...] choice marker; note not written",
+            code="invalid_note",
+            status=400,
+        )
+    # The note is the background-context frame's first agent-written producer,
+    # so it must not be able to forge that frame's delimiters, nor the prompt's
+    # other structural markers that the untrusted-context scrub refuses
+    # elsewhere (``context._STRUCTURAL_MARKER_RES``).
+    from kiro_crew.context import _STRUCTURAL_MARKER_RES
+
+    if any(p.search(note) for p in (*_CONTEXT_FRAME_MARKER_RES, *_STRUCTURAL_MARKER_RES)):
+        raise SessionControlError(
+            "a note cannot carry a prompt frame marker such as "
+            "[End of background context]; note not written",
+            code="invalid_note",
+            status=400,
+        )
+    # Same order as the note core's visible line: exfiltration URLs first, since
+    # that pass collapses the whole URL.
+    cleaned, _ = redact_exfiltration_urls(note)
+    cleaned, _ = redact_credentials(cleaned)
+    if len(cleaned) > MAX_DEFERRED_NOTE_CHARS:
+        raise SessionControlError(
+            f"note is longer than {MAX_DEFERRED_NOTE_CHARS} characters"
+            + (" after redaction" if cleaned != note else "")
+            + "; note not written",
+            code="invalid_note",
+            status=400,
+        )
+    return cleaned
+
+
+async def authorize_note_target(
+    state: "DashboardState",
+    *,
+    caller_session_key: str,
+    target: str,
+    note: str,
+    caller_fenced: bool | None = None,
+) -> "tuple[_ChatSlot, str]":
+    """Validate a ``session_set_note`` call: the slot it may write to, and the note.
+
+    The note returned is the redacted form :func:`_clean_session_note` makes,
+    which is what the caller must write. Reach is
+    :func:`authorize_own_or_created`'s. The gate is the LAST thing this coroutine
+    does, so the caller writes the note (``chat_handlers.post_slot_note``, which
+    does not suspend before its first write) under this decision.
+    """
+    clean_note = _clean_session_note(note)
+    try:
+        await asyncio.to_thread(sel)
+    except Exception:  # noqa: BLE001 - a prewarm failure must not fail the write
+        logger.warning("session-control SEL prewarm failed", exc_info=True)
+    await prewarm_enabled_check()
+    slot = authorize_own_or_created(
+        state,
+        caller_session_key=caller_session_key,
+        target=target,
+        operation="set_note",
+        caller_fenced=caller_fenced,
+    )
+    return slot, clean_note
 
 
 @dataclass(frozen=True)

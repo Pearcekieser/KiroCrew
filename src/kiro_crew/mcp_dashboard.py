@@ -115,6 +115,7 @@ from kiro_crew.validation import (
     CHAT_TAG_LIST_SCHEMA,
     CHAT_TAG_UPDATE_SCHEMA,
     MAX_BROADCAST_TARGETS,
+    MAX_SESSION_NOTE_INPUT_CHARS,
     MCP_DASHBOARD_SCHEMAS,
     SESSION_ADOPT_SCHEMA,
     SESSION_BROADCAST_SCHEMA,
@@ -126,10 +127,13 @@ from kiro_crew.validation import (
     SESSION_RELEASE_SCHEMA,
     SESSION_REVIVE_SCHEMA,
     SESSION_SEND_SCHEMA,
+    SESSION_SET_COLOR_SCHEMA,
     SESSION_SET_MODEL_SCHEMA,
+    SESSION_SET_NOTE_SCHEMA,
     SESSION_STATUS_SCHEMA,
     SESSION_STOP_SCHEMA,
     SESSION_SUMMARY_SCHEMA,
+    ValidationError,
     validate_tool_args,
 )
 
@@ -150,6 +154,8 @@ SESSION_CONTROL_TOOLS: tuple[str, ...] = (
     "session_stop",
     "session_end_wait",
     "session_set_model",
+    "session_set_color",
+    "session_set_note",
     "session_close",
     "session_revive",
     "session_send",
@@ -742,6 +748,71 @@ def _tool_definitions() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["target", "model"],
+            },
+        },
+        {
+            "name": "session_set_color",
+            "description": (
+                "Set the sidebar color of this session or of a session you created, so a "
+                'conductor can group its workers at a glance. ``color`` is one of: "0" to '
+                '"6", the seven palette swatches the sidebar color menu shows (they follow '
+                'the viewer\'s theme), or "" to clear the color. Custom hex colors and '
+                "anything else are refused. Metadata only: the transcript, model and any "
+                "running turn are untouched. Sessions you did not create are refused, "
+                "including the person's own tabs."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "Session key from list_sessions or session_status, or its "
+                            "exact title. Your own session key names this session."
+                        ),
+                    },
+                    "color": {
+                        "type": "string",
+                        "description": '"0"-"6" palette swatch, or "" to clear.',
+                    },
+                },
+                "required": ["target", "color"],
+            },
+        },
+        {
+            "name": "session_set_note",
+            "description": (
+                "Leave a short note on this session or on a session you created, without "
+                "starting a turn. The note appears as a line in that session's transcript "
+                "and is handed to its NEXT turn as background context, once, the way a "
+                "cron or app note is. Write it as a statement of fact, not a question: an "
+                "unanswered question rides along into an unrelated later turn. If the "
+                "target is mid-turn the note is held and written when that turn ends. "
+                "The reply says when delivery depends on the tab staying on the same "
+                "conversation. The note is redacted for credentials and "
+                "exfiltration URLs first and may be up to 4000 characters after "
+                "that (40000 as sent). Sessions you did not create are refused, including "
+                "the person's own tabs. To make a session act now, use session_send."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "Session key from list_sessions or session_status, or its "
+                            "exact title. Your own session key names this session."
+                        ),
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": (
+                            "The note text: up to 4000 characters after redaction, "
+                            "40000 as sent."
+                        ),
+                    },
+                },
+                "required": ["target", "note"],
             },
         },
         {
@@ -1957,10 +2028,28 @@ def _refuse_channel_board_write(name: str, caller_key: str) -> str | None:
 
 
 def _validate_args(name: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Validate tool arguments against schema. Returns cleaned args."""
+    """Validate tool arguments against schema. Returns cleaned args.
+
+    Validation sanitizes strings, which strips invisible characters. Two
+    session-control arguments must be judged on what the caller actually sent:
+    ``session_set_note``'s raw ``note`` is bounded before that strip (else a
+    zero-width-padded note passes the 40000 input bound), and
+    ``session_set_color``'s raw ``color`` is carried through unsanitized (else
+    "\\u200b" becomes "", the clear value, and erases a tint). The route's exact
+    color grammar then refuses anything that is not literally "" or "0".."6".
+    """
+    if name == "session_set_note":
+        raw_note = args.get("note")
+        if isinstance(raw_note, str) and len(raw_note) > MAX_SESSION_NOTE_INPUT_CHARS:
+            raise ValidationError(
+                "note", f"exceeds max length {MAX_SESSION_NOTE_INPUT_CHARS} as sent"
+            )
     schema = MCP_DASHBOARD_SCHEMAS.get(name)
     if schema:
-        return validate_tool_args(args, schema)
+        cleaned = validate_tool_args(args, schema)
+        if name == "session_set_color" and isinstance(args.get("color"), str):
+            cleaned["color"] = args["color"]
+        return cleaned
     return args
 
 
@@ -2489,6 +2578,58 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         target = resp.get("target", args["target"])
         model = resp.get("model") or "auto"
         return redact(f"\U0001f501 `{target}` will switch to `{model}` when its next turn starts.")
+
+    if name == "session_set_color":
+        # The RAW argument is what goes to the route, not the sanitized one:
+        # sanitizing strips invisible characters, so "\u200b" would come out as
+        # "", the clear value, and erase a tint the caller never asked to clear.
+        # ``_validate_args`` (the wrapper's validation pass) carries the raw
+        # value through; the route's exact grammar ("" or "0".."6") refuses it.
+        raw_color = args.get("color")
+        if "color" not in args:
+            # The schema leaves `color` optional only so "" (clear) survives
+            # validation; omitting it is still a mistake, not a clear.
+            return 'Error: color is required: a palette swatch index "0"-"6", or "" to clear.'
+        args = validate_tool_args(args, SESSION_SET_COLOR_SCHEMA)
+        resp = _post(
+            "/api/session-control/set-color",
+            {"target": args["target"], "color": raw_color},
+            session_key=caller_key,
+        )
+        if resp.get("error"):
+            return f"Error: could not set that session's color: {resp['error']}"
+        target = resp.get("target", args["target"])
+        if resp.get("color_index") is None:
+            return redact(f"Cleared the color of `{target}`.")
+        return redact(f"Set the color of `{target}` to palette swatch {resp['color_index']}.")
+
+    if name == "session_set_note":
+        args = validate_tool_args(args, SESSION_SET_NOTE_SCHEMA)
+        resp = _post(
+            "/api/session-control/set-note",
+            {"target": args["target"], "note": args["note"]},
+            session_key=caller_key,
+        )
+        if resp.get("error"):
+            return f"Error: could not leave that note: {resp['error']}"
+        target = resp.get("target", args["target"])
+        # ``deliveryConditional`` is the note core's own flag: a held note, or
+        # the context half of a note on a slot with no session binding yet,
+        # resolves its destination late and is dropped if the tab is rebound to
+        # a different conversation first. Say so rather than promise delivery.
+        conditional = bool(resp.get("deliveryConditional"))
+        rebind = "unless the tab is rebound to a different conversation first"
+        if resp.get("visibleDeferred"):
+            where = f"it is mid-turn, so the note is held and written when that turn ends, {rebind}"
+        else:
+            where = "the note is in its transcript"
+        if resp.get("contextSkipped"):
+            ctx = "its next turn will NOT see it: too many notes are already queued"
+        elif conditional and not resp.get("visibleDeferred"):
+            ctx = f"its next turn will see it, {rebind}"
+        else:
+            ctx = "its next turn will see it"
+        return redact(f"Left a note on `{target}`: {where}, and {ctx}.")
 
     if name == "session_close":
         args = validate_tool_args(args, SESSION_CLOSE_SCHEMA)

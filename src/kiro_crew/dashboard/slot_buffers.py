@@ -31,6 +31,17 @@ MAX_DEFERRED_NOTES = 10
 # POST): 2x the bound per note, at most 2x MAX_DEFERRED_NOTES entries.
 MAX_DEFERRED_NOTE_CHARS = 4000
 
+# The context ``source`` every ``session_set_note`` note carries. It marks the
+# one note producer whose text is agent-written rather than from a trusted app
+# or cron, so the drain re-checks the target's containment before handing such
+# a note to a turn (``chat_runner.drain_pending_context``). Here, below both the
+# writer (session_control) and the drain, so neither imports the other for it.
+AGENT_NOTE_SOURCE = "session_set_note"
+
+# Key on an agent note's context entry holding the containment snapshot taken
+# when the note was admitted (``session_control.containment_meta``).
+AGENT_NOTE_ADMISSION_KEY = "admission"
+
 # Hard ceiling on the durable hold's entry count: live notes (<= the cap) plus
 # entries retained for delivered-but-unsaved rows (<= the cap under normal
 # save cadence). Exceeding it means saves have not landed for multiple full

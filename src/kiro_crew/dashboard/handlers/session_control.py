@@ -12,6 +12,7 @@ that take a target share one guard.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from aiohttp import web
@@ -375,6 +376,80 @@ async def api_session_control_set_model(request: web.Request) -> web.Response:
     except sc.SessionControlError as exc:
         return _refusal(exc)
     return web.json_response(result)
+
+
+async def api_session_control_set_color(request: web.Request) -> web.Response:
+    """POST /api/session-control/set-color — tint this session or one it created."""
+    refused = await _require_internal(request)
+    if refused is not None:
+        return refused
+    # No prewarm here, for the reason `api_session_control_stop` gives.
+    state: DashboardState = request.app["state"]
+    try:
+        body = await _body(request)
+        color = body.get("color")
+        if not isinstance(color, str):
+            raise sc.SessionControlError("color must be a string", code="bad_request")
+        result = await sc.set_color_target(
+            state,
+            caller_session_key=_read_session_key(request),
+            target=_target(body),
+            color=color,
+            caller_fenced=_carried_fence(request),
+        )
+    except sc.SessionControlError as exc:
+        return _refusal(exc)
+    return web.json_response(result)
+
+
+async def api_session_control_set_note(request: web.Request) -> web.Response:
+    """POST /api/session-control/set-note — leave a note on this session or one it created.
+
+    The gate runs in ``session_control.authorize_note_target``; the write is
+    ``chat_handlers.post_slot_note``, the core ``POST /api/chat/slots/{slot}/note``
+    uses, called with no await in between so the write lands under the gate's
+    decision. Its response (``appended``, ``visibleDeferred``, ``contextSkipped``,
+    or a 429/413 refusal) is passed through with ``target`` added on success.
+    """
+    refused = await _require_internal(request)
+    if refused is not None:
+        return refused
+    # Deferred for the import cycle `session_control.stop_target` documents.
+    from kiro_crew.dashboard.chat_handlers import post_slot_note
+
+    state: DashboardState = request.app["state"]
+    caller_session_key = _read_session_key(request)
+    try:
+        body = await _body(request)
+        note = body.get("note")
+        if not isinstance(note, str):
+            raise sc.SessionControlError("note must be a string", code="bad_request")
+        slot, clean_note = await sc.authorize_note_target(
+            state,
+            caller_session_key=caller_session_key,
+            target=_target(body),
+            note=note,
+            caller_fenced=_carried_fence(request),
+        )
+    except sc.SessionControlError as exc:
+        return _refusal(exc)
+    resp = await post_slot_note(
+        state,
+        slot,
+        slot.key,
+        content=clean_note,
+        source=sc.SESSION_NOTE_SOURCE,
+        audit_caller=f"session:{caller_session_key or 'unknown'}",
+        audit_source="session_control",
+        # Taken in the same synchronous step as the gate above, so it records
+        # the containment the note was actually admitted under.
+        admission=sc.containment_meta(state, slot),
+    )
+    if resp.status != 200:
+        return resp
+    payload = json.loads(resp.text or "{}")
+    payload["target"] = slot.key
+    return web.json_response(payload)
 
 
 async def api_session_control_close(request: web.Request) -> web.Response:

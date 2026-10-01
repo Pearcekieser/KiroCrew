@@ -671,7 +671,7 @@ class TestDrainPendingContext:
             {"content": "fresh", "source": "panel"},
         ]
 
-        out = chat_runner.drain_pending_context(slot)
+        out = chat_runner.drain_pending_context(slot, MagicMock())
 
         assert "stale" not in out
         assert "fresh" in out
@@ -684,7 +684,7 @@ class TestDrainPendingContext:
             {"content": "stale", "maxAge": 1, "injectedAt": 0},
         ]
 
-        assert chat_runner.drain_pending_context(slot) == ""
+        assert chat_runner.drain_pending_context(slot, MagicMock()) == ""
 
     def test_frame_carries_silent_consumption_contract(self):
         """Every drained block instructs the agent to consume it silently.
@@ -699,7 +699,7 @@ class TestDrainPendingContext:
             {"content": "WORKFLOW: greet the user", "source": "feature-request"},
         ]
 
-        out = chat_runner.drain_pending_context(slot)
+        out = chat_runner.drain_pending_context(slot, MagicMock())
 
         opening = out.index('[Background context from "feature-request"]')
         contract = out.index(chat_runner._CONTEXT_FRAME_CONTRACT)
@@ -721,7 +721,7 @@ class TestDrainPendingContext:
             {"content": "second", "source": "b"},
         ]
 
-        out = chat_runner.drain_pending_context(slot)
+        out = chat_runner.drain_pending_context(slot, MagicMock())
 
         assert out.count(chat_runner._CONTEXT_FRAME_CONTRACT) == 2
 
@@ -733,7 +733,7 @@ class TestDrainPendingContext:
         slot = _slot()
         slot._pending_context = [{"content": "x", "source": ""}]
 
-        out = chat_runner.drain_pending_context(slot)
+        out = chat_runner.drain_pending_context(slot, MagicMock())
 
         assert '[Background context from "app"]' in out
         assert 'from ""' not in out

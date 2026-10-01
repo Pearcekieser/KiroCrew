@@ -3504,6 +3504,34 @@ SESSION_SET_MODEL_SCHEMA = ToolSchema(
     ],
 )
 
+#: Bound on the RAW ``session_set_note`` argument. The real cap, 4000 characters
+#: (``dashboard.slot_buffers.MAX_DEFERRED_NOTE_CHARS``), is applied by the route
+#: to the REDACTED note, and redaction can shorten text (a flagged URL collapses
+#: to one marker), so a raw note over 4000 can still land under it. This outer
+#: bound is the note route's own content cap, so it only refuses what that route
+#: would refuse anyway. A test pins the two numbers together.
+MAX_SESSION_NOTE_INPUT_CHARS = 40000
+
+SESSION_SET_COLOR_SCHEMA = ToolSchema(
+    tool_name="session_set_color",
+    fields=[
+        FieldSpec("target", str, required=True, max_len=MAX_SHORT_STRING),
+        # "" clears and "0".."6" is a palette swatch. The
+        # route decides which; this only bounds the string. NOT ``required``:
+        # a required string field refuses "" as empty, and "" is the clear
+        # value. The tool's dispatch refuses a call that omits it.
+        FieldSpec("color", str, max_len=16),
+    ],
+)
+
+SESSION_SET_NOTE_SCHEMA = ToolSchema(
+    tool_name="session_set_note",
+    fields=[
+        FieldSpec("target", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("note", str, required=True, max_len=MAX_SESSION_NOTE_INPUT_CHARS),
+    ],
+)
+
 SESSION_CLOSE_SCHEMA = ToolSchema(
     tool_name="session_close",
     fields=[
@@ -3844,6 +3872,8 @@ MCP_DASHBOARD_SCHEMAS: dict[str, ToolSchema] = {
     "session_end_wait": SESSION_END_WAIT_SCHEMA,
     "session_set_model": SESSION_SET_MODEL_SCHEMA,
     "session_close": SESSION_CLOSE_SCHEMA,
+    "session_set_color": SESSION_SET_COLOR_SCHEMA,
+    "session_set_note": SESSION_SET_NOTE_SCHEMA,
     "session_revive": SESSION_REVIVE_SCHEMA,
     "session_send": SESSION_SEND_SCHEMA,
     "session_broadcast": SESSION_BROADCAST_SCHEMA,

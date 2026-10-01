@@ -367,6 +367,10 @@ class TestWhatThisSetGrants:
         # the End-wait button writes; nothing discarded, same target fence.
         "session_end_wait",
         "session_set_model",
+        # Tint or leave a note on the caller itself or a session it created; the
+        # route's creator fence is narrower than the rest of this group's.
+        "session_set_color",
+        "session_set_note",
         "session_close",
         "session_revive",
         "session_send",
