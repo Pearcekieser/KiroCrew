@@ -113,17 +113,134 @@ def test_every_listed_row_is_a_target_revive_accepts(tmp_path):
     assert _list(state, caller)["sessions"] == []
 
 
-def test_limit_caps_rows_and_reports_more(tmp_path):
+def test_limit_caps_rows_and_reports_the_exact_overflow(tmp_path):
     state = _make_state(tmp_path)
     caller = _slot(state, "chat-1")
-    for i in range(3):
+    for i in range(5):
         _archive(state, caller, f"chat-{i + 2}", age=i)
 
     result = _list(state, caller, limit=2)
 
     assert len(result["sessions"]) == 2
     assert result["more"] is True
-    assert _list(state, caller, limit=3)["more"] is False
+    assert result["omitted"] == 3
+    full = _list(state, caller, limit=5)
+    assert full["more"] is False and full["omitted"] == 0
+
+
+def test_the_overflow_count_skips_rows_revive_would_refuse(tmp_path):
+    state = _make_state(tmp_path)
+    caller = _slot(state, "chat-1")
+    for i in range(4):
+        _archive(state, caller, f"chat-{i + 2}", age=i)
+    # The oldest one is an app session, which revive refuses.
+    state.conversation_log.update_metadata("dashboard:chat-5", {"app": "some-app"})
+
+    assert _list(state, caller, limit=1)["omitted"] == 2
+
+
+def test_an_overflow_row_revived_during_the_scan_is_not_counted(tmp_path, monkeypatch):
+    state = _make_state(tmp_path)
+    caller = _slot(state, "chat-1")
+    _archive(state, caller, "chat-2", age=0)
+    older = _archive(state, caller, "chat-3", age=1)
+    real_scan = sc._scan_revivable_history
+
+    def _scan_then_revive(*args, **kwargs):
+        out = real_scan(*args, **kwargs)
+        _slot(state, older)
+        return out
+
+    monkeypatch.setattr(sc, "_scan_revivable_history", _scan_then_revive)
+    result = _list(state, caller, limit=1)
+    assert len(result["sessions"]) == 1
+    assert result["omitted"] == 0 and result["more"] is False
+
+
+def test_every_overflow_key_is_kept_within_the_scan_cap(tmp_path, monkeypatch):
+    # The scan cap is the one bound on overflow keys, so the revive correction
+    # sees every one of them: a revive of the OLDEST overflow row mid-scan is
+    # still taken out of the count, and the key list never outgrows the walk.
+    monkeypatch.setattr(sc, "MAX_HISTORY_SCAN_ENTRIES", 50)
+    state = _make_state(tmp_path)
+    caller = _slot(state, "chat-1")
+    for i in range(6):
+        _archive(state, caller, f"chat-{i + 2}", age=i)
+    oldest = "chat-7"
+    captured = {}
+    real_scan = sc._scan_revivable_history
+
+    def _scan_then_revive_oldest(*args, **kwargs):
+        out = real_scan(*args, **kwargs)
+        captured["out"] = out
+        _slot(state, oldest)
+        return out
+
+    monkeypatch.setattr(sc, "_scan_revivable_history", _scan_then_revive_oldest)
+    result = _list(state, caller, limit=1)
+
+    _rows, keys, _lineage, truncated = captured["out"]
+    assert oldest in keys
+    assert len(keys) == 5 <= sc.MAX_HISTORY_SCAN_ENTRIES
+    assert truncated is False
+    assert result["omitted"] == 4 and result["more"] is True
+    assert result["scan_truncated"] is False
+
+
+def test_the_walk_stops_at_the_scan_cap_and_says_so(tmp_path, monkeypatch):
+    # The catalog walk is bounded too, so the `seen` set cannot grow with the
+    # archive; a truncated walk reports it and `omitted` becomes a lower bound.
+    monkeypatch.setattr(sc, "MAX_HISTORY_SCAN_ENTRIES", 3)
+    state = _make_state(tmp_path)
+    caller = _slot(state, "chat-1")
+    for i in range(6):
+        _archive(state, caller, f"chat-{i + 2}", age=i)
+
+    result = _list(state, caller, limit=1)
+
+    assert result["scan_truncated"] is True
+    assert result["more"] is True
+    assert len(result["sessions"]) == 1
+    assert result["omitted"] < 5
+    monkeypatch.setattr(sc, "MAX_HISTORY_SCAN_ENTRIES", 100)
+    full = _list(state, caller, limit=1)
+    assert full["scan_truncated"] is False
+    assert full["omitted"] == 5
+
+
+def test_the_scan_reads_a_bounded_catalog_not_list_sessions(tmp_path, monkeypatch):
+    # `list_sessions` builds a full row, title included, for every transcript
+    # before any cap applies; the scan must start from the bounded stem read.
+    state = _make_state(tmp_path)
+    caller = _slot(state, "chat-1")
+    for i in range(4):
+        _archive(state, caller, f"chat-{i + 2}", age=i)
+    log = state.conversation_log
+
+    def _refuse():
+        raise AssertionError("the history scan must not materialize list_sessions")
+
+    monkeypatch.setattr(log, "list_sessions", _refuse)
+    result = _list(state, caller, limit=2)
+
+    assert _targets(result) == ["chat-2", "chat-3"]
+    assert result["omitted"] == 2 and result["scan_truncated"] is False
+
+
+def test_newest_session_stems_keeps_only_the_newest_entries(tmp_path):
+    state = _make_state(tmp_path)
+    caller = _slot(state, "chat-1")
+    for i in range(5):
+        _archive(state, caller, f"chat-{i + 2}", age=i)
+    log = state.conversation_log
+
+    capped, more = log.newest_session_stems(2)
+    assert [stem for stem, _ in capped] == ["dashboard_chat-2", "dashboard_chat-3"]
+    assert more is True
+    everything, more_all = log.newest_session_stems(1000)
+    assert more_all is False
+    assert [stem for stem, _ in everything][:5] == [f"dashboard_chat-{i + 2}" for i in range(5)]
+    assert log.newest_session_stems(0) == ([], False)
 
 
 def test_limit_is_clamped_to_the_ceiling(tmp_path):
@@ -452,6 +569,7 @@ def test_mcp_tool_gets_the_history_route_and_renders_rows(monkeypatch):
                 }
             ],
             "more": True,
+            "omitted": 7,
             "lineage_unknown": False,
         }
 
@@ -464,8 +582,17 @@ def test_mcp_tool_gets_the_history_route_and_renders_rows(monkeypatch):
         "session_key": "dashboard:chat-1",
     }
     assert "`chat-2` (Lookup)" in out and "2026-09-30T12:00:00Z" in out
-    assert "folder f1" in out and "more exist" in out
+    assert "folder f1" in out and "7 more not shown" in out
     assert "session_revive" in out
+
+    def _get_truncated(path, session_key=""):
+        resp = _get(path, session_key)
+        resp["scan_truncated"] = True
+        return resp
+
+    monkeypatch.setattr(mcp_dashboard, "_get", _get_truncated)
+    out = mcp_dashboard._call_tool_inner("session_history_list", {})
+    assert "at least 7 more not shown" in out
 
 
 def test_mcp_tool_resolves_a_folder_path_without_creating_it(monkeypatch):
@@ -507,6 +634,19 @@ def test_mcp_tool_says_when_the_lineage_hid_rows(monkeypatch):
     )
     out = mcp_dashboard._call_tool_inner("session_history_list", {})
     assert "lineage" in out
+
+
+def test_mcp_tool_does_not_call_an_empty_page_an_empty_archive(monkeypatch):
+    # The kept rows can be revived mid-scan while counted overflow rows remain.
+    mcp_dashboard = _strict(monkeypatch)
+    monkeypatch.setattr(
+        mcp_dashboard,
+        "_get",
+        lambda *a, **k: {"ok": True, "sessions": [], "more": True, "omitted": 3},
+    )
+    out = mcp_dashboard._call_tool_inner("session_history_list", {})
+    assert "you can revive" not in out
+    assert "3 more not shown" in out
 
 
 def test_mcp_tool_refuses_a_caller_without_a_strict_key(monkeypatch):
