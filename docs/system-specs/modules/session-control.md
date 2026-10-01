@@ -1631,8 +1631,13 @@ The live-slot table is snapshotted on the loop before the walk and re-read after
 it (a session revived during the scan is dropped), and the caller surface and
 workspace are re-asserted after the walk because the rows carry titles, the same
 reason `created_session_status` re-checks. `folder_id` must exist in the tree
-(`folder_not_found` otherwise); `limit` is clamped to 1..100 and `more` says the
-walk stopped with rows left.
+(`folder_not_found` otherwise); `limit` is clamped to 1..100, `omitted` counts the
+revivable sessions past it, and `more` says rows were left. The walk examines at
+most `MAX_HISTORY_SCAN_ENTRIES` (5000) catalog entries, read through
+`newest_session_stems`, which keeps only that many stems and mtimes and reads no
+title or metadata line; past that it stops and
+answers `scan_truncated: true`, so `omitted` becomes a lower bound and the scan's
+memory stays bounded however large the archive is.
 
 ## Configuration
 

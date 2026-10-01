@@ -6031,6 +6031,14 @@ async def revive_session(
 #: backend clamps too, because the route is reachable without the schema layer.
 DEFAULT_HISTORY_LIST_ROWS = 20
 MAX_HISTORY_LIST_ROWS = 100
+#: How many history catalog entries one scan walks, newest first. It is the one
+#: bound on everything the scan retains: the catalog read keeps at most this
+#: many stems and mtimes, and the ``seen`` set and the overflow keys (rows past
+#: ``limit``) both grow by at most one per entry walked. Past it the
+#: walk stops and the answer says ``scan_truncated``, which makes ``omitted`` a
+#: lower bound instead of an exact count. Revivable sessions sit near the top of
+#: a newest-first catalog, so a real archive meets the row cap long before this.
+MAX_HISTORY_SCAN_ENTRIES = 5000
 
 #: Longest ``folder_id`` a history row carries. Folder ids are 12 hex characters
 #: (``chat_folders``), but the value is read from agent-writable transcript
@@ -6050,33 +6058,45 @@ def _scan_revivable_history(
     folder_id: str,
     live_keys: frozenset[str],
     limit: int,
-) -> tuple[list[dict[str, Any]], bool, bool]:
+) -> tuple[list[dict[str, Any]], list[str], bool, bool]:
     """The DISK half of :func:`list_archived_sessions`: runs in a worker thread.
 
-    Walks the history catalog newest first and keeps each archived dashboard
+    Walks the newest ``MAX_HISTORY_SCAN_ENTRIES`` transcripts of the history
+    catalog (``newest_session_stems``, stems and mtimes only) newest first and
+    keeps each archived dashboard
     session :func:`revive_session` would accept for this caller, applying the
-    target-side refusals revive applies in the same order: unattended and member
-    DM keys, non-persistent memory, app scope, channel links (metadata AND the
-    gateway session store), outbound mirrors, workspace, and for a fenced caller
-    ``created_by`` corroborated by the crew-log lineage. A row that would be
-    refused is skipped, not reported, so the listing never names a session the
-    caller could not revive.
+    target-side refusals revive applies: unattended and member DM keys,
+    non-persistent memory, app scope and metadata channel links, workspace, for
+    a fenced caller ``created_by`` corroborated by the crew-log lineage, and
+    last the gateway session-store link and outbound-mirror probe. A row
+    that would be refused is skipped, not reported, so the listing never names
+    a session the caller could not revive.
 
     *live_keys* is the live-slot snapshot the caller took on the loop; the slot
     table itself belongs to the loop and is not read here. Returns
-    ``(rows, more, lineage_unknown)``: *more* when the walk stopped at *limit*
-    with rows left, *lineage_unknown* when a fenced caller had candidates the
-    lineage could not vouch for (crew log off, unseeded, incomplete).
+    ``(rows, omitted_keys, lineage_unknown, truncated)``: *omitted_keys* are
+    the keys of the eligible rows that fell past *limit*; no title is kept for
+    them. The walk does not stop at the row cap, so the caller can report how
+    many were left out instead of a bare "more exist", and can drop sessions
+    revived during the scan from that count. It stops after
+    ``MAX_HISTORY_SCAN_ENTRIES`` catalog entries and sets *truncated*, which
+    bounds both ``seen`` and *omitted_keys* and makes the count a lower bound.
+    *lineage_unknown* is set when a fenced
+    caller had candidates the lineage could not vouch for (crew log off,
+    unseeded, incomplete).
     """
     # Circular at runtime: ``members`` imports this module.
     from kiro_crew import members as members_mod
 
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    more = False
+    omitted: list[str] = []
     lineage_unknown = False
-    for entry in log.list_sessions():
-        stem = str(entry.get("key") or "")
+    # A bounded catalog read: only the newest ``MAX_HISTORY_SCAN_ENTRIES``
+    # transcripts' stems and mtimes, with no title or metadata, so nothing the
+    # walk starts from grows with the archive or with a persisted field.
+    entries, truncated = log.newest_session_stems(MAX_HISTORY_SCAN_ENTRIES)
+    for stem, modified in entries:
         if not stem.startswith("dashboard_"):
             continue
         slot_key = _fold_slot_key(stem)
@@ -6087,12 +6107,6 @@ def _scan_revivable_history(
         if folded.startswith(UNATTENDED_SLOT_PREFIXES) or folded.startswith(
             members_mod.DM_SLOT_KEY_PREFIX
         ):
-            continue
-        # Cheap catalog pre-filters; the metadata line below is re-checked on the
-        # same fields because it is what a revive would actually read.
-        if str(entry.get("memory_mode") or "persistent") != "persistent":
-            continue
-        if folder_id and str(entry.get("folder_id") or "") != folder_id:
             continue
         history_key = _history_key_for(slot_key)
         meta, readable = log.get_metadata_status(history_key)
@@ -6119,25 +6133,20 @@ def _scan_revivable_history(
         if linked or mirrored:
             continue
         if len(rows) >= limit:
-            more = True
-            break
-        modified = entry.get("modified")
-        last_active = ""
-        if isinstance(modified, (int, float)):
-            last_active = datetime.fromtimestamp(modified, tz=timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            )
+            omitted.append(slot_key)
+            continue
+        last_active = datetime.fromtimestamp(modified, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         rows.append(
             {
                 "target": slot_key,
-                "title": _bounded_status_title(
-                    str(meta.get("title") or entry.get("title") or slot_key)
-                ),
+                "title": _bounded_status_title(str(meta.get("title") or slot_key)),
                 "last_active": last_active,
                 "folder_id": _bounded_folder_id(meta.get("folder_id")),
             }
         )
-    return rows, more, lineage_unknown
+    return rows, omitted, lineage_unknown, truncated
 
 
 async def list_archived_sessions(
@@ -6195,7 +6204,7 @@ async def list_archived_sessions(
 
     caller_workspace = str(getattr(caller_slot, "workspace", "default") or "default")
     live_keys = frozenset(slot.key for slot in list(state._slots.values()))
-    rows, more, lineage_unknown = await asyncio.to_thread(
+    rows, omitted_keys, lineage_unknown, truncated = await asyncio.to_thread(
         _scan_revivable_history,
         state,
         log,
@@ -6234,18 +6243,31 @@ async def list_archived_sessions(
     # A row revived by someone else during the scan is live now; drop it here,
     # where the slot table can be read, so the list stays "archived only".
     rows = [row for row in rows if state.get_slot(row["target"]) is None]
+    omitted = sum(1 for key in omitted_keys if state.get_slot(key) is None)
 
     _audit(
         caller_session_key=caller_session_key,
         operation="history_list",
         slot_key=caller_key,
         outcome="allowed",
-        detail={"rows": len(rows), "more": more, "folder": bool(folder_id)},
+        detail={
+            "rows": len(rows),
+            "omitted": omitted,
+            "truncated": truncated,
+            "folder": bool(folder_id),
+        },
     )
     return {
         "ok": True,
         "sessions": rows,
-        "more": more,
+        "more": omitted > 0 or truncated,
+        # Count of revivable sessions past ``limit``, so a capped answer is
+        # distinguishable from a complete one by how much it left out. Exact
+        # unless ``scan_truncated``, when it counts only the entries walked.
+        "omitted": omitted,
+        # The walk stopped at ``MAX_HISTORY_SCAN_ENTRIES`` catalog entries, so
+        # older sessions were not examined at all.
+        "scan_truncated": truncated,
         # Only a fenced caller's rows rest on the lineage; for anyone else this
         # is always False.
         "lineage_unknown": lineage_unknown,
