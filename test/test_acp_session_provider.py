@@ -1299,7 +1299,8 @@ class TestLivePathModelEntitlement:
         # so a stale-snapshot refusal stands. Tests exercising the heal path
         # override this with a side_effect that also updates available_models.
         handle.refresh_available_models = AsyncMock(return_value=[])
-        return AcpSessionProvider(handle, MagicMock()), handle
+        # A kiro runtime: the refusal wording, sign-in hint included, is kiro's.
+        return AcpSessionProvider(handle, _make_runtime()), handle
 
     @pytest.mark.asyncio
     async def test_explicit_switch_refused_on_live_path(self):

@@ -24231,7 +24231,9 @@ class TestSlotModelLiveSwitch:
         state.sessions.reset = AsyncMock()
         provider = self._provider()
         provider.client.set_model = AsyncMock(
-            side_effect=AcpModelUnavailable("claude-opus-4.8", ["gpt-5.6-sol"])
+            side_effect=AcpModelUnavailable(
+                "claude-opus-4.8", ["gpt-5.6-sol"], backend=ACP_BACKEND_KIRO
+            )
         )
         state.sessions.get_provider = MagicMock(return_value=provider)
         state.get_or_create_slot("a", model="gpt-5.6-sol")
@@ -24264,7 +24266,9 @@ class TestSlotModelLiveSwitch:
         state.sessions.reset = AsyncMock()
         provider = self._provider()
         provider.client.set_model = AsyncMock(
-            side_effect=AcpModelUnavailable("claude-opus-4.8", ["gpt-5.6-sol"])
+            side_effect=AcpModelUnavailable(
+                "claude-opus-4.8", ["gpt-5.6-sol"], backend=ACP_BACKEND_KIRO
+            )
         )
         state.sessions.get_provider = MagicMock(return_value=provider)
         slot = state.get_or_create_slot("a", model="gpt-5.6-sol")
@@ -24301,7 +24305,9 @@ class TestSlotModelLiveSwitch:
                 # The SLOW, ultimately-refused pick: park inside the locked
                 # transaction, then refuse.
                 await release_slow.wait()
-                raise AcpModelUnavailable("claude-opus-4.8", ["gpt-5.6-sol"])
+                raise AcpModelUnavailable(
+                    "claude-opus-4.8", ["gpt-5.6-sol"], backend=ACP_BACKEND_KIRO
+                )
             return None
 
         provider.client.set_model = AsyncMock(side_effect=_set_model)
@@ -24356,7 +24362,7 @@ class TestSlotModelLiveSwitch:
                 await release_first.wait()
             else:
                 await release_second.wait()
-            raise AcpModelUnavailable(target, ["gpt-5.6-sol"])
+            raise AcpModelUnavailable(target, ["gpt-5.6-sol"], backend=ACP_BACKEND_KIRO)
 
         provider.client.set_model = AsyncMock(side_effect=_set_model)
         state.sessions.get_provider = MagicMock(return_value=provider)

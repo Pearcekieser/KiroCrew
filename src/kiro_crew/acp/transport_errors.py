@@ -19,8 +19,13 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 
 from kiro_crew.acp._dispatch import redact_text
-from kiro_crew.acp.runtime_models import DEFAULT_MODEL, model_is_unusable
-from kiro_crew.acp.types import ACP_BACKENDS_HOST_AUTH_CALLBACK
+from kiro_crew.acp.runtime_models import (
+    DEFAULT_MODEL,
+    advertised_model_ids,
+    model_is_unusable,
+    resolve_pin_spelling_on,
+)
+from kiro_crew.acp.types import ACP_BACKENDS_HOST_AUTH_CALLBACK, ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS
 from kiro_crew.agent_sdk import host_auth
 from kiro_crew.credential_errors import is_credential_propagation_delay
 from kiro_crew.sandbox import (
@@ -440,6 +445,7 @@ class AcpModelUnavailable(AcpError):  # noqa: N818
         advertised: Sequence[str] | None = None,
         *,
         advertised_but_refused: bool = False,
+        backend: str,
     ) -> None:
         self.model_id = model_id
         self.advertised = list(advertised or [])
@@ -472,13 +478,61 @@ class AcpModelUnavailable(AcpError):  # noqa: N818
                 transient=False,
             )
             return
-        super().__init__(
-            f"The model {model_id!r} is not available on your account. "
-            f"Available models: {usable}. "
-            f"If you expected this model to be included in your plan, check which "
-            f"account you are signed in as with `kiro-cli whoami` — a Builder ID "
-            f"sign-in carries a different entitlement than organization SSO.",
-            transient=False,
+        # The hint is for every harness that signs in through the host kiro-cli
+        # identity store (kiro itself and KAS, spawned as ``kiro-cli acp
+        # --auth-method cli``): there `kiro-cli whoami` names the account whose
+        # entitlement the advertised list reflects. ``host_auth`` owns that fact,
+        # so a backend's own string is not the test.
+        if not host_auth.signs_in_separately(backend):
+            super().__init__(
+                f"The model {model_id!r} is not available on your account. "
+                f"Available models: {usable}. "
+                f"If you expected this model to be included in your plan, check which "
+                f"account you are signed in as with `kiro-cli whoami` — a Builder ID "
+                f"sign-in carries a different entitlement than organization SSO.",
+                transient=False,
+            )
+            return
+        # The sign-in advice above is about the host kiro-cli identity store:
+        # `kiro-cli whoami` and Builder ID versus organization SSO mean nothing to
+        # a harness that signs in separately, and there a miss is as likely a
+        # catalog spelling as an entitlement. Say only what is known. "Does the
+        # list carry this id" is the shared predicate's question, asked here only
+        # when there IS a list: its empty-set answer is "allow", which would read
+        # as "advertised" against "none advertised".
+        if self.advertised and not model_is_unusable(model_id, self.advertised):
+            detail = (
+                f"The {backend} adapter refused to switch to the model "
+                f"{model_id!r}, which it advertises; it may not be available to "
+                f"the account this session uses."
+            )
+        else:
+            detail = (
+                f"The model {model_id!r} is not among the models this {backend} "
+                f"session advertises."
+            )
+        super().__init__(f"{detail} Available models: {usable}.", transient=False)
+
+    @classmethod
+    def for_recorded_refusal(
+        cls, model_id: str, available_models: object, *, backend: str
+    ) -> AcpModelUnavailable:
+        """The error for a pick that a non-strict apply recorded as refused.
+
+        Callers outside the ACP layer hold only the provider's raw
+        ``available_models()`` entries and the backend name. The wording verdict
+        (the advertised ids, and whether a pair-id harness's list serves the bare
+        id) is computed here, so those callers need no ACP model helpers.
+        """
+        advertised = advertised_model_ids(available_models)
+        return cls(
+            model_id,
+            advertised,
+            backend=backend,
+            advertised_but_refused=(
+                backend in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS
+                and bool(resolve_pin_spelling_on(model_id, advertised, backend=backend))
+            ),
         )
 
 

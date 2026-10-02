@@ -2502,8 +2502,16 @@ class AcpSessionHandle:
         ``session/new`` assigned). So this path never puts an unserved model on
         the wire, exactly like the interactive ``_wire_model_id``
         reset-to-default. Explicit user picks raise instead, upstream in
-        ``AcpSessionProvider.set_model`` / ``AcpClient.set_model``.
+        ``AcpSessionProvider.set_model`` / ``AcpClient.set_model``; on a harness in
+        ``ACP_BACKENDS_MODEL_VIA_CONFIG_OPTION`` the adapter can still refuse a
+        pick that passed those guards, and that refusal is recorded in
+        ``model_pin_refused`` for the caller to read back
+        (``chat_handlers._try_live_model_switch`` does).
         """
+        # Each call describes only itself: a refusal recorded by an earlier call
+        # must not survive a later one, or a read-after-call reports a pick that
+        # landed (or inherited the default) as refused.
+        self.model_pin_refused = ""
         # Backend-aware: on a ``<model>[<effort>]`` pair-id harness the advertised
         # list is the picker's vocabulary while the ``model`` config option's is
         # the BARE id, so a bare pin misses the list yet is exactly what the wire
@@ -2646,6 +2654,7 @@ class AcpSessionHandle:
             raise AcpModelUnavailable(
                 _rejected_log,
                 advertised_ids,
+                backend=self._runtime.acp_backend,
                 # Only a pair-id harness earns the adapter-mismatch wording: on
                 # those the advertised list IS the entitlement, so refusing
                 # something on it is the adapter contradicting itself. Elsewhere an

@@ -383,6 +383,27 @@ its own once the cache refreshes with a list that carries it.
   this account use it" eventually disagree. An empty or unknown advertised set means
   **allow** — reading it as "nothing is allowed" would withhold every model on a
   backend that simply does not advertise. Never hand-roll a membership test.
+- On a backend in `ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS` (codex) the advertised list
+  holds only `<id>[<effort>]` pairs while the model option takes the bare id, so the
+  question "is this bare id served" belongs to
+  `acp.runtime_models.resolve_pin_spelling_on(id, advertised, backend=...)` (and
+  `resolve_usable_model(..., backend=...)`, which calls it), not to a second
+  predicate. `AcpSessionProvider.set_model(id)` admits a pick on that verdict and
+  hands it to `AcpSessionHandle.set_model`, which applies the model config option
+  NON-strictly: an adapter that refuses every spelling leaves the session on its
+  default and records the refused id in `model_pin_refused` (reset at the start of
+  every call, so the field is always the last call's verdict). Substitute, restore
+  and startup callers (`llm_helpers.resolve_substitute_set_model`, the Auto route
+  and throttle walk in `chat_runner`, the warm-pool claim) read that as "stay on
+  the backend default" and say nothing. The explicit dashboard pick
+  (`chat_handlers._try_live_model_switch`) reads `provider_model_pin_refused` after
+  the call and raises `AcpModelUnavailable` itself, so the handler answers 400 and
+  the slot keeps its old model instead of reporting a switch the session never
+  made. `AcpClient.set_model` (dedicated runtime) raises inside the call as before.
+  Both refusals carry `advertised_but_refused` from the same verdict, which selects
+  the adapter-mismatch wording; `AcpModelUnavailable` requires `backend=` and shows
+  the `kiro-cli whoami` hint only for backends that sign in through the host
+  kiro-cli identity store (`host_auth.signs_in_separately`).
 - The predicate is only meaningful where the advertised ids share a namespace with the
   id being tested, and callers gate on that. Comparing ids across two harnesses'
   namespaces calls every legitimate model unusable (harness-parity invariant `H12`).

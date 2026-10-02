@@ -356,7 +356,9 @@ class TestTryLiveModelSwitch:
     @pytest.mark.asyncio
     async def test_model_unavailable_propagates_instead_of_resetting(self):
         provider = _acp()
-        provider.client.set_model = AsyncMock(side_effect=AcpModelUnavailable("nope"))
+        provider.client.set_model = AsyncMock(
+            side_effect=AcpModelUnavailable("nope", backend=ACP_BACKEND_KIRO)
+        )
         with pytest.raises(AcpModelUnavailable):
             await ch._try_live_model_switch("s1", _ChatSlot("s1"), provider, "opus-4.8-1m")
 

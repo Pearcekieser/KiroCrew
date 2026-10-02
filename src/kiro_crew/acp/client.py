@@ -6830,7 +6830,7 @@ class AcpClient:
             if model_is_unusable(model_id, fresh or advertised):
                 _rejected_log, _ = redact_exfiltration_urls(str(model_id))
                 _rejected_log, _ = redact_credentials(_rejected_log)
-                raise AcpModelUnavailable(_rejected_log, fresh or advertised)
+                raise AcpModelUnavailable(_rejected_log, fresh or advertised, backend=self.backend)
         if self._uses_advertised_model_selection:
             # Mirror the spawn path (_spawn): fold the requested id onto the exact
             # spelling the backend advertised, so a warm-pool claim that switches
@@ -7244,14 +7244,24 @@ class AcpClient:
             raise AcpModelUnavailable(
                 _rejected_log,
                 advertised_ids,
+                backend=self.backend,
                 # Only a pair-id harness earns the adapter-mismatch wording: on
                 # those the advertised list IS the entitlement, so refusing
                 # something on it is the adapter contradicting itself. Elsewhere an
                 # advertised id may simply be out of the account's reach, and the
-                # entitlement wording plus the `whoami` hint is the true answer.
+                # entitlement wording is the true answer (the `whoami` hint belongs
+                # to harnesses on the host kiro-cli identity store;
+                # `host_auth.signs_in_separately` decides). "Advertised" is the
+                # backend-aware resolver's verdict, so a BARE id the pairs serve
+                # (``resolve_pin_spelling_on``) counts: a pair-only list never
+                # contains the bare id literally.
                 advertised_but_refused=(
-                    model_id in advertised_ids
-                    and self.backend in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS
+                    self.backend in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS
+                    and bool(
+                        runtime_models.resolve_pin_spelling_on(
+                            model_id, advertised_ids, backend=self.backend
+                        )
+                    )
                 ),
             ) from last_exc
         logger.warning(

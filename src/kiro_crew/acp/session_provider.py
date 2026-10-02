@@ -1185,7 +1185,7 @@ class AcpSessionProvider(LLMProvider):
                 if not resolve_pin_spelling_on(
                     model_id, fresh, backend=self.backend
                 ) and model_is_unusable(model_id, fresh or advertised):
-                    raise AcpModelUnavailable(model_id, fresh or advertised)
+                    raise AcpModelUnavailable(model_id, fresh or advertised, backend=self.backend)
         await self._guarded(self._handle.set_model(model_id))
 
     async def set_mode(self, agent_name: str) -> None:

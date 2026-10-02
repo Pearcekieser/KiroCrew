@@ -289,7 +289,11 @@ from kiro_crew.history import (  # noqa: F401
 )
 from kiro_crew.history_projection import TranscriptRevisionChanged  # noqa: F401
 from kiro_crew.jsonl_util import OversizedRecord, SplitlinesBoundaryRecord  # noqa: F401
-from kiro_crew.llm_helpers import pick_epoch_host, slot_switch_session_lock
+from kiro_crew.llm_helpers import (
+    pick_epoch_host,
+    provider_model_pin_refused,
+    slot_switch_session_lock,
+)
 from kiro_crew.memory_startup import MemoryStartupUnavailable, wait_for_memory_preparation
 from kiro_crew.memory_stores import UnknownMemoryStore
 from kiro_crew.messaging.link import canonical_key, is_channel_session_key  # noqa: F401
@@ -6755,6 +6759,21 @@ async def _try_live_model_switch(
             exc,
         )
         return False
+    refused = provider.model_pin_refused if provider_model_pin_refused(provider) else ""
+    if refused:
+        # The shared-runtime handle applies a model through its config-option
+        # ladder NON-strictly: an adapter that refuses every spelling leaves the
+        # session on its default and records the refused id instead of raising
+        # (the dedicated AcpClient raised above). The user named this exact
+        # model, so answer it the way the dedicated runtime does: same error,
+        # same 4xx, slot keeps its old model. The handle resets the record at
+        # the start of every call, so this is THIS pick's verdict, not a stale
+        # one. On a pair-id harness the advertised list is the entitlement, so
+        # a bare id the pairs serve being refused is the adapter contradicting
+        # its own list, which selects the adapter-mismatch wording.
+        raise AcpModelUnavailable.for_recorded_refusal(
+            refused, provider.available_models(), backend=provider.client.backend
+        )
     # Client-scoped explicit-pick epoch. The pick GENERATION above is
     # slot-local, but two slots can drive one wire session (a channel-born
     # slot and its dashboard alias share `effective_session_key`), and the
