@@ -16,6 +16,7 @@ from kiro_crew.monitoring.registry import (
     GITHUB_PULL_REQUEST,
     PULL_REQUEST_MONITOR_KINDS,
     REVIEW_READY,
+    UNTIL_MERGED,
     MonitorKind,
     kind_supports_objective,
     kind_supports_shadow,
@@ -32,14 +33,14 @@ class TestTheEntryAllowlistsShareOneAuthority:
         assert publicly_armable_kinds() == PULL_REQUEST_MONITOR_KINDS
 
     def test_the_publicly_armable_objective_set_is_the_one_the_schema_hardcoded(self) -> None:
-        assert publicly_armable_objectives() == frozenset({REVIEW_READY})
+        assert publicly_armable_objectives() == frozenset({REVIEW_READY, UNTIL_MERGED})
 
     def test_the_validator_schemas_derive_the_same_values(self) -> None:
         from kiro_crew.validation import MONITOR_WATCH_SCHEMA
 
         allowed = {field.name: field.allowed for field in MONITOR_WATCH_SCHEMA.fields}
         assert allowed["kind"] == PULL_REQUEST_MONITOR_KINDS
-        assert allowed["objective"] == frozenset({REVIEW_READY})
+        assert allowed["objective"] == frozenset({REVIEW_READY, UNTIL_MERGED})
 
 
 class TestAKindDeclaresItsOwnObjectives:
@@ -213,10 +214,19 @@ class TestTheWakeDescriptorMatchesWhatTheProviderEmits:
         )
 
     def test_pull_request_kinds_render_every_emitted_field_or_omit_it_on_purpose(self) -> None:
-        from kiro_crew.monitoring.models import PULL_REQUEST_OBSERVATION_FIELDS
+        from kiro_crew.monitoring.models import (
+            PULL_REQUEST_OBSERVATION_FIELDS,
+            PULL_REQUEST_OPTIONAL_OBSERVATION_FIELDS,
+        )
 
-        emitted = frozenset(PULL_REQUEST_OBSERVATION_FIELDS)
+        required = frozenset(PULL_REQUEST_OBSERVATION_FIELDS)
         for kind in PULL_REQUEST_MONITOR_KINDS | {GH_PR}:
+            # Only the GitHub adapter reads labels, so only it may render them.
+            emitted = (
+                required | frozenset(PULL_REQUEST_OPTIONAL_OBSERVATION_FIELDS)
+                if kind == GITHUB_PULL_REQUEST
+                else required
+            )
             self._assert_covers(kind, emitted, self._PULL_REQUEST_OMITTED)
 
     def test_the_workflow_run_kind_renders_every_emitted_field_or_omits_it_on_purpose(self) -> None:

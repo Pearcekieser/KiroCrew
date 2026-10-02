@@ -128,6 +128,10 @@ PULL_REQUEST_OBSERVATION_FIELDS = (
     "target",
     "unresolved_review_threads",
 )
+#: Projected canonical fields a provider writes ONLY when it has a value, so a
+#: subject without them keeps the pinned shape above. The projection copies each
+#: one when present and well formed, and never fails closed on its absence.
+PULL_REQUEST_OPTIONAL_OBSERVATION_FIELDS = ("labels",)
 PULL_REQUEST_CHECK_FIELDS = ("failed", "passed", "pending", "unknown")
 #: The one canonical check bucket that is OPTIONAL. A row lands here when a newer
 #: run of its own identity displaced it, so the row is retained and reported while
@@ -146,6 +150,14 @@ PULL_REQUEST_SUPERSEDED_CHECK_FIELD = "superseded"
 #: compact inspection reads it to keep its count off the sentinel and to say the cut
 #: out loud -- a compact reader never sees the list itself.
 PULL_REQUEST_SUPERSEDED_INCOMPLETE_IDENTITY = f"{PULL_REQUEST_SUPERSEDED_CHECK_FIELD}:incomplete"
+#: Bounds on the OPTIONAL canonical ``labels`` list. GitHub caps a label name at 50
+#: characters; 50 labels is far past any pull request this adapter has been
+#: measured on. A cut list spends its last slot on the sentinel below, the same
+#: rule the superseded bucket follows, so a reader never takes a cut list for the
+#: whole set.
+MAX_PULL_REQUEST_LABELS = 50
+MAX_PULL_REQUEST_LABEL_CHARS = 50
+PULL_REQUEST_LABELS_INCOMPLETE = "labels:incomplete"
 PULL_REQUEST_BLOCKING_REVIEWS = {
     "unknown",
     "changes_requested",
@@ -529,13 +541,14 @@ MAX_MONITOR_CONDITION_KEY_CHARS = 200
 #: check expansion is the only unbounded input and the canonical projection
 #: already bounds each check bucket, so the honest cap is that bound plus the
 #: fixed keys an adapter adds beside it: a review verdict, the unresolved-thread
-#: count, one mergeability condition, and the PR-level-comment-body digest --
-#: which wakes on an in-place comment edit a count cannot see. Four fixed keys
-#: can co-occur (conflict and behind are mutually exclusive), and the cap keeps
-#: the same one-key margin over that population the original carried. Derived
+#: count, one mergeability condition, the PR-level-comment-body digest --
+#: which wakes on an in-place comment edit a count cannot see -- and the label-set
+#: digest, which wakes on a readiness label moving. Five fixed keys can co-occur
+#: (conflict and behind are mutually exclusive), and the cap keeps the same
+#: one-key margin over that population the original carried. Derived
 #: rather than written out, so widening either half cannot leave the other
 #: behind.
-MAX_MONITOR_FIXED_CONDITIONS = 5
+MAX_MONITOR_FIXED_CONDITIONS = 6
 MAX_MONITOR_CONDITIONS = MAX_MONITOR_CHECK_IDENTITIES_PER_BUCKET + MAX_MONITOR_FIXED_CONDITIONS
 
 
@@ -1433,6 +1446,19 @@ def _public_pull_request_observation(
         for key in (*PULL_REQUEST_CHECK_FIELDS, PULL_REQUEST_SUPERSEDED_CHECK_FIELD)
         if key in checks
     }
+    # Optional, like the superseded bucket: copied only when present and bounded,
+    # so ``monitor_inspect`` shows a held pull request's labels without a second
+    # read, and a malformed list is dropped rather than failing the projection.
+    labels = projected.get("labels")
+    if (
+        isinstance(labels, list)
+        and 0 < len(labels) <= MAX_PULL_REQUEST_LABELS
+        and all(
+            isinstance(name, str) and 0 < len(name) <= MAX_PULL_REQUEST_LABEL_CHARS
+            for name in labels
+        )
+    ):
+        public["labels"] = list(labels)
     return public
 
 

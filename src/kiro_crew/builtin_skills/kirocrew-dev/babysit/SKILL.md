@@ -27,7 +27,7 @@ On Webex, use the finite legacy path even for a supported pull request.
 |---|---|
 | User is waiting, total work under 30 minutes | Bounded in-turn `wait` + poll |
 | One supported pull request, readiness decided by typed provider facts | `monitor_watch` |
-| Generic comments/advisory findings, or a required final report or notification | Finite `monitor_start` with `gate=false` |
+| Evidence off the PR, or a required final report or notification | Finite `monitor_start` with `gate=false` |
 | Act on a schedule, multiple subjects, unsupported ticket or deployment | Finite `monitor_start` |
 | Fresh-session work needing no approval-bound tools | `cron_add` |
 | Post-merge cleanup after verified merge | Script cron, roughly every 5 minutes |
@@ -46,10 +46,10 @@ structured path. With `monitoring.prefer_structured_arming` on, `monitor_watch` 
 this gateway's default for a supported pull request and the prompt loop is the
 exception; off (the default) the table reads as written. The setting changes what
 the two tool descriptions say and refuses neither tool, so the row that matters
-never moves: evidence the typed provider cannot see -- generic comments, advisory
-findings, a required final report -- is `monitor_start` with `gate=false` in
-either position. Read the descriptions you were given rather than assuming a
-position.
+never moves: evidence the typed provider cannot see -- anything off the pull
+request, work due while it is quiet, a required final report -- is
+`monitor_start` with `gate=false` in either position. Read the descriptions you
+were given rather than assuming a position.
 
 ### Structured pull-request watch
 
@@ -95,10 +95,11 @@ A terminal success uses zero model turns, so a structured watch does not create
 a final reporting turn. If the user requires a final report or notification even
 when no action is needed, use the finite legacy path.
 
-Typed providers do not observe generic issue/pull-request comments or advisory
-review findings outside their canonical review and check facts. When readiness
-depends on those, call the finite legacy path directly with `gate=false`; a typed
-fingerprint cannot stand in for missing evidence.
+GitHub's watch also sees comments and labels;
+`objective="until_merged"` holds to merge. Other providers do not observe generic issue/pull-request
+comments or advisory review findings outside their canonical review and check
+facts. When readiness depends on those, call the finite legacy path directly with
+`gate=false`.
 
 Use `monitor_update` without an id for cadence, positive budgets or
 `wake_instructions`: these preserve the comparison baseline. Changing `target`

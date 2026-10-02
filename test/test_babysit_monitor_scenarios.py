@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kiro_crew import mcp_core, session_directive
-from kiro_crew.autonudge import AutoNudgeService, NudgeLoop, runtime_budget_exceeded
+from kiro_crew.autonudge import AutoNudgeService
 from kiro_crew.dashboard.session_directive_apply import apply_session_directive
 from kiro_crew.mcp_tools import control
 from kiro_crew.monitoring.controller import MonitorController
@@ -72,34 +72,36 @@ def test_babysit_keeps_finite_legacy_path_when_terminal_success_must_report() ->
     assert "use the finite legacy path" in skill
 
 
-def test_prepare_pr_recipe_covers_its_poll_budget_without_provider_gating() -> None:
+def test_prepare_pr_recipe_holds_the_pull_request_on_a_structured_watch() -> None:
+    """The review wait and the hold after it are a bounded ``until_merged`` watch.
+
+    The recipe used to be a ``gate=False`` prompt loop on the stale premise that
+    the structured watch reads no comments. It is parsed and armed through the
+    real tool here, so a recipe the tool would refuse fails this test.
+    """
     skill_path = _BABYSIT_SKILL.parent.parent / "prepare-pr/SKILL.md"
     skill = skill_path.read_text(encoding="utf-8")
     recipe = next(
         textwrap.dedent(block).strip()
         for block in skill.split("```")
-        if textwrap.dedent(block).strip().startswith("monitor_start(")
+        if textwrap.dedent(block).strip().startswith("monitor_watch(")
     )
     call = ast.parse(recipe, mode="eval").body
     assert isinstance(call, ast.Call)
     args = {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
-    args["message"] = args["message"].replace("#<n>", _TARGET)
-    with patch("kiro_crew.mcp_core._resolve_session_key_strict", return_value=_SESSION_KEY):
-        result = control.monitor_start("monitor_start", args)
-    applied = session_directive.decode(result, "monitor_start")
-    assert applied is not None
-    loop = NudgeLoop(
-        id="prepare-pr",
-        slot_key=_BINDING,
-        message=applied["message"],
-        idle_secs=applied["idle_secs"],
-        max_cycles=applied["max_cycles"],
-        max_runtime_secs=applied["max_runtime_secs"],
-        created_ts=1.0,
-    )
-    assert loop.max_runtime_secs > 0
-    assert not runtime_budget_exceeded(loop, now=loop.created_ts + loop.idle_secs * loop.max_cycles)
-    assert applied["gate"] is False
+    args["target"] = _TARGET
+    assert args["objective"] == "until_merged"
+    assert args["max_runtime_secs"] > args["interval_secs"]
+    assert args["max_tokens"] > 0
+    with (
+        patch("kiro_crew.mcp_core._resolve_session_key_strict", return_value=_SESSION_KEY),
+        patch.object(control, "_retained_stop_refusal", return_value=""),
+    ):
+        result = control.monitor_watch("monitor_watch", args)
+    applied = session_directive.decode(result, "monitor_watch")
+    assert applied is not None, result
+    assert applied["objective"] == "until_merged"
+    assert applied["max_runtime_secs"] == args["max_runtime_secs"]
 
 
 def test_babysit_routes_webex_sessions_to_the_finite_legacy_path() -> None:

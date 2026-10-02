@@ -455,6 +455,11 @@ def format_monitor_wake(
             value = canonical.get(name)
             if isinstance(value, (str, int, bool)):
                 changed.append(f"{name}={value}")
+            elif isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+                # A list field (a pull request's labels) renders as its members,
+                # so the woken agent reads the new set here instead of polling
+                # the provider again to learn what changed.
+                changed.append(f"{name}=[{', '.join(value)}]")
         changed_line = "; ".join(changed) or "canonical state changed"
     head = canonical.get("head_revision")
     action = wake_instructions.strip() or "Inspect the changed facts and take the next safe action."

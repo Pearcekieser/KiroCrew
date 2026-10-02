@@ -14,7 +14,10 @@ from kiro_crew.monitoring.models import (
     MAX_MONITOR_CHECK_IDENTITY_CHARS,
     MAX_MONITOR_CONDITION_KEY_CHARS,
     MAX_MONITOR_CONDITIONS,
+    MAX_PULL_REQUEST_LABEL_CHARS,
+    MAX_PULL_REQUEST_LABELS,
     PULL_REQUEST_CHECK_FIELDS,
+    PULL_REQUEST_LABELS_INCOMPLETE,
     PULL_REQUEST_MERGEABILITY,
     PULL_REQUEST_MONITOR_KINDS,
     PULL_REQUEST_REVIEW_DECISIONS,
@@ -55,6 +58,49 @@ def opaque_provider_check_identity(namespace: str, raw_identity: object) -> str:
     """Return a stable identity without retaining provider-controlled display text."""
     digest = hashlib.sha256(str(raw_identity).encode("utf-8")).hexdigest()[:16]
     return f"{namespace}:{digest}"
+
+
+def normalize_pull_request_labels(names: object, *, complete: bool = True) -> tuple[str, ...]:
+    """Reduce provider label names to the bounded sorted tuple ``PullRequestFacts`` holds.
+
+    A label name is repository-controlled text that reaches a woken agent's prompt,
+    so it gets the treatment a check identity gets: control and line-separator
+    characters become spaces, whitespace collapses, URLs and credentials are
+    redacted, and the name is cut to GitHub's own 50-character limit. Duplicates
+    collapse and the result is SORTED, so label order on the wire never moves the
+    fingerprint. A read the adapter could not finish (``complete=False``) spends the
+    last slot on :data:`PULL_REQUEST_LABELS_INCOMPLETE` rather than passing a cut
+    list off as the whole set. Anything that is not a string is dropped here; the
+    adapter decides whether a malformed payload is an error.
+    """
+    if not isinstance(names, (list, tuple)):
+        return ()
+    normalized: set[str] = set()
+    for raw in names:
+        if not isinstance(raw, str):
+            continue
+        text = " ".join(
+            "".join(
+                (
+                    " "
+                    if unicodedata.category(character).startswith("C")
+                    or unicodedata.category(character) in {"Zl", "Zp"}
+                    else character
+                )
+                for character in raw
+            ).split()
+        )
+        text = redact(_URL_IN_CHECK_IDENTITY_RE.sub("[provider-url]", text))
+        text = text[:MAX_PULL_REQUEST_LABEL_CHARS]
+        if text:
+            normalized.add(text)
+    labels = sorted(normalized)
+    if len(labels) > MAX_PULL_REQUEST_LABELS:
+        labels = labels[:MAX_PULL_REQUEST_LABELS]
+        complete = False
+    if not complete:
+        labels = sorted({*labels[: MAX_PULL_REQUEST_LABELS - 1], PULL_REQUEST_LABELS_INCOMPLETE})
+    return tuple(labels)
 
 
 class PullRequestProviderError(Exception):
@@ -169,6 +215,12 @@ class PullRequestFacts:
     #: lives on -- created_at frozen at PR open, body rewritten in place -- so it
     #: is the digest that catches the four bot verdicts a thread digest cannot see.
     pr_comment_body_digest: str = ""
+    #: The pull request's label names, normalized and sorted, or () when it has
+    #: none or the adapter does not read them. Provider-specific like the comment
+    #: digest above: only the GitHub adapter reads labels today. A readiness gate
+    #: that publishes its verdict as a label (``readiness: passed``) is invisible
+    #: to every other fact here, so this is what lets a watch see it move.
+    labels: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in PULL_REQUEST_MONITOR_KINDS:
@@ -203,6 +255,13 @@ class PullRequestFacts:
             raise ValueError("checks_complete must be a boolean")
         if not isinstance(self.pr_comment_body_digest, str):
             raise ValueError("pr_comment_body_digest must be a string")
+        if (
+            not isinstance(self.labels, tuple)
+            or len(self.labels) > MAX_PULL_REQUEST_LABELS
+            or any(not isinstance(label, str) or not label for label in self.labels)
+            or list(self.labels) != sorted(set(self.labels))
+        ):
+            raise ValueError("labels must be a sorted tuple of unique normalized names")
 
 
 @dataclass(frozen=True)
@@ -224,11 +283,12 @@ def build_pull_request_probe_result(
     """Build the shared canonical snapshot, fingerprint, and classification."""
     canonical = canonical_pull_request_facts(facts)
     status, reason_code = classify_pull_request_facts(facts)
-    fingerprint_facts = (
-        actionable_fingerprint_facts(canonical)
-        if status is MonitorObservationStatus.ACTIONABLE
-        else canonical
-    )
+    if status is MonitorObservationStatus.ACTIONABLE:
+        fingerprint_facts = actionable_fingerprint_facts(canonical)
+    elif status is MonitorObservationStatus.SUCCESS and reason_code == "review_ready":
+        fingerprint_facts = held_fingerprint_facts(canonical)
+    else:
+        fingerprint_facts = canonical
     previous_head = (
         previous_observation.get("head_revision")
         if isinstance(previous_observation, Mapping)
@@ -353,7 +413,45 @@ def canonical_pull_request_facts(facts: PullRequestFacts) -> dict[str, object]:
     # fact.
     if facts.pr_comment_body_digest:
         canonical["pr_comment_body_digest"] = facts.pr_comment_body_digest
+    # Same pinned-shape rule as the digest above: present only when the pull
+    # request carries labels, so a label-less subject's canonical -- and so its
+    # fingerprint -- is byte-identical to what it was before labels were read.
+    # Stored as a list because the canonical is persisted as JSON.
+    if facts.labels:
+        canonical["labels"] = list(facts.labels)
     return canonical
+
+
+def held_fingerprint_facts(canonical: Mapping[str, object]) -> dict[str, object]:
+    """The facts a review-ready subject is compared on while a watch HOLDS it.
+
+    Only a holding objective (``until_merged``) reads this: under ``review_ready``
+    a ready subject ends the watch, so its fingerprint is never compared again.
+    A held subject is compared against the last thing its owner was woken for,
+    and that comparison must move on what an owner acts on -- a new head, a review
+    verdict, a label, a comment -- and NOT on what churns while nothing happens.
+    So the check lists are out (a re-run adds a passed identity without changing
+    anything), and so is mergeability (GitHub reports ``pending`` for a moment
+    every time the base branch moves, which would otherwise wake the owner on
+    every merge to main). The ``held`` marker keeps this hash out of the space of
+    every other fingerprint, so a subject that turns ready right after an
+    actionable wake reads as changed, which is the one wake a hold owes on
+    reaching readiness.
+    """
+    held: dict[str, object] = {
+        "held": True,
+        "blocking_review": canonical.get("blocking_review"),
+        "draft": canonical.get("draft"),
+        "head_revision": canonical.get("head_revision"),
+        "kind": canonical.get("kind"),
+        "review_decision": canonical.get("review_decision"),
+        "state": canonical.get("state"),
+        "target": canonical.get("target"),
+    }
+    for optional in ("labels", "pr_comment_body_digest"):
+        if optional in canonical:
+            held[optional] = canonical[optional]
+    return held
 
 
 def actionable_fingerprint_facts(canonical: Mapping[str, object]) -> dict[str, object]:
@@ -504,6 +602,24 @@ def pull_request_conditions(canonical: Mapping[str, object]) -> tuple[MonitorCon
                 key=f"review_comment_bodies:{comment_digest}",
                 severity=MonitorSeverity.WAKE,
                 brief="pull request comments changed",
+                resets_on=MonitorResetsOn.NEVER,
+            )
+        )
+    labels = canonical.get("labels")
+    if isinstance(labels, list) and labels and all(isinstance(name, str) for name in labels):
+        # Keyed by a digest of the whole label SET for the reason the comment
+        # condition above is: one stable key would be masked after its first wake
+        # and a readiness label flipping from ``action required`` to ``passed``
+        # would never be delivered. WAKE / NEVER: a label is put on the pull
+        # request, not on the commit, so a force-push must not replay it.
+        label_digest = hashlib.sha256(
+            json.dumps(sorted(labels), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:16]
+        conditions.append(
+            MonitorCondition(
+                key=f"labels:{label_digest}",
+                severity=MonitorSeverity.WAKE,
+                brief="pull request labels changed",
                 resets_on=MonitorResetsOn.NEVER,
             )
         )

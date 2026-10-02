@@ -81,6 +81,27 @@ GITHUB_WORKFLOW_RUN = "github_workflow_run"
 
 REVIEW_READY = "review_ready"
 
+#: The HOLD objective: watch a pull request until it is merged or closed. It reads
+#: the same probe and the same conditions as ``review_ready``; what differs is
+#: what review readiness MEANS. Under ``review_ready`` it is the goal, so it ends
+#: the watch. Under ``until_merged`` it is a state the pull request is held in
+#: while it waits for a maintainer, so the watch stays armed through it and wakes
+#: on the next change instead -- a label, a comment, a red check, a conflict.
+#: Declared by the GitHub kind alone, because only that adapter observes labels
+#: and PR-level comments, which are most of what a held pull request changes.
+UNTIL_MERGED = "until_merged"
+
+#: For each HOLDING objective, the success reason codes that still end it. An
+#: objective absent from this map is not a holding one, and every success ends it,
+#: which is what ``review_ready`` has always done. A reason code rather than a new
+#: observation status, because the classifier is shared by every pull-request kind
+#: and already names the two kinds of success apart (``pull_request_merged`` and
+#: ``review_ready``); a fifth status would have to be taught to every reader of the
+#: enum to say what this one map says.
+_HOLDING_TERMINAL_SUCCESS_REASONS: dict[str, frozenset[str]] = {
+    UNTIL_MERGED: frozenset({"pull_request_merged"}),
+}
+
 #: What a workflow run's completion IS. Declared by the workflow-run kind alone, not
 #: drawn from a shared vocabulary: ``review_ready`` means "a human can look at this
 #: pull request now", which is not a sentence about a run. A run's objective is that
@@ -117,11 +138,18 @@ class MonitorKind:
 _KINDS: dict[str, MonitorKind] = {
     GITHUB_PULL_REQUEST: MonitorKind(
         name=GITHUB_PULL_REQUEST,
-        objectives=frozenset({REVIEW_READY}),
+        objectives=frozenset({REVIEW_READY, UNTIL_MERGED}),
         publicly_armable=True,
         supports_shadow=True,
         subject_noun="pull request",
-        wake_fields=("checks", "blocking_review", "mergeability", "review_decision", "state"),
+        wake_fields=(
+            "checks",
+            "blocking_review",
+            "mergeability",
+            "review_decision",
+            "state",
+            "labels",
+        ),
     ),
     GITLAB_MERGE_REQUEST: MonitorKind(
         name=GITLAB_MERGE_REQUEST,
@@ -198,6 +226,26 @@ def kind_supports_objective(kind: object, objective: object) -> bool:
     """Whether *kind* is registered AND declares *objective*."""
     entry = monitor_kind(kind)
     return entry is not None and isinstance(objective, str) and objective in entry.objectives
+
+
+def objective_holds_past_success(objective: object) -> bool:
+    """Whether *objective* keeps its watch armed through a non-terminal success."""
+    return isinstance(objective, str) and objective in _HOLDING_TERMINAL_SUCCESS_REASONS
+
+
+def objective_success_is_terminal(objective: object, reason_code: object) -> bool:
+    """Whether a SUCCESS observation under *reason_code* ends a watch on *objective*.
+
+    True for every success under an objective that does not hold, so ``review_ready``
+    keeps its long-standing meaning; under a holding objective only the reason codes
+    it declares terminal end the watch.
+    """
+    terminal = (
+        _HOLDING_TERMINAL_SUCCESS_REASONS.get(objective) if isinstance(objective, str) else None
+    )
+    if terminal is None:
+        return True
+    return isinstance(reason_code, str) and reason_code in terminal
 
 
 def kind_supports_shadow(kind: object) -> bool:

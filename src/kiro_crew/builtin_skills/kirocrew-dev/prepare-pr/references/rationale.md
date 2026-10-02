@@ -348,12 +348,12 @@ default, so it refuses the whole call as an *"unresolved shell variable in path
 position"* and ends the turn before any script runs. The unresolved value taints
 every path derived from it, so splitting the assignment across lines does not help.
 
-## Why the driver is `monitor_start` and not a cron
+## Why the driver is a session monitor and not a cron
 
 A turn is capped at 2 hours and a CI round here costs 20–40 minutes, so an in-turn
 poll loop reliably hits the cap around iteration 3–4 — losing the loop, though not
-the work. `monitor_start` gives each round a fresh turn and survives a tab close or
-gateway restart.
+the work. A session monitor (`monitor_watch`, or `monitor_start`) gives each round
+a fresh turn and survives a tab close or gateway restart.
 
 Cron and heartbeat cannot drive the fix loop, and both report success while doing
 nothing. A cron has no owning slot, so its tool calls hit a deny-by-default approval
@@ -363,11 +363,18 @@ runs over 25 hours with 23 approval blocks, zero pushes, and a healthy-looking
 registry. Heartbeat runs under a strict name allowlist (`HEARTBEAT_SAFE_TOOLS`) with
 no shell and no `git push`, so it cannot amend a commit at all.
 
-`monitor_watch` is exempted only for a pure-watch stretch because it reads no comment
-bodies. A round is complete when every check finished **and** every bot posted, and
-a provider-typed watch cannot see the second half of that condition. There is no
-script-cron watcher to exempt: a cron holding a copy of the retired driver is
-refused on every tick and auto-paused.
+For a GitHub PR the driver is `monitor_watch` with `objective="until_merged"`. A
+round is complete when every check finished **and** every bot posted, and the
+GitHub watch sees both halves: its conditions include a digest of the PR-level
+comment bodies (where the review bots post and rewrite their verdicts in place)
+and of the label set (where the readiness gate publishes its verdict), beside
+checks, mergeability, review decision and review threads. It wakes only on a new
+actionable fingerprint, so the round-wait costs no turn while nothing moves. The
+earlier claim that the watch "reads no comment bodies" predates that digest, and
+it is why loops kept polling at `gate=False` long after it stopped being true.
+`monitor_start` stays the driver only for work that must run on a schedule while
+the PR is quiet. There is no script-cron watcher to exempt: a cron holding a copy
+of the retired driver is refused on every tick and auto-paused.
 
 ## Why arming cannot be confirmed from the reply
 

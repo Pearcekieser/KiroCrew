@@ -43,6 +43,7 @@ from kiro_crew.monitoring.pull_request import (
     PullRequestFacts,
     PullRequestProbeResult,
     build_pull_request_probe_result,
+    normalize_pull_request_labels,
     opaque_provider_check_identity,
     provider_error_result,
 )
@@ -97,7 +98,15 @@ _MAX_SUBJECTS_PER_QUERY = 25
 # interpolated into a query document. Every one of those travels as a typed
 # GraphQL variable instead.
 _ALIAS_RE = re.compile(r"^s(\d+)$")
-_PR_CORE_SELECTION = "number state isDraft headRefOid mergeable mergeStateStatus reviewDecision"
+# ``labels`` rides the primary read rather than a supplemental one: it is one
+# small direct connection per subject, and a readiness gate publishes its verdict
+# as a label, so it is load-bearing for a holding watch. ``totalCount`` lets a cut
+# list say so instead of passing for the whole set.
+_PR_LABEL_PAGE_SIZE = 50
+_PR_CORE_SELECTION = (
+    "number state isDraft headRefOid mergeable mergeStateStatus reviewDecision"
+    f" labels(first:{_PR_LABEL_PAGE_SIZE}){{totalCount nodes{{name}}}}"
+)
 _ROLLUP_SELECTION = """
 headRefOid
 commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:PAGE_SIZE,after:$CURSOR){
@@ -232,6 +241,8 @@ class GitHubPullRequestResponse:
     #: or the comment read was incomplete. Set after the supplemental comment
     #: read via ``replace``; the primary-only and REST paths leave it empty.
     pr_comment_body_digest: str = ""
+    #: Normalized, sorted label names from the primary read (GraphQL or REST).
+    labels: tuple[str, ...] = ()
 
 
 GitHubPullRequestProbeResult = PullRequestProbeResult
@@ -1071,7 +1082,33 @@ def _normalize_response(
         checks_complete=checks_complete,
         unresolved_review_threads=unresolved_review_threads,
         review_threads_complete=review_threads_complete,
+        labels=_normalize_labels(raw.get("labels")),
     )
+
+
+def _normalize_labels(raw: object) -> tuple[str, ...]:
+    """Read the primary node's ``labels`` connection into normalized names.
+
+    ABSENT is not malformed: a response shaped before labels were selected, or a
+    REST payload that omits them, reads as no labels. A connection that is present
+    but not the shape asked for raises, so the primary read fails as malformed
+    exactly as it does for any other load-bearing field.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, Mapping):
+        raise ValueError("GitHub pull request labels are malformed")
+    nodes = raw.get("nodes")
+    if not isinstance(nodes, list):
+        raise ValueError("GitHub pull request labels are malformed")
+    names: list[str] = []
+    for node in nodes:
+        if not isinstance(node, Mapping) or not isinstance(node.get("name"), str):
+            raise ValueError("GitHub pull request labels are malformed")
+        names.append(node["name"])
+    total = raw.get("totalCount")
+    complete = not (isinstance(total, int) and not isinstance(total, bool) and total > len(names))
+    return normalize_pull_request_labels(names, complete=complete)
 
 
 def _superseded_key(raw: object) -> tuple[object, ...] | None:
@@ -1410,7 +1447,22 @@ def _rest_primary_node(raw: Mapping[str, Any]) -> dict[str, Any]:
         "mergeable": _REST_MERGEABLE[mergeable] if isinstance(mergeable, bool) else "UNKNOWN",
         "mergeStateStatus": _rest_enum(raw.get("mergeable_state")),
         "reviewDecision": _REST_ABSENT_REVIEW_DECISION,
+        "labels": _rest_labels(raw.get("labels")),
     }
+
+
+def _rest_labels(raw: object) -> dict[str, Any] | None:
+    """Translate REST's flat label list into the GraphQL connection shape.
+
+    Absent stays absent (``None``), which ``_normalize_labels`` reads as no
+    labels; a present list is passed through for that one normalizer to judge.
+    REST returns every label on the pull request, so ``totalCount`` is its length.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        return {"nodes": raw}
+    return {"totalCount": len(raw), "nodes": raw}
 
 
 def _rest_status_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1583,6 +1635,7 @@ def _build_result(
             unresolved_review_threads=response.unresolved_review_threads,
             review_threads_complete=response.review_threads_complete,
             pr_comment_body_digest=response.pr_comment_body_digest,
+            labels=response.labels,
         ),
         previous_observation=previous_observation,
         response=response,

@@ -220,8 +220,8 @@ count, for a repo whose reviewer fleet is named differently.
 status needs: the disposition rule, plus the whole-design lanes owing that head a
 verdict. Exits 0 with one JSON object; `pr-readiness.yml`'s mode.
 
-`pr_status.py` drives the loop: **10** → hand the next poll to `monitor_start` and
-end the turn; **20** → drill in and fix; **0** → Phase 4; **2** → fix env or escalate.
+`pr_status.py` drives the loop: **10** → hand the wait to `monitor_watch`
+(`objective="until_merged"`) and end the turn; **20** → drill in and fix; **0** → Phase 4; **2** → fix env or escalate.
 
 A `NOTICE: CI check status UNAVAILABLE/DISCARDED` line means the rollup could not be
 read (a fine-grained PAT cannot grant Checks read). `pr_status.py` still fails
@@ -332,8 +332,9 @@ that view; no separate local round log is needed.
   ambiguous large conflict; a hard external blocker (infra, permissions, a check
   that never runs). Recurrence, round count, a re-raised finding or self-added
   code is never one. When you pause, name the option you would take.
-- `monitor_start` is bounded to `max_cycles=80` and `max_runtime_secs=86400`;
-  the agent never raises either. At exhaustion, hand over `--rounds` and open
+- The watch is bounded to `max_runtime_secs=86400` and `max_tokens=1000000`
+  (a `monitor_start` fallback to `max_cycles=80` and `max_runtime_secs=86400`);
+  the agent never raises any of them. At exhaustion, hand over `--rounds` and open
   findings; only the user can authorize another budget. Phase 2 separately caps
   local review at 10 passes. Cycle counts are not server-round counts.
 
@@ -570,46 +571,66 @@ re-runs them on the new head.
 
    - **0** → Phase 4.
    - **20** → run `pr_findings.py` and **TRIAGE before re-pushing**; one of its reasons needs no code change at all — an `unanswered CONCERNS from <LANE>` reason is cleared by POSTING the dispositions (one comment per item, each naming its span), not by pushing; re-pushing an unchanged diff against a failure just repeats it. **(a) CI/build/test failure** → read the failing log (`gh run view <run-id> --log-failed`), then — once the decision to fix is made — cancel the head's remaining in-flight runs per Phase 3's read → cancel → edit rule, reproduce the **exact failing node ids** locally (never the full suite), and fix the **root cause**; or confirm a flake and re-run **only the failing job**, never the whole run — `gh run rerun <run-id> --failed` (or `--job <job-id>` for one of several reds), since a bare `gh run rerun <run-id>` replays the entire matrix to re-decide one shard, and no cancel applies here. **(b) Review finding** → read whole-design verdicts first and apply the three questions. For Kiro Crew Opus-family or GPT 5.6 findings that need code changes, MUST execute [Review repair routing](#review-repair-routing): delegate the minimal fix and self-review to the selected model-pinned subagent, then verify in the parent. Otherwise rebut with evidence (never dismiss a CodeQL alert merely to pass), or request a maintainer decision; resolve only addressed threads. **(c) Conflict / behind base** → Phase 1's re-sync handles it. Then **loop back to Phase 1** → 2 → 3 carrying those fixes.
-   - **10** → reviewers or CI are still running. In a chat slot, load
-     `kirocrew-core::monitor_start` through `tool_search`, request a finite
-     same-session loop, then END THE TURN. No wait/poll beside an active loop.
-     Slot-less subagents, cron, webhook and task-runner turns cannot arm one:
-     use bounded in-turn `wait` + re-poll and disclose that fallback.
+   - **10** → reviewers or CI are still running. In a dashboard, Slack or
+     Discord chat slot, load `kirocrew-core::monitor_watch` through
+     `tool_search`, arm ONE bounded structured watch that holds the PR until it
+     merges, then END THE TURN. No wait/poll beside an active watch.
 
      ```
-     monitor_start(
-       message="Check https://github.com/owner/repo/pull/123 with green_age.py "
-               "--pr 123 then pr_status.py --reviewers <profile reviewer names>. "
-               "green_age 30: re-sync, run the overlapping tests, push, post "
-               "one Rebased comment. pr_status 10: stay silent. "
-               "Exit 20: read pr_findings.py and triage; Kiro Crew AI repairs "
-               "MUST follow prepare-pr Review repair routing with model-pinned "
-               "subagents, then parent verification and Phases 1 -> 2 -> 3. "
-               "Push only if authorized. Exit 0: Phase 4; answer every concern "
-               "before declaring review-ready, report and call autonudge_stop. "
-               "On terminal state, user stop, blocker or spent budget report "
-               "the outcome and open findings, then call autonudge_stop.",
-       interval_secs=300, max_cycles=80, max_runtime_secs=86400, gate=False,
-       banner="prepare-pr: polling PR #123")
+     monitor_watch(
+       kind="github_pull_request",
+       target="https://github.com/owner/repo/pull/123",
+       objective="until_merged",
+       interval_secs=300, max_runtime_secs=86400, max_tokens=1000000,
+       wake_instructions="prepare-pr wake for PR 123: run green_age.py --pr 123 "
+               "then pr_status.py --reviewers <profile reviewer names>. "
+               "green_age 30: re-sync, run the overlapping tests, push, post one "
+               "Rebased comment. pr_status 10: end the turn silently. Exit 20: "
+               "read pr_findings.py and triage; Kiro Crew AI repairs MUST follow "
+               "prepare-pr Review repair routing with model-pinned subagents, then "
+               "parent verification and Phases 1 -> 2 -> 3. Push only if "
+               "authorized. Exit 0: Phase 4, answer every concern first. The "
+               "watch ends itself when the PR merges or closes.")
      ```
 
-     Replace the example URL with the real full PR URL. Keep `gate=False`:
-     generic comments and advisory findings are outside the typed provider's
-     evidence, so this scan must run even when its fingerprint is unchanged.
-     Omit `banner` on Slack/Discord/Webex, where it is refused. `interval_secs=300`
-     stays fixed unless the user asks. Budgets: see "Iteration budget".
+     Replace the example URL with the real full PR URL. The watch probes without
+     a model turn and wakes only on a new actionable fingerprint: a red check, a
+     review verdict, an unresolved thread, a conflict or behind base, a change to
+     the PR-level comment bodies (where the review bots post and rewrite their
+     verdicts), a change to the labels (where the readiness gate publishes
+     `readiness: passed` / `readiness: action required`), and a new head. Under
+     `until_merged` readiness is not terminal: the watch stays armed through it,
+     wakes once when the PR turns ready, then stays quiet until one of those
+     facts moves. A merge ends it as success and a close as blocked. Unchanged
+     and pending ticks cost nothing, so this replaces the 5-minute `gate=False`
+     poll for the whole review wait and the hold after it.
 
-     A create-only refusal means a loop may already be active: inspect it on a
-     later turn; do not start wait/poll beside it. Missing hosting context permits
-     bounded wait/poll. A retained-stop refusal needs the owner, not a retry or
-     another driver. Manual pause/user stop is preserved; only an authorized
-     increase of a reached budget can revive a budget-paused legacy loop.
-     On Webex, stop and create a new finite loop instead of `monitor_update`.
+     One gap: the base moving into this PR's files with nothing changing on the
+     PR itself wakes nothing, so `green_age.py` runs at the next wake rather than
+     on a timer. When the user wants that re-sync on a schedule while the PR is
+     otherwise quiet, that is scheduled work, and the one driver is a finite
+     `monitor_start(gate=False)` instead -- the same `wake_instructions` as its
+     `message`, `interval_secs=300, max_cycles=80, max_runtime_secs=86400`, and
+     `autonudge_stop` on merge, close, blocker or spent budget. Use that same
+     loop on Webex, where structured watches are unsupported. Slot-less
+     subagents, cron, webhook and task-runner turns can arm neither: use bounded
+     in-turn `wait` + re-poll and disclose that fallback. Budgets: see
+     "Iteration budget".
+
+     A create-only refusal means a loop may already be active (a watch counts):
+     inspect it on a later turn; do not start wait/poll beside it. Missing hosting context
+     permits bounded wait/poll. A retained-stop refusal needs the owner, not a
+     retry or another driver. Manual pause/user stop is preserved; only an
+     authorized increase of a reached budget can revive a budget-paused loop.
+     Stop a structured watch with `monitor_stop`, a legacy loop with
+     `autonudge_stop`. On Webex, stop and create a new finite loop instead of
+     `monitor_update`.
 
      An acknowledgement is only a pending request. END THE TURN so it can apply;
      do not retry merely because no loop is visible before the turn ends.
      On a later user/wake turn, read the applied transcript notice and use
-     `monitor_inspect()` where supported or the legacy helper:
+     `monitor_inspect()` for a structured watch or the legacy helper for a
+     `monitor_start` loop:
 
      ```bash
      python3 $SKILL_DIR/scripts/monitor_armed.py --pr <n>
@@ -618,7 +639,8 @@ re-runs them on the new head.
      **0** proves an active loop naming this PR; **20** means none verified;
      **2** means unreadable, not proof of absence. Report an absent/frozen loop's
      reason before choosing a safe next action; never silently substitute an
-     unbounded poll. Confirm `cycle_count` advances on later cycles. Keep pending
+     unbounded poll. Confirm the watch's `probe_count` (or the loop's
+     `cycle_count`) advances on later cycles. Keep pending
      cycles cheap: one status poll, no repeated logs/bodies/diffs. Persist state
      across turns; `babysit` owns loop mechanics and the settled-state tripwire.
 
@@ -779,8 +801,11 @@ on repository *and* number, so just read the `NOTICE:` lines it prints.
 
 **Never hand the fix-and-push loop to a cron job or a HEARTBEAT.md task.** Neither
 can push a revision, and both report success while doing nothing (why:
-`references/rationale.md`). `monitor_watch` sees provider facts only, never reviewer
-posts, so this loop stays on `monitor_start`.
+`references/rationale.md`). For a GitHub PR the loop is
+`monitor_watch(objective="until_merged")`: it wakes on PR-level comment bodies,
+labels and review threads as well as checks and mergeability, so reviewer posts
+and the readiness label reach it without a poll. `monitor_start` remains for the
+one thing a PR watch cannot do, act on a schedule while the PR is quiet.
 
 Cron *is* correct for post-merge cleanup, as a `script` cron at roughly a 5-minute
 interval — an hourly one loses the merge-to-teardown race.

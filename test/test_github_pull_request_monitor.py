@@ -526,7 +526,9 @@ def test_clean_pull_request_has_allowlisted_canonical_observation_and_fingerprin
     assert result.observation.status is MonitorObservationStatus.SUCCESS
     assert result.observation.reason_code == "review_ready"
     assert result.observation.fingerprint == (
-        "fe6dc90df56bdd1b5f40dc900d3c8af145899e64fbeeac3c86f296cd481d63c5"
+        # A review-ready subject is fingerprinted on ``held_fingerprint_facts``,
+        # so the hold objective can compare it without check-list churn.
+        "2cad21a02e77f06b8902d2fbc9930566263340d54c05f0b19c441bfa90c63050"
     )
     primary_argv, primary_kwargs = runner.calls[0]
     assert primary_argv[:3] == ["/trusted/bin/gh", "api", "graphql"]
@@ -534,7 +536,8 @@ def test_clean_pull_request_has_allowlisted_canonical_observation_and_fingerprin
     assert primary_argv[4] == (
         "query=query($o0:String!,$r0:String!,$n0:Int!)"
         "{s0:repository(owner:$o0,name:$r0){pullRequest(number:$n0){"
-        "number state isDraft headRefOid mergeable mergeStateStatus reviewDecision}}}"
+        "number state isDraft headRefOid mergeable mergeStateStatus reviewDecision"
+        " labels(first:50){totalCount nodes{name}}}}}"
     )
     # Owner, repository and number reach GitHub as bound variables, so no part of a
     # subject is ever interpolated into the document above.

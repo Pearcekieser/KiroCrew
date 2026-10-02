@@ -41,8 +41,12 @@ PREVIOUS_HEAD = "fedcba9876543210fedcba9876543210fedcba98"
 
 #: sha256 over the canonical probe output of every matrix row. Captured on
 #: kirocrew/main at 53987e756 -- before the verdict-payload change -- and
-#: unchanged by it.
-GOLDEN_DIGEST = "2ccba80c98aaf46ec5de2f6180664b0f063fe28c1f3502083a270d1c0e2ef7af"
+#: unchanged by it. Re-pinned for the ``until_merged`` hold objective: a
+#: review-ready subject is now fingerprinted on ``held_fingerprint_facts`` (the
+#: facts an owner acts on, without check lists or mergeability), which moves
+#: exactly the three OPEN groups that classify as review-ready -- absent, empty and
+#: green. Canonical facts and classifications are unchanged.
+GOLDEN_DIGEST = "acce48f30af3a4dff36806d6f6c3cfbebc7b7d63ceb9c8357ba2ce7d57d2491e"
 
 #: The same output digested per pull-request state and check-rollup shape, so a
 #: mismatch names the shape that moved instead of only the whole table. Captured
@@ -62,10 +66,10 @@ GOLDEN_GROUP_DIGESTS: dict[str, str] = {
     "MERGED/one-red": "3536fe6854e8d9b10c49b09954b7bae49259d49c4acf89790dc4b81f37c7aff3",
     "MERGED/pending": "b14b7c234c9b263f1d2c826927de8764ef75dd47963a5c0e310a8ab1bc9742cf",
     "MERGED/unknown-conclusion": "fa71c711557fdc696b963c6c0a8b907d3ac73f69bba4248f2efeabe078984159",
-    "OPEN/absent": "8da02cd1eafa6607b707e340afeb08abe7e209d986da9edd438ce6777cd63625",
+    "OPEN/absent": "bb17d85d5e3411de340f36eb794ea67e4d71862d3a7ff782001526279ca33ed6",
     "OPEN/cancelled": "e53740c00f90ff470750453a963c8b16339e0a09ece5c2ba11303dfce2722c81",
-    "OPEN/empty": "ee0711180b5362fcf823529c7b1bb1fe8c5a6fe20e69db055e995884f15e9d35",
-    "OPEN/green": "d99ab3c3c63fb1d4b7db7ea89aa999843a28de9ba06f81e0860607b7f9d69b9c",
+    "OPEN/empty": "c3f1f0a7b96d977317a6d1d4ccce6490675c173d4f3923a8b202e909c64f6fdf",
+    "OPEN/green": "3d8e8626824dd20ecfe83c8cd2ccb51148b4edc711e6bf8ef7e0dd605c500d80",
     "OPEN/one-red": "9156973395e03b051d1332c8848616f7954bc9b0cd6c8dbfc834a7807868c72c",
     "OPEN/pending": "e44ec8b8bf86c57dd4be7c110730cd0f78b3efa5b46d9d869f637c522bb60926",
     "OPEN/unknown-conclusion": "dba77d405759eed23d6e096b40623ca51604e37e168c2c8f8c6be072ec99a2c4",

@@ -11,6 +11,10 @@ from kiro_crew.monitoring import models
 # is the third place that has to know it: the two counters refuse to charge it
 # and the retirement PREDICTION here has to refuse to spend it.
 from kiro_crew.monitoring.github_provider_errors import is_unattempted_probe
+from kiro_crew.monitoring.registry import (
+    objective_holds_past_success,
+    objective_success_is_terminal,
+)
 from kiro_crew.monitoring.models import (
     MONITOR_REVISION_KEY_SPACE,
     MONITOR_STATE_VERSION,
@@ -233,6 +237,19 @@ def _fold_stall_streak(
         state.stall_streak = 0
         state.stall_started_at = 0.0
         return decision
+    if objective_holds_past_success(state.objective):
+        # A holding objective exists to sit through identical verdicts: a ready
+        # pull request waiting days for a maintainer, or one carrying a review
+        # thread only a human can resolve, concludes the same thing every tick
+        # by design. Counting that as "the watch stopped learning" would retire
+        # every hold within half an hour. Its bound is the runtime, token and
+        # turn budget instead, which arming requires to be positive. The streak
+        # is zeroed rather than left standing, so the invariant
+        # ``monitor_stall_reason`` relies on still holds.
+        state.stall_digest = ""
+        state.stall_streak = 0
+        state.stall_started_at = 0.0
+        return decision
     digest = _verdict_digest(decision, entries)
     if digest == state.stall_digest and state.stall_started_at:
         state.stall_streak += 1
@@ -292,12 +309,41 @@ def _decide_effect(
     if observation.status is MonitorObservationStatus.SUCCESS:
         if observation.head_changed:
             return MonitorDecision.WAKE_ACTIONABLE
-        return MonitorDecision.STOP_SUCCESS
+        if objective_success_is_terminal(state.objective, observation.reason_code):
+            return MonitorDecision.STOP_SUCCESS
+        return _held_success_decision(state, observation)
     if observation.fingerprint == state.last_fingerprint:
         return MonitorDecision.NO_CHANGE
     if observation.status is MonitorObservationStatus.PENDING:
         return MonitorDecision.RECORD_ONLY
     return MonitorDecision.STOP_BLOCKED
+
+
+def _held_success_decision(
+    state: MonitorState,
+    observation: MonitorObservation,
+) -> MonitorDecision:
+    """Decide a success that a HOLDING objective does not treat as the end.
+
+    Under ``until_merged`` a review-ready pull request is waiting for a
+    maintainer, not finished, so the watch stays armed and wakes only when the
+    held subject differs from the one its owner was last woken for. The probe
+    fingerprints a ready subject on the facts an owner acts on -- head, review
+    verdict, labels, comments -- so a check re-run or a passing ``pending``
+    mergeability does not count as different.
+
+    Compared against ``last_wake_fingerprint`` rather than ``last_fingerprint``
+    on purpose. The latter moves on every tick, so a ready subject that blips to
+    PENDING for one tick (mergeability recomputing after the base moved) and
+    comes back unchanged would read as new on its return and wake the owner on
+    every merge to the base branch. The former moves only when a wake is decided,
+    so the blip costs nothing and the first ready tick after an actionable wake
+    -- a different hash space -- wakes once, which is the readiness report a hold
+    owes its owner.
+    """
+    if observation.fingerprint == state.last_wake_fingerprint:
+        return MonitorDecision.NO_CHANGE
+    return MonitorDecision.WAKE_ACTIONABLE
 
 
 def _window_entries(

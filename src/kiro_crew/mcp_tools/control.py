@@ -119,14 +119,16 @@ _WATCH_WORK_LEDGER = "work-ledger"
 #: the structured wording is indistinguishable from a read that never happened.
 _ARMING_STEER_STRUCTURED_ON_CONDITION = (
     "Use monitor_watch for supported pull-request review readiness only when "
-    "the objective is fully determined by typed provider facts. Use the prompt "
-    "loop when comments or advisory review evidence must be interpreted. "
+    "the objective is fully determined by typed provider facts (on GitHub these "
+    "include PR-level comment bodies and labels, and objective until_merged "
+    "holds the PR to merge). Use the prompt loop when evidence off the pull "
+    "request must be interpreted or work must run while it is quiet. "
 )
 _ARMING_STEER_STRUCTURED_BY_DEFAULT = (
     "On a supported pull request this installation arms monitor_watch by "
-    "default, and this prompt loop is the exception: take it when comments or "
-    "advisory review evidence must be interpreted, which the typed provider "
-    "cannot observe. "
+    "default, and this prompt loop is the exception: take it when evidence off "
+    "the pull request must be interpreted or work must run while it is quiet, "
+    "which the typed provider cannot observe. "
 )
 #: Appended to ``monitor_watch``'s own description in the on position, so the
 #: preference is stated on the tool it points AT and not only on the one it
@@ -432,7 +434,17 @@ def schemas() -> list[dict[str, Any]]:
                 "properties": {
                     "kind": {"type": "string", "enum": sorted(publicly_armable_kinds())},
                     "target": {"type": "string", "description": "Canonical provider PR URL"},
-                    "objective": {"type": "string", "enum": sorted(publicly_armable_objectives())},
+                    "objective": {
+                        "type": "string",
+                        "enum": sorted(publicly_armable_objectives()),
+                        "description": (
+                            "review_ready ends the watch once the PR is ready for review. "
+                            "until_merged (GitHub only) holds it: the watch stays armed "
+                            "through readiness and wakes on new labels, comments, review "
+                            "verdicts, red checks or a conflict until the PR is merged "
+                            "or closed."
+                        ),
+                    },
                     "interval_secs": {
                         "type": "integer",
                         "minimum": MIN_MONITOR_CADENCE_SECS,

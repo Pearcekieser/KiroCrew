@@ -219,29 +219,36 @@ def test_comment_aware_recipes_are_finite_ungated_and_keep_repair_routing():
 
     babysit = _text(SKILLS / "babysit" / "SKILL.md")
     legacy, _ = json.JSONDecoder().raw_decode(babysit.split("monitor_start(", 1)[1])
+    assert legacy["gate"] is False
+    assert legacy["interval_secs"] > 0
+    assert legacy["max_cycles"] > 0
+    assert legacy["max_runtime_secs"] > legacy["interval_secs"] * legacy["max_cycles"]
+    for contract in ("Review repair routing", "model-pinned", "parent verification"):
+        assert contract in legacy["message"]
+    for contract in ("authorized", "terminal", "budget", "autonudge_stop"):
+        assert contract in legacy["message"]
+    assert (legacy["max_cycles"], legacy["max_runtime_secs"]) == (24, 14400)
+
+    # prepare-pr holds a GitHub PR on a structured ``until_merged`` watch: it
+    # wakes on PR-level comment bodies and labels, so the comment-aware poll no
+    # longer needs a gate=False loop. The repair contract rides its wake text.
     prepare_recipe = next(
         textwrap.dedent(block).strip()
         for block in _text(PREPARE).split("```")
-        if textwrap.dedent(block).strip().startswith("monitor_start(")
+        if textwrap.dedent(block).strip().startswith("monitor_watch(")
     )
     call = ast.parse(prepare_recipe, mode="eval").body
     assert isinstance(call, ast.Call)
     prepare = {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
-    for recipe in (legacy, prepare):
-        assert recipe["gate"] is False
-        assert recipe["interval_secs"] > 0
-        assert recipe["max_cycles"] > 0
-        assert recipe["max_runtime_secs"] > recipe["interval_secs"] * recipe["max_cycles"]
-        for contract in (
-            "Review repair routing",
-            "model-pinned",
-            "parent verification",
-            "authorized",
-            "terminal",
-            "budget",
-            "autonudge_stop",
-        ):
-            assert contract in recipe["message"]
-    assert (prepare["max_cycles"], prepare["max_runtime_secs"]) == (80, 86400)
-    assert (legacy["max_cycles"], legacy["max_runtime_secs"]) == (24, 14400)
+    assert prepare["objective"] == "until_merged"
+    assert prepare["max_runtime_secs"] == 86400
+    assert prepare["max_tokens"] > 0
+    for contract in (
+        "Review repair routing",
+        "model-pinned",
+        "parent verification",
+        "authorized",
+        "merges or closes",
+    ):
+        assert contract in prepare["wake_instructions"]
     assert "`max_cycles=80` and `max_runtime_secs=86400`" in _text(PREPARE)
