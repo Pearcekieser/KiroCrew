@@ -727,6 +727,19 @@ describe('ChatSidebar – remote crew sessions in the live list', () => {
     expect(notices[0].textContent).toContain('non-owner identity rejected')
   })
 
+  it('stays quiet in an embedded pane when the preview banner already reports the failed read', async () => {
+    // With the merged-sessions preview on, the sidebar's instance-sessions banner
+    // fires on the same failed ['instances'] read, so a second notice would
+    // report one failure twice.
+    localStorage.setItem(PREVIEW_INSTANCE_SESSIONS, '1')
+    vi.mocked(isEmbeddedPane).mockReturnValue(true)
+    listInstancesMock.mockRejectedValue(new Error('crew refused to list instances'))
+    renderSidebar({ localNewerRemoteExecutor: 'inst-a' })
+
+    await screen.findByTestId('instance-sessions-error')
+    expect(screen.queryByTestId('remote-crew-names-error')).toBeNull()
+  })
+
   it('leaves a failed crew-name read to the top bar on the full dashboard', async () => {
     listInstancesMock.mockRejectedValue(new Error('crew refused to list instances'))
     const { container } = renderSidebar({ localNewerRemoteExecutor: 'inst-a' })
