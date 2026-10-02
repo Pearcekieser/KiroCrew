@@ -97,7 +97,14 @@ path, and shadow path derive their answers from that registry instead of
 maintaining independent allowlists, and delivery reads the same table for the
 noun and fields rather than hardcoding one kind's shape.
 
-Four pull-request kinds are publicly armable with `review_ready`. The internal
+Four pull-request kinds are publicly armable with `review_ready`.
+`github_pull_request` also declares `until_merged`: the same probes and
+conditions, but review readiness is not terminal. The watch wakes once when
+the pull request becomes ready, then on any new condition key (a label set, a
+PR-comment digest, a review verdict, a red check, a conflict, a new head), and
+ends only when the pull request merges (success) or closes (blocked). Only the
+GitHub adapter reads labels; it carries them in canonical facts only when the
+pull request has any, so label-less fingerprints are unchanged. The internal
 `gh-pr` kind and the `github_workflow_run` acceptance kind are registered but
 not public; the latter alone declares `run_complete`. The `irq` inference path
 still owns a separate `gh-pr` spelling, with `test_monitor_kind_registry.py`
