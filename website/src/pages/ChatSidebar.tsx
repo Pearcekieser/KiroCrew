@@ -2743,7 +2743,8 @@ function ChatSidebar({
   })
 
   const {
-    pinned, pinnedOrder, pinnedRank, reorderPinned, orderState: pinnedOrderState,
+    pinned, pinnedOrder, pinnedRank, reorderPinned, pinnedOrderError, setPinnedOrderError,
+    orderState: pinnedOrderState,
   } = usePinnedSessionOrder({ localSlots, sortKey })
 
   const {
@@ -2917,10 +2918,10 @@ function ChatSidebar({
     tagsData, tagsQueryFailed, refetchTags, tagById, activeTagIds, tagFilterRows, activeTagNames,
   } = useSidebarTags({ filterTagIds, localSlots })
   const {
-    rawColumns, tagColumnsSettled, columnsFailed, columnsError, refetchColumns, tagColumnsEnabled,
+    rawColumns, columnsFailed, columnsError, refetchColumns, tagColumnsEnabled,
     hideEmptyFolderBody, orderedColumns,
   } = useBoardColumns()
-  usePinnedOrderAuthority({ orderState: pinnedOrderState, slotsLoaded, tagColumnsSettled, orderedColumns })
+  usePinnedOrderAuthority({ orderState: pinnedOrderState, slotsLoaded })
   const {
     columnEditId, setColumnEditId, popoverPos, columnPopoverRef, columnPopoverImeLatch, closeColumnPopover,
   } = useColumnPopover()
@@ -5613,6 +5614,19 @@ function ChatSidebar({
           </Btn>
         </div>
       )}
+      <ErrorNotice
+        title={i18nT('pages.chatSidebar.pinned_order_save_failed')}
+        message={pinnedOrderError}
+        // The server's reason sits under the title and the action under both,
+        // as on folder-order-unavailable: side by side in this ~300px panel
+        // they wrapped to one or two words a line.
+        messagePlacement="below"
+        askAgent
+        actionPlacement="below"
+        onDismiss={() => setPinnedOrderError('')}
+        className="mx-2 mt-2 shrink-0"
+        testId="pinned-order-error"
+      />
       <ErrorNotice
         message={newChatError}
         askAgent
