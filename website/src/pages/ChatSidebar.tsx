@@ -5565,7 +5565,9 @@ function ChatSidebar({
           </div>
         </div>
       )}
-      {hasRemoteExecutedRow && <RemoteCrewNamesError />}
+      {/* Yields to the preview's instance-sessions banner, which already reports
+       *  a failed ['instances'] read when the preview flag is on. */}
+      {hasRemoteExecutedRow && !remoteSessionsError && <RemoteCrewNamesError />}
       {/* Read failures for the two lists this pane is built from. Same placement
        *  rationale as the seed banner: a failed folders query means no folder
        *  tree, a failed columns query means no board, so neither branch can host
