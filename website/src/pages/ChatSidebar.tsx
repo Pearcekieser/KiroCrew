@@ -13,7 +13,7 @@ import FolderGlyph from '../components/FolderGlyph'
 import { DndContext, DragOverlay, MeasuringStrategy } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { usePreviewFlag } from '../hooks/usePreviewFlag'
 import { PREVIEW_DASHBOARD } from '../utils/previewFlags'
 import { shallowEqual, useStore } from 'react-redux'
@@ -27,6 +27,7 @@ import { switchSlot, deleteSlot, fetchHistory, resumeFromHistory, deleteHistoryS
 import { slotIsRemoteBound } from '../store/dashboardSlice'
 import { IS_MAC } from '../hooks/useKeyboardShortcuts'
 import { api, SEARCH_MIN_CHARS } from '../api/client'
+import { isInstancesDisabledError } from '../utils/instancesDisabled'
 import { errMessage } from '../utils/thunkError'
 import { computeRecentRank, recencyTintShadow, clampTintCount } from '../utils/recencyTint'
 import { folderOffersHide } from '../utils/folderVisibility'
@@ -45,6 +46,7 @@ import { useDndSensors } from '../hooks/useDndSensors'
 import { useSessionPalette } from '../hooks/useSessionPalette'
 import { ancestorsOf, descendantsOf, orphanCitation } from '../lib/sessionLineage'
 import { partitionBulkSwitch } from '../lib/bulkModelSwitch'
+import { isEmbeddedPane } from '../lib/embedded'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { useSimplifiedToolNames } from '../hooks/useSimplifiedToolNames'
 import { useLanguage } from '../i18n/LanguageProvider'
@@ -839,6 +841,37 @@ interface SessionRowProps {
  *  per-slot state (status line, goal loop, queued sub-agents, workflow runs)
  *  is subscribed to HERE, slot-scoped, so a background event re-renders only
  *  the row it belongs to. */
+/** The ONE notice for a failed ['instances'] read issued by the rows'
+ *  runs-elsewhere chips, mounted only where InstanceTabBar is not: an embedded pane (the bar never
+ *  polls there) and a top-level /embed/* route (that layout has no top bar).
+ *  Everywhere else the bar shows the same failure, so a second notice would
+ *  duplicate it. Both surfaces stay silent on exactly one denial, decided by
+ *  the shared `isInstancesDisabledError`: the gateway's own `instances_disabled`
+ *  403 (the feature is simply off). The route's other 403s (non-owner,
+ *  Slack-origin) are real authorization failures and show on both. */
+function RemoteCrewNamesError() {
+  const { pathname } = useLocation()
+  const topBarAbsent = isEmbeddedPane() || pathname.startsWith('/embed/')
+  // Same key and fetcher as the chips, so this observer adds no request.
+  const { error } = useQuery({
+    queryKey: ['instances'],
+    queryFn: () => api.listInstances(),
+    enabled: topBarAbsent,
+  })
+  if (!topBarAbsent || !error || isInstancesDisabledError(error)) return null
+  return (
+    <div className="mx-2 mt-2 shrink-0">
+      <ErrorNotice
+        variant="inline"
+        className="flex-wrap w-full"
+        message={errMessage(error) || i18nT('components.instanceTabBar.instances_load_failed')}
+        askAgent
+        testId="remote-crew-names-error"
+      />
+    </div>
+  )
+}
+
 const SessionRow = memo(function SessionRow({ view, actions }: SessionRowProps) {
   const {
     slot: s, showDivider, scope, navScope, holdContainer, isActive, isOut, isPinned, isUnread, isRunning,
@@ -2416,6 +2449,12 @@ function ChatSidebar({
     historySearchResults, instancesList, instanceSessions, remoteSessionsError, allRows, allLiveSlots,
     selectInstance, crewGroups,
   } = useSessionSources({ historyFilter, slotTitleDigest, localSlots })
+  // Whether any row renders a runs-elsewhere chip, i.e. whether this sidebar
+  // issues the ['instances'] read that RemoteCrewNamesError reports on.
+  const hasRemoteExecutedRow = useMemo(
+    () => allRows.some(r => r.executor === 'remote' && !!r.instance_id),
+    [allRows],
+  )
   // Opening a crew row is local and instant: the window reads the peer's slot
   // itself, so nothing is created here and there is nothing to wait on.
   const crewWindow = useCrewWindow()
@@ -5374,6 +5413,7 @@ function ChatSidebar({
           )}
         </div>
       )}
+      {hasRemoteExecutedRow && <RemoteCrewNamesError />}
       {/* Read failures for the two lists this pane is built from. Same placement
        *  rationale as the seed banner: a failed folders query means no folder
        *  tree, a failed columns query means no board, so neither branch can host
