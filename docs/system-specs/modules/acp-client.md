@@ -2041,6 +2041,17 @@ adapting loops on one resource oscillate. It is one gate for every harness
 (kiro-cli, KAS, a later Claude host), because every backend's session start
 runs through `create_session` (harness-parity: no per-backend branch).
 
+**The shared `_bg` runtime starts under its own gate.** Every `run_bg_oneliner`
+(auto-titles, nav labels, folder icons, summaries, STT endpointing) opens a fresh
+`session/new` on the one shared `_bg` runtime, which answers them serially.
+`get_bg_session` passes `bg_runtime_start=True`, so those starts take a permit
+from `bg_runtime_session_start_gate()`: a separate per-loop `SessionStartGate`
+of one permit, ordered by start priority like the user gate. Priority alone
+cannot keep them off a person's path: a title fires on the first send and reaches
+the gate before the sender's own start has finished spawning, so in a burst the
+titles take the user permits first and hold each one while they wait inside the
+`_bg` process. Pinned by `test/test_bg_runtime_session_start_gate.py`.
+
 **Start priority: a start a person is waiting on is served ahead of background
 starts.** Three in-process queues bound a start, and all three are one primitive,
 `kiro_crew.start_priority.PrioritySemaphore`: `SessionManager._start_sem` (cold

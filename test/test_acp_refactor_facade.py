@@ -219,7 +219,6 @@ _MOVED: dict[str, dict[str, tuple[str, ...]]] = {
             "_session_start_gates",
             "_session_start_gates_lock",
             "session_start_gate",
-            "session_start_gate_counts",
             "StartAdopter",
             "START_OUTCOME_ADOPTED",
             "START_OUTCOME_TORN_DOWN",

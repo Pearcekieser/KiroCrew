@@ -260,6 +260,10 @@ class StartPermit:
         """The gate's queue state, for a log line (``PrioritySemaphore.describe``)."""
         return self._gate.semaphore.describe()
 
+    def gate_counts(self) -> tuple[int, int]:
+        """``(active, queued)`` for the gate this permit came from."""
+        return (self._gate.active, self._gate.queued)
+
     def hold_for_collector(self) -> bool:
         """Let a :class:`StartCollector` keep this permit, if the gate allows it.
 
@@ -320,15 +324,37 @@ async def session_start_gate() -> SessionStartGate:
     return gate
 
 
-def session_start_gate_counts() -> tuple[int, int]:
-    """``(active, queued)`` for the current loop's gate; ``(0, 0)`` when none exists."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return (0, 0)
+# ── Session-start gate for the shared ``_bg`` runtime ─────────────────────────
+#
+# Every ``run_bg_oneliner`` (auto-titles, nav labels, folder icons, summaries,
+# STT endpointing) opens a fresh ``session/new`` on the one shared ``_bg``
+# runtime, and that one process answers them serially (~0.9 s each). On the gate
+# above they cost people their starts even with start priority: a title fires on
+# the first send, so in a burst the titles reach the gate seconds before the
+# senders' own starts have finished spawning and take the permits first, and each
+# one holds its permit for as long as it waits inside the ``_bg`` process. So
+# ``_bg`` starts take this gate instead and never hold or queue for a user permit.
+# One permit, because the process serializes them anyway; ordered by start
+# priority like the user gate, so a FOREGROUND one-liner goes ahead of queued
+# titles. Fixed, not configured: it bounds no resource the operator sizes. At one
+# permit ``collector_hold_ceiling`` is 0, so a timed-out ``_bg`` start never
+# parks the only permit in a collector.
+_BG_RUNTIME_SESSION_START_CONCURRENCY = 1
+
+_bg_runtime_session_start_gates: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, SessionStartGate
+] = weakref.WeakKeyDictionary()
+
+
+async def bg_runtime_session_start_gate() -> SessionStartGate:
+    """The current loop's gate for ``session/new`` on the shared ``_bg`` runtime."""
+    loop = asyncio.get_running_loop()
     with _session_start_gates_lock:
-        gate = _session_start_gates.get(loop)
-    return (gate.active, gate.queued) if gate is not None else (0, 0)
+        gate = _bg_runtime_session_start_gates.get(loop)
+        if gate is None:
+            gate = SessionStartGate(_BG_RUNTIME_SESSION_START_CONCURRENCY)
+            _bg_runtime_session_start_gates[loop] = gate
+    return gate
 
 
 # Bounds every init-frame holder: ``_split_init_frames`` and ``StartCollector`` below,

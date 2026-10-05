@@ -93,7 +93,6 @@ from kiro_crew.acp.runtime_start import (
     _cold_start_counts,
     _resolve_start_collect_timeout,
     _split_init_frames,
-    session_start_gate_counts,
 )
 from kiro_crew.acp.session_handle import (
     NATIVE_CHILD_ROSTER_CAP,
@@ -6926,6 +6925,7 @@ class AcpRuntime:
         late_adopter: "Callable[[AcpSessionHandle], Awaitable[bool]] | None" = None,
         on_gate_queued: Callable[..., None] | None = None,
         start_priority: StartPriority = StartPriority.BACKGROUND,
+        bg_runtime_start: bool = False,
     ) -> AcpSessionHandle:
         """Create a new ACP session on this runtime. Returns a session handle.
 
@@ -6963,6 +6963,11 @@ class AcpRuntime:
         to ``late_adopter`` (which returns True to keep it) or tears it down;
         the raised :class:`AcpSessionStartTimeout` carries that collector. The
         gate permit is released exactly once on every path.
+
+        ``bg_runtime_start=True`` (only the shared ``_bg`` runtime's one-liner
+        starts) takes the permit from the loop's separate one-permit ``_bg`` gate
+        instead, so those starts never hold or queue for a user's permit
+        (``runtime_start.bg_runtime_session_start_gate``).
         """
         if memory_mode not in {"persistent", "incognito", "temporary"}:
             raise ValueError("Invalid session memory mode")
@@ -7164,7 +7169,11 @@ class AcpRuntime:
             # right after the answer (the rest of session setup is not what the
             # gate protects), on a timeout by the collector that now owns the
             # request, on any other failure here.
-            gate = await runtime_start.session_start_gate()
+            gate = await (
+                runtime_start.bg_runtime_session_start_gate()
+                if bg_runtime_start
+                else runtime_start.session_start_gate()
+            )
             notify_start_queue(logger, on_gate_queued, START_QUEUE_SESSION_NEW)
             permit = await gate.acquire(start_priority)
             try:
@@ -7372,7 +7381,7 @@ class AcpRuntime:
             int(req_id),
             timeout,
             permit.priority.value,
-            *session_start_gate_counts(),
+            *permit.gate_counts(),
             permit.gate_state(),
         )
         return collector.start()
