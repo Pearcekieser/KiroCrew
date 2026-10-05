@@ -3158,6 +3158,9 @@ def _build_agent_config(agent_data: dict) -> AgentConfig:
         session_start_concurrency=_session_start_concurrency(
             agent_data.get("session_start_concurrency", "auto")
         ),
+        # Env defaults for spawned kiro-cli children (acp/child_env_defaults.py).
+        # Through the module alias: the loader's import list is a frozen snapshot.
+        child_env_defaults=_sections.coerce_child_env_defaults(section.get("child_env_defaults")),
         # Adaptive controller (adaptive/policy.py params_from_config).
         adaptive_concurrency=section.read("adaptive_concurrency", _safe_bool),
         adaptive_concurrency_mode=(
