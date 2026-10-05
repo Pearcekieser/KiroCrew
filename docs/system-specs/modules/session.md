@@ -4519,9 +4519,19 @@ Tests: `test/test_session_health.py`, `test/test_sessions_health_cache.py`,
 | Warm spare | _(in pool queue)_ | Until assigned | Pre-started kiro-cli |
 
 **Cold-start admission**: `SessionManager._start_sem` bounds provider starts local
-to one manager. The narrower common runtime chokepoint adds a gateway-wide
-`AcpRuntime.spawn()` coordinator capped at 2 concurrent spawn + `initialize`
-handshakes, matching worker-pool `max_starting=min(workers, 2)`. Authoring,
+to one manager, at `agent.cold_start_concurrency` background permits
+(`restart=True`). The manager is built on the gateway boot path, so it sizes them
+from the cached host reading without probing (the `auto` floor until the reading
+exists); the gateway's post-bind sizing task then grows them with
+`SessionManager.widen_cold_start_queues` (`PrioritySemaphore.widen_to`, which only
+adds background permits and leaves the person reserve as it is). The narrower common runtime chokepoint adds
+a gateway-wide `AcpRuntime.spawn()` coordinator capped at
+`agent.runtime_spawn_concurrency` concurrent spawn + `initialize` handshakes. Both
+default to `"auto"`, which `cold_start_sizing` derives from the effective
+`session_start_concurrency` width so the three start bounds move together:
+cold starts at that width and spawns at half of it, floored at the old fixed
+4 / 2 and capped at the measured 16 / 8 (session start width 4 or less gives 4 / 2,
+8 gives 8 / 4, 16 gives 16 / 8). Authoring,
 interactive, background, shared-runtime, and unpooled callers therefore share the
 same expensive-start bound even when they bypass this manager or a worker pool.
 Queued cancellation returns the permit, and runtime startup retains its existing

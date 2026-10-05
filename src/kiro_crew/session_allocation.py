@@ -187,7 +187,8 @@ class AllocationDeps:
     agent_model_cache: Callable[[], dict[str, tuple[str, float, float]]]
 
 
-# Concurrent cold starts ``SessionManager._start_sem`` allows background starts. A
+# Concurrent cold starts ``SessionManager._start_sem`` allows background starts by
+# default; ``agent.cold_start_concurrency`` sets it (``cold_start_sizing``). A
 # provider inside ``start()`` has not published a PID yet, so the semaphore is the
 # only evidence it exists, which is why the identity sweep drains it
 # (``PrioritySemaphore.drain``) as its barrier.
@@ -203,12 +204,17 @@ MAX_CONCURRENT_COLD_STARTS = 4
 FOREGROUND_COLD_START_RESERVE = 1
 
 
-def new_cold_start_semaphore() -> PrioritySemaphore:
-    """``SessionManager._start_sem``: the background width plus the person reserve."""
+def new_cold_start_semaphore(width: int = MAX_CONCURRENT_COLD_STARTS) -> PrioritySemaphore:
+    """``SessionManager._start_sem``: *width* background permits plus the person reserve."""
     return PrioritySemaphore(
-        MAX_CONCURRENT_COLD_STARTS + FOREGROUND_COLD_START_RESERVE,
+        width + FOREGROUND_COLD_START_RESERVE,
         foreground_reserve=FOREGROUND_COLD_START_RESERVE,
     )
+
+
+def widen_cold_start_semaphore(sem: PrioritySemaphore, width: int) -> None:
+    """Grow *sem* to *width* background permits (plus the reserve); never shrinks."""
+    sem.widen_to(width + FOREGROUND_COLD_START_RESERVE)
 
 
 @dataclass(slots=True)

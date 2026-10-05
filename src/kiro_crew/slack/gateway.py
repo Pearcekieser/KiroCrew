@@ -8829,14 +8829,49 @@ class GatewayOrchestrator:
         manager and the SessionStartGate resolve the width lazily and then hit
         the per-process cache. The log line is the record of the width the
         running gateway's gate uses.
+
+        The cold-start widths (``agent.cold_start_concurrency`` and
+        ``agent.runtime_spawn_concurrency``) follow the same reading, so the same
+        thread resolves and logs them. The session manager was built before this
+        reading existed, at the cached widths (the floors for ``"auto"``), so
+        once it lands :meth:`SessionManager.widen_cold_start_queues` grows its
+        queues to the logged widths, on the loop and without another probe.
         """
+        agent = self._cfg.agent
+
+        def _resolve_all() -> tuple[str | None, str | None]:
+            # Each half is guarded on its own so one failing does not leave the
+            # other unresolved (and its host read for the event loop to do).
+            session_start = cold_start = None
+            try:
+                session_start = resolve_session_start_sizing(
+                    agent.session_start_concurrency
+                ).describe()
+            except Exception:
+                logger.warning("Session start concurrency sizing failed", exc_info=True)
+            try:
+                from kiro_crew.cold_start_sizing import describe_cold_start_limits
+
+                cold_start = describe_cold_start_limits(agent)
+            except Exception:
+                logger.warning("Cold-start concurrency sizing failed", exc_info=True)
+            return session_start, cold_start
+
         try:
-            sizing = await asyncio.to_thread(
-                resolve_session_start_sizing, self._cfg.agent.session_start_concurrency
-            )
-            logger.info("Session start concurrency: %s", sizing.describe())
+            session_start, cold_start = await asyncio.to_thread(_resolve_all)
         except Exception:
-            logger.warning("Session start concurrency sizing failed", exc_info=True)
+            logger.warning("Session start sizing failed", exc_info=True)
+            return
+        if session_start is not None:
+            logger.info("Session start concurrency: %s", session_start)
+        if cold_start is not None:
+            logger.info("Cold-start concurrency: %s", cold_start)
+            sessions = getattr(self, "sessions", None)
+            if sessions is not None:
+                try:
+                    sessions.widen_cold_start_queues()
+                except Exception:
+                    logger.warning("Cold-start queue widening failed", exc_info=True)
 
     def _init_subagents(self) -> None:
         """Initialize the subagent manager."""

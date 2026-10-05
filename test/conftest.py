@@ -603,6 +603,32 @@ def _fresh_update_ownership(_floor_monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _small_default_host(_floor_monkeypatch):
+    """Size every ``"auto"`` start limit from a fixed small host, not this machine.
+
+    ``session_start_sizing`` reads the host once per process and caches it, so
+    without a pin the first test on a worker to resolve ``"auto"`` decides the
+    start widths every later test on that worker sees: 16 on a 128-core
+    workstation, 2 on a CI runner. Tests that build a default ``SessionManager``
+    and count its permits would then pass or fail by machine and by order. The
+    pinned host sizes ``session_start_concurrency`` to 2, so the cold-start
+    queues get their historical 4 / 2. A test about sizing overrides this.
+
+    It also clears the runtime spawn width a ``SessionManager`` publishes for the
+    process, so a manager one test built does not size another test's admission.
+    """
+    from kiro_crew import cold_start_sizing, session_start_sizing
+
+    _floor_monkeypatch.setattr(cold_start_sizing, "_configured_runtime_spawn_width", None)
+
+    _floor_monkeypatch.setattr(
+        session_start_sizing,
+        "_host_cached",
+        session_start_sizing.HostCapacity(affinity_cpus=8, quota_cpus=None, cpus=8, available_gb=16.0),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _fresh_reexec_environment(_floor_monkeypatch):
     """Start every test with nothing kept for an exec successor.
 

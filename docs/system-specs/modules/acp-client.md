@@ -2018,7 +2018,19 @@ re-exports every name.
 
 Every `AcpRuntime.spawn()` enters one gateway-wide, event-loop-affine admission
 coordinator before subprocess preparation and holds the permit through
-`initialize`. It orders spawns by start priority; see § Session-start gate. The default cap is 2, matching worker-pool `max_starting`; this is
+`initialize`. It orders spawns by start priority; see § Session-start gate. The cap is
+`agent.runtime_spawn_concurrency` (`restart=True`): `"auto"` by default, which
+`cold_start_sizing` resolves to half the effective `session_start_concurrency`
+width, at least 2 and at most 8, so 8 once that width reaches 16; an integer is
+clamped to 1..32. `SessionManager.__init__` publishes it for the process
+(`cold_start_sizing.configure_runtime_spawn_width`) from the cached host reading
+only, so `auto` is the floor until that reading exists; the gateway's post-bind
+sizing task reads the host in a worker thread and then republishes it
+(`SessionManager.widen_cold_start_queues`). Every admission lookup grows the loop's
+admission to the published width (an int compare, never a shrink), so a spawn that
+ran before the manager published does not pin the loop at the floor. `spawn()`
+takes no await before admission, so concurrent spawns queue in arrival order. A process that built no manager (an embedder's, a
+test's) keeps `_COLD_START_MAX_CONCURRENT` (2). This is
 the common backstop for interactive, authoring, background, shared, and unpooled
 runtime callers, including callers that bypass `SessionManager` or a worker pool.
 The coordinator is keyed by event loop because a waiter's future is created on
@@ -2076,7 +2088,7 @@ titles take the user permits first and hold each one while they wait inside the
 starts.** Three in-process queues bound a start, and all three are one primitive,
 `kiro_crew.start_priority.PrioritySemaphore`: `SessionManager._start_sem` (cold
 starts, held across the provider's own spawn and `session/new` waits), the
-cold-start admission (`_COLD_START_MAX_CONCURRENT` spawns) and this gate
+cold-start admission (`agent.runtime_spawn_concurrency` spawns) and this gate
 (`agent.session_start_concurrency`, collector headroom unchanged). The rule is
 owned by the `kiro_crew.start_priority` module docstring; this section lists who
 applies it.
@@ -2132,7 +2144,7 @@ applies it.
 - **The outer reserve.** Ordering alone cannot help a person when every
   `_start_sem` permit belongs to a background start stuck behind a fan-out at an
   inner queue, so `_start_sem` carries `FOREGROUND_COLD_START_RESERVE` permits on
-  top of `MAX_CONCURRENT_COLD_STARTS` that only a FOREGROUND start may hold
+  top of the `agent.cold_start_concurrency` background width that only a FOREGROUND start may hold
   (`session_allocation.new_cold_start_semaphore`, which owns the rationale).
   Background keeps its full width; the first concurrent person start always gets
   an outer permit at once and then goes ahead at the inner queues; further

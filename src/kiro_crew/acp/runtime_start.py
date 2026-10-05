@@ -86,15 +86,30 @@ _cold_start_admissions_lock = threading.Lock()
 
 
 def _cold_start_admission() -> _ColdStartAdmission:
+    """The current loop's admission, at the configured width.
+
+    The width is ``agent.runtime_spawn_concurrency`` as the process's session
+    manager published it (``cold_start_sizing.configured_runtime_spawn_width``),
+    else :data:`_COLD_START_MAX_CONCURRENT` for a caller that built none. The
+    published width can grow once the gateway's post-bind host reading lands, so
+    every lookup widens an existing admission to it (an int compare; it never
+    shrinks). A spawn that ran before the manager published is therefore not
+    stuck at the default for the loop's lifetime.
+    """
     from kiro_crew.acp.runtime import weakref
+    from kiro_crew.cold_start_sizing import configured_runtime_spawn_width
 
     loop = asyncio.get_running_loop()
+    published = configured_runtime_spawn_width()
+    width = _COLD_START_MAX_CONCURRENT if published is None else published
     with _cold_start_admissions_lock:
         admission_ref = _cold_start_admissions.get(loop)
         admission = admission_ref() if admission_ref is not None else None
         if admission is None:
-            admission = _ColdStartAdmission(_COLD_START_MAX_CONCURRENT)
+            admission = _ColdStartAdmission(width)
             _cold_start_admissions[loop] = weakref.ref(admission)
+        elif width > admission.semaphore.limit:
+            admission.semaphore.widen_to(width)
         return admission
 
 

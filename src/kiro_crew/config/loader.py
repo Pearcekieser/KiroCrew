@@ -3026,12 +3026,14 @@ def _clamp_security_bounds(data: dict) -> None:
 # Compatibility facade: section DTOs remain importable from this module.
 
 
-def _session_start_concurrency(raw: object) -> int | str:
-    """``agent.session_start_concurrency``: ``"auto"`` or an int clamped to 1..64.
+def _session_start_concurrency(raw: object, ceiling: int = 64) -> int | str:
+    """A start width: ``"auto"`` or an int clamped to ``1..ceiling``.
 
-    Anything that is neither (a bool, a non-numeric string) falls back to the
-    ``"auto"`` default, as a junk value of any other int knob falls back to its
-    default.
+    ``agent.session_start_concurrency`` uses the default ceiling of 64;
+    ``agent.cold_start_concurrency`` and ``agent.runtime_spawn_concurrency`` pass
+    32. Anything that is neither (missing, a bool, a non-integral float, a
+    non-numeric string) falls back to the ``"auto"`` default, as a junk value of
+    any other int knob falls back to its default.
     """
     if _session_start_is_auto(raw) or isinstance(raw, bool):
         return _SESSION_START_AUTO
@@ -3041,7 +3043,7 @@ def _session_start_concurrency(raw: object) -> int | str:
         value = int(raw)  # type: ignore[call-overload]
     except (TypeError, ValueError, OverflowError):
         return _SESSION_START_AUTO
-    return max(1, min(64, value))
+    return max(1, min(ceiling, value))
 
 
 # Build each section in its own frame: the large inline constructor amplifies
@@ -3216,6 +3218,14 @@ def _build_agent_config(agent_data: dict) -> AgentConfig:
         # Env defaults for spawned kiro-cli children (acp/child_env_defaults.py).
         # Through the module alias: the loader's import list is a frozen snapshot.
         child_env_defaults=_sections.coerce_child_env_defaults(section.get("child_env_defaults")),
+        # Cold-start queues (session_allocation _start_sem, acp/runtime_start
+        # spawn admission); resolved by cold_start_sizing.
+        cold_start_concurrency=_session_start_concurrency(
+            agent_data.get("cold_start_concurrency"), ceiling=32
+        ),
+        runtime_spawn_concurrency=_session_start_concurrency(
+            agent_data.get("runtime_spawn_concurrency"), ceiling=32
+        ),
         # Adaptive controller (adaptive/policy.py params_from_config).
         adaptive_concurrency=section.read("adaptive_concurrency", _safe_bool),
         adaptive_concurrency_mode=(

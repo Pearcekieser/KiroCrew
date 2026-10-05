@@ -1191,3 +1191,57 @@ def test_a_recovery_respawn_starts_with_an_empty_queue_total():
     assert reset_fields and all(
         queue_total and mark for queue_total, mark in reset_fields
     ), "every site that (re)stamps _exec_started must clear the paused-clock fields"
+
+
+# --------------------------------------------------------------------------- #
+# widen_to: a bound sized after it was built
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_widen_to_hands_the_new_permits_to_queued_waiters() -> None:
+    sem = PrioritySemaphore(2, foreground_reserve=1)
+    await sem.acquire(StartPriority.BACKGROUND)
+    queued = [asyncio.ensure_future(sem.acquire(StartPriority.BACKGROUND)) for _ in range(3)]
+    await asyncio.sleep(0)
+    assert not any(t.done() for t in queued)  # background cap is 1
+
+    sem.widen_to(4)
+    await asyncio.sleep(0)
+
+    assert sum(t.done() for t in queued) == 2
+    assert sem.limit == 4
+    assert sem._background_cap == 3  # the reserve is still one permit
+    assert sem.locked(StartPriority.BACKGROUND)
+    assert not sem.locked(StartPriority.FOREGROUND)
+    for t in queued:
+        t.cancel()
+    await asyncio.gather(*queued, return_exceptions=True)
+
+
+def test_widen_to_never_shrinks() -> None:
+    sem = PrioritySemaphore(5)
+    sem.widen_to(3)
+    sem.widen_to(5)
+    assert sem.limit == 5
+    assert sem._value == 5
+
+
+@pytest.mark.asyncio
+async def test_a_pending_drain_waits_for_the_widened_total() -> None:
+    sem = PrioritySemaphore(2)
+    await sem.acquire(StartPriority.BACKGROUND)
+    entered = asyncio.Event()
+    leave = asyncio.Event()
+    task = asyncio.ensure_future(_drain_until(sem, entered, leave))
+    await asyncio.sleep(0)
+    sem.widen_to(4)
+    await asyncio.sleep(0)
+    assert not entered.is_set()  # the holder is still inside
+    assert sem._drain_held == 3
+    sem.release(StartPriority.BACKGROUND)
+    await asyncio.wait_for(entered.wait(), 5)
+    assert sem._drain_held == 4
+    leave.set()
+    await asyncio.wait_for(task, 5)
+    assert sem._value == 4

@@ -133,6 +133,7 @@ def _doctor_overload_resilience(cfg: KiroCrewConfig) -> None:
     mechanism is configured to (so a stuck queue can be read against its
     budget) and which liveness evidence this host's platform provides.
     """
+    from kiro_crew.cold_start_sizing import describe_cold_start_limits
     from kiro_crew.recovery.ladder import configure_default_ladder
     from kiro_crew.session_start_sizing import resolve_session_start_sizing
 
@@ -150,6 +151,7 @@ def _doctor_overload_resilience(cfg: KiroCrewConfig) -> None:
     print(
         "  admission: session_start_concurrency="
         f"{start_width} "
+        f"{describe_cold_start_limits(agent)} "
         f"spawn_gate={gw.spawn_concurrency_initial} "
         f"[{gw.spawn_concurrency_min}..{gw.spawn_concurrency_max}] "
         f"queue_wait={gw.spawn_queue_wait_secs}s "

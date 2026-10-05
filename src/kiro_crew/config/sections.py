@@ -1511,6 +1511,33 @@ class AgentConfig:
             "next spawn.",
         ),
     )
+    cold_start_concurrency: int | str = field(
+        default="auto",
+        metadata=_meta(
+            "Session Cold-Start Concurrency",
+            "How many sessions one session manager may cold-start at once. Each "
+            "start holds its permit from runtime spawn until its MCP servers have "
+            "reported, so a burst of starts beyond this bound queues. A person's "
+            'start also has one reserved permit on top. "auto" (the default) '
+            "follows the session start concurrency: at least 4, at most 16, so 16 "
+            "once that concurrency is 16. An integer is clamped to 1..32. Read when the "
+            "session manager is built; a later host reading can widen it, never narrow it.",
+            restart=True,
+        ),
+    )
+    runtime_spawn_concurrency: int | str = field(
+        default="auto",
+        metadata=_meta(
+            "Runtime Spawn Concurrency",
+            "How many ACP runtime processes may be in spawn + initialize at once "
+            'per gateway event loop. "auto" (the default) is half the session '
+            "start concurrency: at least 2, at most 8, so 8 once that concurrency "
+            "is 16. An "
+            "integer is clamped to 1..32. Read when the loop's first runtime "
+            "spawns; a later host reading can widen it, never narrow it.",
+            restart=True,
+        ),
+    )
     adaptive_concurrency: bool = field(
         default=True,
         metadata=_meta(

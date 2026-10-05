@@ -135,6 +135,10 @@ from kiro_crew.agent_sdk.backend_identity import is_claude_backend_name
 from kiro_crew.agent_sdk.backends import model_registry_namespace
 from kiro_crew.agent_sdk.drivers.acp import resolve_pin_spelling_on
 from kiro_crew.agent_spec_format import iter_agent_spec_files
+from kiro_crew.cold_start_sizing import (
+    cached_cold_start_concurrency,
+    configure_runtime_spawn_width,
+)
 from kiro_crew.config import KiroCrewConfig, live
 from kiro_crew.config.live import ConfigChange
 from kiro_crew.config.loader import (
@@ -186,8 +190,12 @@ from kiro_crew.session_allocation import (  # noqa: F401
 )
 from kiro_crew.session_allocation import (
     _collect_parent_runtime_kwargs,
+    new_cold_start_semaphore,
 )
 from kiro_crew.session_allocation import parent_work_scratch_dir as _parent_work_scratch_dir
+from kiro_crew.session_allocation import (
+    widen_cold_start_semaphore,
+)
 from kiro_crew.session_background import (
     BackgroundRuntimeDeps,
     BackgroundSessionRuntime,
@@ -1965,7 +1973,16 @@ class SessionManager:
         # Installed by the gateway once it owns this manager (set_injection_probe);
         # None means "no gateway, so no completion injection can be in flight".
         self._injection_probe: "Callable[[str], bool] | None" = None
-        self._allocation_state = SessionRegistryState()
+        # Both cold-start widths are restart settings. Built on the gateway boot
+        # path and the event loop, so "auto" is sized from the cached host
+        # reading only (the floors until it exists); widen_cold_start_queues
+        # grows both once the gateway's post-bind sizing has read the host.
+        configure_runtime_spawn_width(getattr(cfg, "agent", None))
+        self._allocation_state = SessionRegistryState(
+            start_sem=new_cold_start_semaphore(
+                cached_cold_start_concurrency(getattr(cfg, "agent", None))
+            )
+        )
         self._allocation_boundary()
         self._lifecycle_state = SessionLifecycleState()
         self._compaction_state = CompactionState()
@@ -3007,6 +3024,19 @@ class SessionManager:
         if probe is None:
             return False
         return probe(key)
+
+    def widen_cold_start_queues(self) -> None:
+        """Grow both cold-start queues to the widths the cached host reading gives.
+
+        The gateway calls this on the loop after its post-bind sizing task has
+        read the host, so for ``"auto"`` the manager's ``_start_sem`` and the
+        published runtime spawn width move from their floors to the host-sized
+        widths without a probe here. An explicit integer is already at its
+        width, so this is a no-op for it. Never shrinks a queue.
+        """
+        agent = getattr(self._cfg, "agent", None)
+        configure_runtime_spawn_width(agent)
+        widen_cold_start_semaphore(self._start_sem, cached_cold_start_concurrency(agent))
 
     def set_injection_probe(self, fn: "Callable[[str], bool] | None") -> None:
         """Install the "is a completion injection in flight for *key*?" predicate.
