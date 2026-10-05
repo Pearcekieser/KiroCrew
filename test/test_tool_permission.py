@@ -296,6 +296,26 @@ async def test_a_host_refusal_is_narrated_then_audited_then_steered_then_rejecte
 
 
 @pytest.mark.asyncio
+async def test_settle_judges_the_gate_on_the_tool_gate_pool_not_the_loop():
+    """The gate's path tier waits on the resolver child on the calling thread, so
+    settle must not run it on the event loop's thread."""
+    import threading
+
+    log: list = []
+    seen: list[str] = []
+
+    class _Recording(Judges):
+        def judge(self, ask: Ask) -> Refusal | Hit | None:
+            seen.append(threading.current_thread().name)
+            return super().judge(ask)
+
+    policy = _policy(log, gate=_Recording(log, Refusal.host("hook_deny", "denied: rm", "policy")))
+    settled = await settle(Ask(_event(), RecordingWire(log), "k"), policy)
+    assert settled.rung == "hook_deny"
+    assert seen and seen[0].startswith("mc-toolgate"), seen
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("policy_kw", "rung", "outcome"),
     [

@@ -84,7 +84,7 @@ from kiro_crew.dashboard.chat_utils import (  # noqa: F401 - read by the owners
 )
 from kiro_crew.dashboard.state import append_and_surface  # noqa: F401 - read by the owners
 from kiro_crew.deny_notice import steer_refusal_notice
-from kiro_crew.executors import run_in_embed_pool
+from kiro_crew.executors import run_in_embed_pool, run_in_tool_gate_pool
 from kiro_crew.history import (  # noqa: F401 - read by the owners
     HUMAN_TURN_META_KEY,
     ConversationLog,
@@ -1766,7 +1766,8 @@ async def handle_message(
                 # match still surfaces a (best-effort, non-enforcing) warning +
                 # audit.
                 if context_builder:
-                    tool_result = context_builder.hooks.on_tool_call(
+                    tool_result = await run_in_tool_gate_pool(
+                        context_builder.hooks.on_tool_call,
                         event.title,
                         session_key=session_key,
                         agent=_agent or "",
@@ -1806,7 +1807,8 @@ async def handle_message(
             elif event.kind == EVENT_PERMISSION_REQUEST:
                 # Check tool hooks for auto-approve
                 if context_builder:
-                    tool_result = context_builder.hooks.on_tool_call(
+                    tool_result = await run_in_tool_gate_pool(
+                        context_builder.hooks.on_tool_call,
                         event.title,
                         session_key=session_key,
                         agent=_agent or "",

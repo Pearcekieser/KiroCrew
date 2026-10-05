@@ -1560,7 +1560,8 @@ _STAYS_IN_THE_RUNNER = (
     r"except AcpProcessDied",
     r"\.recent\(",
     r"warm_project_agent_names\(",
-    r"\.on_tool_call\(",
+    # The tool-gate consultation: the sync call, or the awaitable form a coroutine uses.
+    r"\.on_tool_call\(|run_in_tool_gate_pool\(\s*[\w.]+\.on_tool_call,",
     r"spawn_guarded_turn\(",
     r"create_task\(",
     r"ensure_future\(",

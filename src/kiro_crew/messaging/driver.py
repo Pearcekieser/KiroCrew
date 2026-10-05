@@ -49,6 +49,7 @@ from kiro_crew.constants import (
     STEER_NOTICE_BOUND_SECS,
 )
 from kiro_crew.deny_notice import steer_refusal_notice
+from kiro_crew.executors import run_in_tool_gate_pool
 from kiro_crew.messaging.empty_turn_copy import (
     EMPTY_TURN_NOTICE,
     EMPTY_TURN_NOTICE_AFTER_WORK,
@@ -792,7 +793,12 @@ class TurnDriver:
                 # overridden by auto-approve, per-session Trust, or YOLO
                 # (mirrors native handle_message's hooks.on_tool_call gate).
                 if self.tool_gate is not None:
-                    _gate = self.tool_gate(event)
+                    # Off the loop: the gate is ``hooks.on_tool_call``, whose path
+                    # tier waits on the resolver child (see
+                    # ``executors.run_in_tool_gate_pool``), on the dedicated
+                    # ``mc-toolgate`` pool. Same verdict, and the gate's
+                    # ``last_deny_reason`` is read only after it returns.
+                    _gate = await run_in_tool_gate_pool(self.tool_gate, event)
                     if _gate == "deny":
                         sel().log_api_access(
                             caller="turn_driver",

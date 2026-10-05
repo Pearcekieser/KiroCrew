@@ -62,6 +62,7 @@ from typing import Any, ClassVar, Literal, Protocol
 
 from kiro_crew import name_grant
 from kiro_crew.constants import DENY_CAUSE_POLICY
+from kiro_crew.executors import run_in_tool_gate_pool
 from kiro_crew.hooks import TOOL_AUTO_APPROVE, TOOL_DENY, identity_grant_covers_child
 from kiro_crew.llm_helpers import _steer_host_deny
 from kiro_crew.permission_floor import OUTCOME_REJECTED_TRANSPORT_FLOOR
@@ -386,7 +387,10 @@ async def settle(ask: Ask, policy: Policy) -> Settled:
         refusal = await floor.refuse(ask)
         if refusal is not None:
             return await _refuse(ask, policy, refusal)
-    verdict = policy.gate.judge(ask)
+    # The gate's path tier waits on the mc-pathres resolver on the calling
+    # thread; run it on the tool-gate pool so a slow resolution parks a gate
+    # worker, not the event loop.
+    verdict = await run_in_tool_gate_pool(policy.gate.judge, ask)
     if isinstance(verdict, Refusal):
         return await _refuse(ask, policy, verdict)
     low = _low_fidelity(ask, policy)

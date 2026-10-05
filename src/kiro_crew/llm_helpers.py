@@ -32,6 +32,7 @@ from kiro_crew.constants import (
 )
 from kiro_crew.credential_errors import is_credential_propagation_delay
 from kiro_crew.deny_notice import steer_refusal_notice
+from kiro_crew.executors import run_in_tool_gate_pool
 from kiro_crew.hooks import (
     _EDIT_TOOL_KIND,
     _normalize_tool_name,
@@ -3170,7 +3171,8 @@ async def _resolve_permission(
             return False
 
     if policy in (ToolApprovalPolicy.HOOK_BASED, ToolApprovalPolicy.READ_ONLY) and hooks:
-        tool_result = hooks.on_tool_call(
+        tool_result = await run_in_tool_gate_pool(
+            hooks.on_tool_call,
             event.title,
             session_key=session_key,
             agent=agent,

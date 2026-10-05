@@ -767,7 +767,8 @@ class TestHookGateKwargs:
         """Yield ``(line, call_text)`` for every gate consultation in ``text``.
 
         The recognised consultation shape is an ASSIGNMENT
-        (``result = ...hooks.on_tool_call(`` or ``result = ...hooks.judge(``):
+        (``result = ...hooks.on_tool_call(`` or ``result = ...hooks.judge(``, or
+        their awaitable form ``result = await run_in_tool_gate_pool(hooks.on_tool_call, ...``):
         every gate consultation reads the verdict's ``.action``, so every one
         binds the result. The renderers' unrelated ``on_tool_call`` handler
         (``await self.on_tool_call(``) and docstring mentions are not
@@ -777,7 +778,11 @@ class TestHookGateKwargs:
         """
         import re
 
-        for match in re.finditer(r"=\s*[\w.]+\.(?:on_tool_call|judge)\(", text):
+        for match in re.finditer(
+            r"=\s*(?:[\w.]+\.(?:on_tool_call|judge)\("
+            r"|await\s+run_in_tool_gate_pool\(\s*[\w.]+\.(?:on_tool_call|judge),)",
+            text,
+        ):
             depth, i = 1, match.end()
             while i < len(text) and depth:
                 depth += {"(": 1, ")": -1}.get(text[i], 0)
@@ -787,14 +792,23 @@ class TestHookGateKwargs:
             yield text.count("\n", 0, match.start()) + 1, call
 
     @staticmethod
-    def _is_judge_site(call: str) -> bool:
-        """Whether a scanned consultation is the typed ``judge`` form."""
-        return call.split("(", 1)[0].endswith(".judge")
+    def _callee(call: str) -> str:
+        """The gate method a scanned consultation calls: the called expression,
+        or the first argument of the ``run_in_tool_gate_pool(...)`` form."""
+        head, _, rest = call.partition("(")
+        if head.lstrip("=").strip().startswith("await"):
+            return rest.split(",", 1)[0].strip()
+        return head.lstrip("=").strip()
 
-    @staticmethod
-    def _judge_receiver(call: str) -> str:
+    @classmethod
+    def _is_judge_site(cls, call: str) -> bool:
+        """Whether a scanned consultation is the typed ``judge`` form."""
+        return cls._callee(call).endswith(".judge")
+
+    @classmethod
+    def _judge_receiver(cls, call: str) -> str:
         """The expression a scanned ``judge`` site calls the method on."""
-        return call.split("(", 1)[0].lstrip("=").strip().removesuffix(".judge")
+        return cls._callee(call).removesuffix(".judge")
 
     #: The ``ToolCall`` field each pinned ``hook_gate_kwargs`` override sets.
     FIELD_BY_OVERRIDE = {"tool_kind": "kind", "command": "command", "is_shell": "is_shell"}
@@ -875,7 +889,8 @@ class TestHookGateKwargs:
         assert not self._is_judge_site(call)
         # The pinned non-gate site is matched by its receiver, not by its module.
         (_, port), (_, hooks_site) = self._gate_calls(
-            "v = policy.gate.judge(ask)\nr = self.hooks.judge(call, session_key=k)"
+            "v = await run_in_tool_gate_pool(policy.gate.judge, ask)\n"
+            "r = self.hooks.judge(call, session_key=k)"
         )
         assert ("tool_permission.py", self._judge_receiver(port)) in self.NOT_HOOK_JUDGE_SITES
         assert ("tool_permission.py", self._judge_receiver(hooks_site)) not in (

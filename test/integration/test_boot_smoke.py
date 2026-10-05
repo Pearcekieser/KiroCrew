@@ -477,6 +477,7 @@ _KNOWN_SECOND_BOOT_CHANGES: dict[tuple[str, str], str] = {
     ("kiro_crew.executors", "_stt_pool"): "lazy thread pool",
     ("kiro_crew.executors", "_governance_pool"): "lazy thread pool",
     ("kiro_crew.executors", "_cron_gate_pool"): "lazy thread pool",
+    ("kiro_crew.executors", "_tool_gate_pool"): "lazy thread pool",
     ("kiro_crew.executors", "_path_resolve_pool"): "lazy thread pool",
     ("kiro_crew.executors", "_path_probe_pool"): "lazy thread pool",
     ("kiro_crew.executors", "_path_transfer_pool"): "lazy thread pool",

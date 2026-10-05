@@ -432,7 +432,7 @@ from kiro_crew.execution_context import (  # noqa: F401
     stricter_memory_mode,
     tighten_live_session_execution,
 )
-from kiro_crew.executors import run_in_embed_pool, subprocess_executor
+from kiro_crew.executors import run_in_embed_pool, run_in_tool_gate_pool, subprocess_executor
 from kiro_crew.history import HUMAN_TURN_META_KEY
 from kiro_crew.hooks import (  # noqa: F401
     HOOK_EVENT_AGENT_SPAWN,
@@ -13086,7 +13086,8 @@ async def _run_chat(
                     # so the security gate evaluates what actually executes.
                     # event.title may be an LLM-authored description that hides
                     # a dangerous command (see HookManager.on_tool_call).
-                    tool_result = state.context_builder.hooks.on_tool_call(
+                    tool_result = await run_in_tool_gate_pool(
+                        state.context_builder.hooks.on_tool_call,
                         event.title,
                         session_key=session_key,
                         agent=slot.agent or "",

@@ -466,6 +466,9 @@ def world(monkeypatch: pytest.MonkeyPatch, tmp_path):
     }.items():
         monkeypatch.setattr(handler, name, value)
     monkeypatch.setattr(asyncio, "to_thread", _inline)
+    # The tool gate hops onto its own pool rather than through to_thread; the same
+    # in-place run keeps the transcript order a property of the code.
+    monkeypatch.setattr(handler, "run_in_tool_gate_pool", _inline)
     handler._trusted_sessions.clear()
     log.monkeypatch = monkeypatch  # type: ignore[attr-defined]
     yield log
@@ -2544,7 +2547,10 @@ def test_the_facade_still_carries_what_the_source_guards_read() -> None:
     assert _calls_in("handle_interaction", "approve_tool") == 1  # test_transport_permission_floor
     assert source.count(".reject_tool(") == 4  # test_messaging_deny_notice
     assert source.count("await _steer_host_deny(") == 2  # test_messaging_deny_notice
-    assert source.count("context_builder.hooks.on_tool_call(") == 2  # test_hooks
+    gate_calls = re.findall(
+        r"await run_in_tool_gate_pool\(\s*context_builder\.hooks\.on_tool_call,", source
+    )
+    assert len(gate_calls) == 2  # test_hooks
     assert "**hook_gate_kwargs(event)" in source  # test_hooks
     for needle in (
         "turn_ceiling.gate(",  # test_turn_ceiling

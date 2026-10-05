@@ -1609,8 +1609,18 @@ class TestDispatchThreadsGovernanceIdentity:
             node
             for node in ast.walk(tree)
             if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "on_tool_call"
+            and (
+                (isinstance(node.func, ast.Attribute) and node.func.attr == "on_tool_call")
+                # The awaitable form a coroutine uses:
+                # ``await run_in_tool_gate_pool(hooks.on_tool_call, ...)``.
+                or (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "run_in_tool_gate_pool"
+                    and bool(node.args)
+                    and isinstance(node.args[0], ast.Attribute)
+                    and node.args[0].attr == "on_tool_call"
+                )
+            )
         ]
         assert calls, "llm_helpers no longer calls hooks.on_tool_call"
         for call in calls:
