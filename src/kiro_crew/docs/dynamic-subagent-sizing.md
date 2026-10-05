@@ -245,7 +245,8 @@ value somewhere worse, and the operator's real lever already exists:
 Time spent WAITING FOR A PERMIT is not charged to the startup deadline, on
 either start path. A start can queue at three places: the session manager's
 cold-start semaphore, the gateway's spawn admission, and the ACP
-`SessionStartGate` (`agent.session_start_concurrency`) around `session/new`.
+`SessionStartGate` (`agent.session_start_concurrency`, default `auto`: 2..16
+sized from the host) around `session/new`.
 Each fires two callbacks around its wait: `on_gate_queued` immediately before
 the wait begins, and `on_gate_acquired` when the permit is granted, with the
 wait and the queue's name. The manager's `_gate_wait_mark` stamps

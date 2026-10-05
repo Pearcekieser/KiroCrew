@@ -427,6 +427,8 @@ from kiro_crew.memory_stores import (
     DEFAULT_MEMORY_STORE,
     memory_store_name_defect,
 )
+from kiro_crew.session_start_sizing import AUTO as _SESSION_START_AUTO
+from kiro_crew.session_start_sizing import is_auto as _session_start_is_auto
 from kiro_crew.stt.limits import (  # noqa: F401
     DEFAULT_IDLE_EVICT_SECS as _STT_DEFAULT_IDLE_EVICT_SECS,
 )
@@ -2968,6 +2970,24 @@ def _clamp_security_bounds(data: dict) -> None:
 # Compatibility facade: section DTOs remain importable from this module.
 
 
+def _session_start_concurrency(raw: object) -> int | str:
+    """``agent.session_start_concurrency``: ``"auto"`` or an int clamped to 1..64.
+
+    Anything that is neither (a bool, a non-numeric string) falls back to the
+    ``"auto"`` default, as a junk value of any other int knob falls back to its
+    default.
+    """
+    if _session_start_is_auto(raw) or isinstance(raw, bool):
+        return _SESSION_START_AUTO
+    if isinstance(raw, float) and not raw.is_integer():
+        return _SESSION_START_AUTO
+    try:
+        value = int(raw)  # type: ignore[call-overload]
+    except (TypeError, ValueError, OverflowError):
+        return _SESSION_START_AUTO
+    return max(1, min(64, value))
+
+
 # Build each section in its own frame: the large inline constructor amplifies
 # line-tracing cost on every load. These helpers create fresh values, never
 # cache configuration, and leave resolution and admission checks unchanged.
@@ -3132,7 +3152,11 @@ def _build_agent_config(agent_data: dict) -> AgentConfig:
             "recovery_backoff_max_secs", _safe_float, 1.0, 3600.0
         ),
         # Session-start gate (acp/runtime_start.py SessionStartGate).
-        session_start_concurrency=section.read("session_start_concurrency", _safe_int, 1, 64),
+        # "auto" (default) is sized from the host once per process by
+        # session_start_sizing; an explicit integer keeps the 1..64 clamp.
+        session_start_concurrency=_session_start_concurrency(
+            agent_data.get("session_start_concurrency", "auto")
+        ),
         # Adaptive controller (adaptive/policy.py params_from_config).
         adaptive_concurrency=section.read("adaptive_concurrency", _safe_bool),
         adaptive_concurrency_mode=(

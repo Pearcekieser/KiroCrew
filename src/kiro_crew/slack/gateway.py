@@ -372,6 +372,7 @@ from kiro_crew.session import (
     SessionClosingError,
     SessionManager,
 )
+from kiro_crew.session_start_sizing import resolve_session_start_sizing
 from kiro_crew.skills import SkillsLoader
 from kiro_crew.slack import gateway_runtime as _runtime
 from kiro_crew.slack.client import RealSlackClient
@@ -8778,6 +8779,35 @@ class GatewayOrchestrator:
             )
         return self._subagent_coalescer_inst
 
+    def _schedule_session_start_sizing(self) -> None:
+        """Run :meth:`_log_session_start_sizing` as a tracked background task.
+
+        Called after the dashboard/API socket binds, so the host probe never
+        delays READY (AUTOSDE ``no-new-work-on-gateway-boot-path``).
+        """
+        task = asyncio.create_task(self._log_session_start_sizing())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _log_session_start_sizing(self) -> None:
+        """Size ``agent.session_start_concurrency`` off the loop and log it.
+
+        The setting is ``restart=True`` and ``"auto"`` reads the host (affinity,
+        cgroup ``cpu.max`` files, the memory probe) once per process. Doing it
+        here, in a worker thread scheduled right after the socket binds, keeps
+        that file I/O off the event loop and off the boot path: the subagent
+        manager and the SessionStartGate resolve the width lazily and then hit
+        the per-process cache. The log line is the record of the width the
+        running gateway's gate uses.
+        """
+        try:
+            sizing = await asyncio.to_thread(
+                resolve_session_start_sizing, self._cfg.agent.session_start_concurrency
+            )
+            logger.info("Session start concurrency: %s", sizing.describe())
+        except Exception:
+            logger.warning("Session start concurrency sizing failed", exc_info=True)
+
     def _init_subagents(self) -> None:
         """Initialize the subagent manager."""
         from kiro_crew.recovery.ladder import configure_default_ladder
@@ -12941,6 +12971,10 @@ class GatewayOrchestrator:
         # full pip timeout to repair, so track that work without delaying READY.
         # The task itself catches and logs failures; startup remains available.
         self._schedule_console_script_repair()
+        # Size agent.session_start_concurrency ("auto" reads the host) after
+        # the bind, as a tracked background task: nothing before READY needs
+        # the width, and readers resolve it lazily from the same cache.
+        self._schedule_session_start_sizing()
 
         # Record this gateway's own kirocrew launcher, keyed by the port it
         # serves, so a remote token-mint execs THIS install's venv instead of

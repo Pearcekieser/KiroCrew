@@ -161,6 +161,7 @@ from kiro_crew.session import (  # noqa: F401 - child_process_helpers resolved b
     SessionManager,
     child_process_helpers,
 )
+from kiro_crew.session_start_sizing import cached_session_start_concurrency
 from kiro_crew.session_surface import has_dashboard_surface
 from kiro_crew.session_workspace import result_path as _ws_result_path
 from kiro_crew.slack.format import extract_options
@@ -3764,12 +3765,20 @@ class SubagentManager:
         # re-read by ``apply_limits``: the SessionStartGate it sizes is fixed
         # for the loop's lifetime, and the derived bound must track the gate
         # that exists, not a value nothing is serving yet.
+        # The manager is built on the gateway boot path and ``_startup_cap`` runs
+        # on the event loop, so neither may probe the host for ``"auto"``. The
+        # configured value is captured here (the same config read this block
+        # always made); ``_startup_cap`` sizes it from the cached host reading
+        # the gateway takes in a worker thread after the socket binds, and uses
+        # the floor until that reading exists. ``_session_start_concurrency``
+        # stays None unless a test pins a width.
         try:
-            self._session_start_concurrency = max(
-                1, int(KiroCrewConfig.load().agent.session_start_concurrency)
+            self._session_start_configured: object = (
+                KiroCrewConfig.load().agent.session_start_concurrency
             )
         except Exception:
-            self._session_start_concurrency = 2
+            self._session_start_configured = 2
+        self._session_start_concurrency: int | None = None
         # ClaimPoint reservations not yet registered as a SubagentInfo; counted
         # by ``_startup_population`` (see there). +1 at reserve, -1 on the
         # re-entry that registers or on ``release_reservation``.
@@ -4655,8 +4664,17 @@ class SubagentManager:
         cap, not this bound, is what pauses admission there.
         """
         cap = max(0, int(self._max_concurrent))
-        bound = _STARTUP_CAP_GATE_ROUNDS * int(self._session_start_concurrency)
+        bound = _STARTUP_CAP_GATE_ROUNDS * self._resolved_session_start_width()
         return max(1, min(bound, cap))
+
+    def _resolved_session_start_width(self) -> int:
+        """The session-start gate width as an in-memory read (no probe, no lock)."""
+        if self._session_start_concurrency is not None:
+            return int(self._session_start_concurrency)
+        try:
+            return max(1, cached_session_start_concurrency(self._session_start_configured))
+        except Exception:
+            return 2
 
     def _note_startup_progress(self, info: SubagentInfo) -> None:
         """Wake the spawn queue when *info* leaves startup without ending.

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from kiro_crew.acp.types import JsonRpcMessage
 from kiro_crew.config import live
+from kiro_crew.session_start_sizing import effective_session_start_concurrency
 from kiro_crew.start_priority import PrioritySemaphore, StartPriority
 
 if TYPE_CHECKING:
@@ -111,7 +112,8 @@ def _cold_start_counts() -> tuple[int, int]:
 # burst of subagent starts every session/new competes for the same process,
 # each one gets slower, and the 90s budget is hit by requests that would have
 # completed in isolation -- a timeout that says nothing about the runtime's
-# health. The gate keeps at most ``agent.session_start_concurrency`` (default 2)
+# health. The gate keeps at most ``agent.session_start_concurrency`` (default
+# ``auto``: sized once per process from the host by ``session_start_sizing``)
 # session/new requests outstanding per event loop; waiters are ordered by
 # ``StartPriority`` (rule: ``kiro_crew.start_priority``).
 # It is a FIXED semaphore on purpose: the adaptive loop lives in the gatewayd
@@ -152,7 +154,10 @@ def _resolve_session_start_concurrency() -> int:
         from kiro_crew.config import KiroCrewConfig
 
         cfg = KiroCrewConfig.load()
-        return max(_SESSION_START_CONCURRENCY_FLOOR, int(cfg.agent.session_start_concurrency))
+        return max(
+            _SESSION_START_CONCURRENCY_FLOOR,
+            effective_session_start_concurrency(cfg.agent.session_start_concurrency),
+        )
     except Exception:
         logger.debug("session_start_concurrency unreadable -- using default", exc_info=True)
         return _SESSION_START_CONCURRENCY_DEFAULT
@@ -310,8 +315,11 @@ async def session_start_gate() -> SessionStartGate:
     snap = live.snapshot()
     limit: int | None = None
     if snap is not None:
+        # An explicit integer is used as is; "auto" needs the host probe (disk
+        # I/O), so it falls through to the off-loop resolver below.
         try:
-            limit = int(snap.agent.session_start_concurrency)
+            raw = snap.agent.session_start_concurrency
+            limit = None if isinstance(raw, str) else int(raw)
         except Exception:
             limit = None
     if limit is None:

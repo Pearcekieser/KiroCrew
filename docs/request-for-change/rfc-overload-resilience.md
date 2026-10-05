@@ -322,7 +322,8 @@ degrades to a per-session exec on every stub version.
 ### 4.4 Session-start gate with tracked ownership
 
 `SessionStartGate` (gateway process, `taskq/scheduler.py`): fixed semaphore
-`agent.session_start_concurrency` (default 2, separate from
+`agent.session_start_concurrency` (default `auto`: sized once at gateway start
+from cores and available memory, 2..16; separate from
 `_COLD_START_MAX_CONCURRENT`, which stays for runtime spawn+`initialize`).
 Acquired after `HostBudget`, before `AcpRuntime.create_session`. The gate is
 **not** adaptive — the adaptive loop is the gatewayd `SpawnGate` plus the

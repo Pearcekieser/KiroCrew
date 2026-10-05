@@ -2043,8 +2043,13 @@ Cold-start admission bounds runtime spawn + `initialize`. The **session-start
 gate** bounds the other expensive start: `session/new` on an already-running
 runtime, which blocks while the backend initializes the session's MCP servers.
 `AcpRuntime.create_session` acquires the current loop's `SessionStartGate`
-(`agent.session_start_concurrency`, default 2, FIFO within a start priority,
-sized once per loop from config; `restart=True`) BEFORE `session/new` goes on
+(`agent.session_start_concurrency`, default `auto`, FIFO within a start priority,
+sized once per loop from config; `restart=True`; `auto` resolves once per process in
+`kiro_crew/session_start_sizing.py` to `clamp(min(cpus // 4, available_GB // 3), 2, 16)`,
+with cpus the affinity count capped by a cgroup v2 `cpu.max` quota and memory from the
+`resource_status` probe; the gateway resolves it in a worker thread at boot and logs the
+value in force with its inputs, and `kirocrew doctor` prints what `auto` picks for the
+host at the time it runs; an explicit integer wins) BEFORE `session/new` goes on
 the wire and releases it as soon as the answer arrives. The gate is a FIXED semaphore: the adaptive
 loop is the gatewayd spawn gate plus the execution-cap controller, and two
 adapting loops on one resource oscillate. It is one gate for every harness

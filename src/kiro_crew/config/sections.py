@@ -1415,8 +1415,8 @@ class AgentConfig:
             restart=True,
         ),
     )
-    session_start_concurrency: int = field(
-        default=2,
+    session_start_concurrency: int | str = field(
+        default="auto",
         metadata=_meta(
             "Session Start Concurrency",
             "How many ACP session/new requests may be outstanding at once per "
@@ -1430,7 +1430,12 @@ class AgentConfig:
             "or the startup deadline, but a subagent start that stays queued past "
             "the start-queue cap ends as never started, unless its subagent "
             "timeout ends it first. A fixed bound, not adaptive: the adaptive loop is the MCP gateway spawn "
-            "gate and the execution-cap controller. Clamped to 1..64.",
+            'gate and the execution-cap controller. "auto" (the default) sizes it '
+            "once at gateway start as min(cpus // 4, available GB // 3) clamped to "
+            "2..16, with cpus the affinity count capped by a cgroup cpu.max quota; "
+            "the gateway logs the value in force at boot, and kirocrew doctor "
+            "shows what auto picks for the host now. An integer sets it "
+            "explicitly, clamped to 1..64.",
             restart=True,
         ),
     )

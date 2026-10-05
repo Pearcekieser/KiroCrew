@@ -134,12 +134,22 @@ def _doctor_overload_resilience(cfg: KiroCrewConfig) -> None:
     budget) and which liveness evidence this host's platform provides.
     """
     from kiro_crew.recovery.ladder import configure_default_ladder
+    from kiro_crew.session_start_sizing import resolve_session_start_sizing
 
     agent = cfg.agent
     gw = cfg.mcp_gateway
+    # Doctor is its own process: "auto" here is what this host sizes to NOW. The
+    # width a running gateway's gate uses is its boot log line.
+    try:
+        sizing = resolve_session_start_sizing(agent.session_start_concurrency)
+        start_width = sizing.describe()
+        if sizing.host is not None:
+            start_width += " [probed now; running gateway: boot log]"
+    except Exception:
+        start_width = f"{agent.session_start_concurrency} (unresolved)"
     print(
         "  admission: session_start_concurrency="
-        f"{agent.session_start_concurrency} "
+        f"{start_width} "
         f"spawn_gate={gw.spawn_concurrency_initial} "
         f"[{gw.spawn_concurrency_min}..{gw.spawn_concurrency_max}] "
         f"queue_wait={gw.spawn_queue_wait_secs}s "
