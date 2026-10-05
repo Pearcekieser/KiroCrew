@@ -924,6 +924,24 @@ def _delivery_key(content: str) -> str:
 # Slot-list broadcast coalescing window. The sub-agent slots debouncer in
 # slack/gateway.py hardcodes the same value independently; the two are not shared.
 _SLOTS_BROADCAST_INTERVAL_S: float = 0.2
+# The window above is a FLOOR. Every broadcast re-sends the whole list (~1.5 KB a
+# slot), so with a fixed window the bytes each dashboard socket receives grow with
+# both the list size and the push rate. After each broadcast the next window is
+# stretched to ``frame bytes / budget`` so a sustained burst costs each socket about
+# this many bytes a second, whatever the list size. A small list stays on the floor
+# (a 25-slot frame is ~38 KB, 0.15 s at this budget); the ceiling bounds how stale
+# the sidebar may run at the slot cap. The leading edge after an idle window is
+# still immediate, and the trailing flush still re-serializes at delivery time.
+_SLOTS_BROADCAST_BYTES_PER_S: int = 256 * 1024
+_SLOTS_BROADCAST_MAX_INTERVAL_S: float = 2.0
+
+
+def _slots_broadcast_interval_for(frame_bytes: int) -> float:
+    """Coalescing window that keeps one socket's slot-list bytes near the budget."""
+    stretched = frame_bytes / _SLOTS_BROADCAST_BYTES_PER_S
+    return min(_SLOTS_BROADCAST_MAX_INTERVAL_S, max(_SLOTS_BROADCAST_INTERVAL_S, stretched))
+
+
 # A successful plain persistent-memory create hands its full-list publication past
 # the HTTP response by this fixed interval. Callers may name the operation only.
 _DEFERRED_SLOTS_FLUSH_DELAY_S: float = 0.01
@@ -5742,6 +5760,9 @@ class DashboardState:
     _slots_broadcast_lock: "threading.Lock | None" = None
     _slots_broadcast_timer: "asyncio.TimerHandle | None" = None
     _slots_broadcast_last: float = 0.0
+    # Current coalescing window, sized from the last broadcast's frame (see
+    # ``_slots_broadcast_interval_for``). Written and read under the lock.
+    _slots_broadcast_interval: float = _SLOTS_BROADCAST_INTERVAL_S
     # Who the next coalesced slots broadcast is owed to, written under
     # ``_slots_broadcast_lock``. A ``push_slots_update(legacy_only=True)`` owes
     # the full list only to consumers that cannot apply a ``slot_patch`` frame;
@@ -9511,6 +9532,11 @@ class DashboardState:
         what the user sees as one change. The trailing flush re-serializes at
         delivery time, so a coalesced frame is never a stale frame.
 
+        The window is 200 ms for a small list and stretches with the size of the
+        last frame (see ``_SLOTS_BROADCAST_BYTES_PER_S``), so a busy fleet of a
+        hundred agents is paced at roughly a fixed byte rate per socket instead of
+        five full lists a second.
+
         ``legacy_only`` owes the full list only to consumers that cannot apply a
         ``slot_patch`` frame (SSE readers, app tokens, a tab whose bundle
         predates the frame). :meth:`push_slot_patch` and
@@ -9543,9 +9569,10 @@ class DashboardState:
             # Resolved once here, at the top of the lock, so the timer branch
             # below and any later cross-thread caller agree on one loop.
             serving = self.serving_loop
+            interval = self._slots_broadcast_interval
 
             elapsed = now - self._slots_broadcast_last
-            if elapsed >= _SLOTS_BROADCAST_INTERVAL_S:
+            if elapsed >= interval:
                 self._slots_broadcast_last = now
                 if self._slots_broadcast_timer is not None:
                     self._slots_broadcast_timer.cancel()
@@ -9555,7 +9582,7 @@ class DashboardState:
                 # Scheduling onto the serving loop is preferred over broadcasting
                 # from a foreign thread; a closed loop falls back to an immediate send.
                 loop = serving
-                remaining = _SLOTS_BROADCAST_INTERVAL_S - elapsed
+                remaining = interval - elapsed
                 try:
                     if loop is None:
                         self._slots_broadcast_last = now
@@ -9721,6 +9748,14 @@ class DashboardState:
         except (TypeError, ValueError) as exc:
             exc.add_note(_slots_serialization_note(slots_data))
             raise
+        # Size the NEXT coalescing window from this frame, so a burst over a long
+        # list is paced by bytes rather than by the fixed floor. The generic list
+        # stands in for every audience's copy; they differ only in per-slot
+        # enrichment. Character count, not encoded bytes: close enough for pacing.
+        lock = self._slots_broadcast_lock
+        if lock is not None:
+            with lock:
+                self._slots_broadcast_interval = _slots_broadcast_interval_for(len(slots_json))
         mgr = getattr(self, "channel_manager", None)
         ch_trusted = bool(mgr and any(ch.trusted for ch in mgr._channels.values()))
         # ONE read, shared by the generic and owner frames below. Two independent
