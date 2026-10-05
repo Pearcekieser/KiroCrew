@@ -3270,6 +3270,15 @@ env var overrides it.
 
     args = parser.parse_args()
 
+    # The mcp-* stdio servers run one per agent session, so a gateway hosts
+    # dozens. If any import reaches numpy, OpenBLAS/OpenMP start one spinning
+    # thread per core. Cap both at one before anything below imports the
+    # server; an operator's own value wins. Set in-process rather than in the
+    # managed MCP spec env so every spec writer and builtin app server gets it.
+    if (args.command or "").startswith("mcp-"):
+        for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
+            os.environ.setdefault(_var, "1")
+
     # MCP servers and CLI commands hold their managed-venv tree for the process
     # lifetime, so another process's update cannot prune it underneath them.
     # The gateway takes the same hold off-loop AFTER readiness, before updates;
