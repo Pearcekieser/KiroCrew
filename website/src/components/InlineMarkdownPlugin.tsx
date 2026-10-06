@@ -166,11 +166,23 @@ function $rewriteRun(run: TextNode[], segments: InlineSegment[]): void {
   $setSelection(restored)
 }
 
+/** The last parse, keyed on its input. `$rewriteRun` leaves every node it
+ *  touches dirty, so Lexical runs the transform once per node of the run it
+ *  just restyled; each of those sees the same joined text. Reusing the parse
+ *  keeps one keystroke at one parse, however many nodes the run has. The
+ *  parser is pure, so a hit returns exactly what a fresh parse would. */
+let lastParse: { text: string; segments: InlineSegment[] } | null = null
+
+function parseRunText(text: string): InlineSegment[] {
+  if (lastParse?.text !== text) lastParse = { text, segments: parseInlineMarkdown(text) }
+  return lastParse.segments
+}
+
 /** Restyle the run around `node` to match its markdown. */
 function $applyInlineMarkdown(node: TextNode): void {
   if (!isPlainTextNode(node) || !node.isAttached()) return
   const run = $collectRun(node)
-  const segments = parseInlineMarkdown(run.map(item => item.getTextContent()).join(''))
+  const segments = parseRunText(run.map(item => item.getTextContent()).join(''))
   if (!segments.length || runMatches(run, segments)) return
   $rewriteRun(run, segments)
 }

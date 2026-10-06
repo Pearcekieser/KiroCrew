@@ -6,7 +6,7 @@ import { changeApprovalMode, updateSlot } from '../../store/dashboardSlice'
 import { createSlot, setAgentSwitchNotice } from '../../store/chatSlice'
 import { pendingSlotSwitch, pendingSlotSwitchTarget, performSlotSwitch } from '../../lib/slotSwitch'
 import { performAgentSlotSwitch } from '../../lib/agentSwitch'
-import { queryComposerOrExpand } from '../../pages/chat/composerFocus'
+import { focusComposerElement, queryComposerOrExpand } from '../../pages/chat/composerFocus'
 import { agentSwitchFailureMessage } from '../../utils/agentSwitchFeedback'
 import { api } from '../../api/client'
 import { toggleTerminalByChord } from '../../lib/terminalChordFocus'
@@ -60,7 +60,7 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
       // left collapsed is asked back instead of swallowing the caret: creating a
       // session IS a typing intent, and the alternative is a new chat whose
       // first keystroke goes nowhere.
-      requestAnimationFrame(() => queryComposerOrExpand(ta => ta.focus()))
+      requestAnimationFrame(() => queryComposerOrExpand(focusComposerElement))
     },
   })
   const refreshTrigger = useAppSelector(s => s.dashboard.refreshTrigger)

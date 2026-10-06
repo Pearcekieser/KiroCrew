@@ -5,7 +5,7 @@ import { switchSlot, deleteSlot, openActivityToTab, selectSidebarStartedSubagent
 import { inferLane } from '../pages/chat/sessionLane'
 import { normalizeRunSessionKey } from '../apps/workflows/runModel'
 import { loadChatConfig } from '../pages/chat/ChatSettings'
-import { queryComposerOrExpand, queryPendingApprovalAction, releaseComposerForKeyboardSwitch } from '../pages/chat/composerFocus'
+import { focusComposerElement, queryComposerOrExpand, queryPendingApprovalAction, releaseComposerForKeyboardSwitch } from '../pages/chat/composerFocus'
 import { reportSeamCollision } from '../apps/seamCollision'
 import {
   loadPanelToggleOverrides,
@@ -1012,7 +1012,7 @@ export function useKeyboardShortcuts({ onToggleShortcutsModal, onNewChat, onCycl
         // composer was COLLAPSED and had to be asked back — without that, "focus
         // text input" silently did nothing for as long as the user left it
         // collapsed, which outlives a reload.
-        'focus-input': () => queryComposerOrExpand(ta => ta.focus()),
+        'focus-input': () => queryComposerOrExpand(focusComposerElement),
         // ⌘N / Ctrl+N (alias Option/Alt+Shift+N): new session.
         'new-chat': () => onNewChat(),
         // ⌘W / Ctrl+W (alias Option/Alt+Shift+W): close the current session —
