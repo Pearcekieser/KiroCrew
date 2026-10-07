@@ -7395,7 +7395,18 @@
       "saved_device_unavailable": "저장된 마이크를 사용할 수 없습니다 — 시스템 기본값을 사용합니다.",
       "switching_drops_audio": "녹음 중에 전환하면 약 0.2초의 오디오가 손실됩니다.",
       "system_default": "시스템 기본값",
+      "system_default_named": "시스템 기본값({{device}})",
       "unnamed_input": "이름 없는 입력"
+    },
+    "micTestStrip": {
+      "test": "마이크 테스트",
+      "stop": "테스트 중지",
+      "level": "마이크 음량",
+      "idle_hint": "마이크 음량을 보여 줍니다. 아무것도 녹음하거나 전송하지 않습니다.",
+      "opening": "마이크를 여는 중…",
+      "listening": "듣는 중입니다. 말하면 음량 막대가 움직여야 합니다.",
+      "listening_on": "{{device}}에서 듣는 중입니다. 말하면 음량 막대가 움직여야 합니다.",
+      "disconnected": "마이크 연결이 끊어졌습니다. 다시 연결하거나 위에서 다른 마이크를 선택하세요."
     },
     "migrationBanner": {
       "install_app_from_apps": "계속 사용하려면 다음 {{productName}} 업데이트 전에 Apps에서 ‘{{app}}’을(를) 설치하세요.",
@@ -15932,6 +15943,7 @@
         "status": "상태",
         "streaming": "스트리밍",
         "system_default": "시스템 기본값",
+        "system_default_named": "시스템 기본값({{device}})",
         "ffmpeg_is_missing_voice_recordings_from_the_brow": "ffmpeg가 없습니다 — 설치될 때까지 브라우저의 음성 녹음을 전사할 수 없습니다.",
         "the_bundled_audio_decoder_is_missing_or_damaged": "내장 오디오 디코더가 없거나 손상되었습니다. {{productName}} 데스크톱 앱을 다시 설치하세요. FFmpeg를 별도로 설치할 필요는 없습니다.",
         "then_restart_the_gateway_so_it_can_import_the_ne": "그런 다음 새 패키지를 가져올 수 있도록 게이트웨이를 다시 시작하세요.",

@@ -6,7 +6,8 @@ import { Badge, Btn, FormSkeleton } from '../../components/ui'
 import InfoTip from '../../components/InfoTip'
 import { api, ApiError, type AwsConsentStatus } from '../../api/client'
 import { RestartGatewayButton } from './AboutPanel'
-import { listMicrophones, getPreferredMicId, setPreferredMicId, acquireMicStream, reportIfMicDenied } from '../../hooks/mic'
+import { listMicrophones, selectableMicrophones, getPreferredMicId, setPreferredMicId, acquireMicStream, reportIfMicDenied, defaultMicName, DEFAULT_PSEUDO_DEVICE_ID } from '../../hooks/mic'
+import { MicTestStrip } from '../../components/MicTestStrip'
 import { fmtBytes, fmtNumber, fmtUnit } from '../../i18n/format'
 import {
   CATALOG_MODEL_PROVIDERS,
@@ -606,10 +607,13 @@ export default function SttSettings({ cardIndex }: {
   // applied via getUserMedia constraints). Device labels are blank until the
   // page has been granted mic access at least once.
   const [mics, setMics] = useState<MediaDeviceInfo[]>([])
-  // Before permission, an anonymous device can share the system-default value.
-  // It cannot be selected separately, so offer it through System default only.
-  const selectableMics = mics.filter(device => device.deviceId !== '')
+  // `mics` keeps the pseudo-device so `defaultMicName` can name System default.
+  const selectableMics = selectableMicrophones(mics)
+  const defaultName = defaultMicName(mics)
   const [micId, setMicId] = useState(getPreferredMicId())
+  // A preference saved as Chromium's `default` id before this picker folded it
+  // in is still "follow the OS", so it shows as the System default option.
+  const micValue = micId === DEFAULT_PSEUDO_DEVICE_ID ? '' : micId
   const refreshMics = useCallback(async () => { setMics(await listMicrophones()) }, [])
   useEffect(() => {
     refreshMics()
@@ -942,12 +946,19 @@ export default function SttSettings({ cardIndex }: {
         <SettingsSelect
           label={i18nT('pages.settings.sttSettings.microphone')}
           hint={i18nT('pages.settings.sttSettings.input_device_used_to_capture_your_voice')}
-          value={micId}
+          value={micValue}
           options={['', ...selectableMics.map(d => d.deviceId)]}
-          optionLabels={[i18nT('pages.settings.sttSettings.system_default'), ...selectableMics.map((d, i) => d.label || i18nT('pages.settings.sttSettings.microphone_2', { n: i + 1 }))]}
+          optionLabels={[
+            defaultName
+              ? i18nT('pages.settings.sttSettings.system_default_named', { device: defaultName })
+              : i18nT('pages.settings.sttSettings.system_default'),
+            ...selectableMics.map((d, i) => d.label || i18nT('pages.settings.sttSettings.microphone_2', { n: i + 1 })),
+          ]}
           onChange={changeMic}
           disabled={saving}
         />
+        {/* No hand-off while the AWS profile/region drafts below are unsaved: see `awsDraftsSaved`. */}
+        <MicTestStrip deviceId={micValue} onDevicesMayHaveChanged={refreshMics} askAgent={awsDraftsSaved} />
         {micsNeedGrant && (
           <button
             type="button"

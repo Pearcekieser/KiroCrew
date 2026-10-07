@@ -7506,7 +7506,18 @@
       "saved_device_unavailable": "सहेजा गया माइक्रोफ़ोन अनुपलब्ध है — सिस्टम डिफ़ॉल्ट का उपयोग हो रहा है।",
       "switching_drops_audio": "रिकॉर्डिंग के दौरान बदलने से लगभग 0.2 सेकंड ऑडियो छूट जाता है।",
       "system_default": "सिस्टम डिफ़ॉल्ट",
+      "system_default_named": "सिस्टम डिफ़ॉल्ट ({{device}})",
       "unnamed_input": "अनामित इनपुट"
+    },
+    "micTestStrip": {
+      "test": "माइक्रोफ़ोन जाँचें",
+      "stop": "जाँच रोकें",
+      "level": "माइक्रोफ़ोन स्तर",
+      "idle_hint": "तुम्हारे माइक्रोफ़ोन का स्तर दिखाता है। कुछ भी रिकॉर्ड या भेजा नहीं जाता।",
+      "opening": "माइक्रोफ़ोन खुल रहा है…",
+      "listening": "सुन रहा है। बोलें, स्तर पट्टी हिलनी चाहिए।",
+      "listening_on": "{{device}} पर सुन रहा है। बोलें, स्तर पट्टी हिलनी चाहिए।",
+      "disconnected": "माइक्रोफ़ोन डिस्कनेक्ट हो गया। उसे फिर से जोड़ो या ऊपर कोई दूसरा चुनो।"
     },
     "migrationBanner": {
       "install_app_from_apps": "इंस्टॉल करें \"{{app}}\" को Apps से, अगले {{productName}} अपडेट से पहले, ताकि इसका उपयोग जारी रह सके।",
@@ -16185,6 +16196,7 @@
         "status": "स्थिति",
         "streaming": "स्ट्रीमिंग",
         "system_default": "सिस्टम डिफ़ॉल्ट",
+        "system_default_named": "सिस्टम डिफ़ॉल्ट ({{device}})",
         "ffmpeg_is_missing_voice_recordings_from_the_brow": "ffmpeg मौजूद नहीं है — इसे इंस्टॉल किए जाने तक ब्राउज़र से आई वॉयस रिकॉर्डिंग ट्रांसक्राइब नहीं हो सकतीं।",
         "the_bundled_audio_decoder_is_missing_or_damaged": "अंतर्निहित ऑडियो डिकोडर मौजूद नहीं है या क्षतिग्रस्त है। {{productName}} डेस्कटॉप ऐप को फिर से इंस्टॉल करें; FFmpeg को अलग से इंस्टॉल न करें।",
         "then_restart_the_gateway_so_it_can_import_the_ne": "फिर gateway को पुनः आरंभ करें ताकि वह नए पैकेज इंपोर्ट कर सके।",

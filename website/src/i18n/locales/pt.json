@@ -7617,7 +7617,18 @@
       "saved_device_unavailable": "O microfone salvo está indisponível — usando o padrão do sistema.",
       "switching_drops_audio": "Trocar durante a gravação descarta cerca de 0,2 s de áudio.",
       "system_default": "Padrão do sistema",
+      "system_default_named": "Padrão do sistema ({{device}})",
       "unnamed_input": "Entrada sem nome"
+    },
+    "micTestStrip": {
+      "test": "Testar microfone",
+      "stop": "Parar teste",
+      "level": "Nível do microfone",
+      "idle_hint": "Mostra o nível do seu microfone. Nada é gravado nem enviado.",
+      "opening": "Abrindo o microfone…",
+      "listening": "Ouvindo. Fale e a barra de nível deve se mover.",
+      "listening_on": "Ouvindo em {{device}}. Fale e a barra de nível deve se mover.",
+      "disconnected": "O microfone foi desconectado. Conecte-o de novo ou escolha outro acima."
     },
     "migrationBanner": {
       "install_app_from_apps": "Instale \"{{app}}\" em Apps antes da próxima atualização do {{productName}} para continuar usando.",
@@ -16438,6 +16449,7 @@
         "status": "Status",
         "streaming": "Streaming",
         "system_default": "Padrão do sistema",
+        "system_default_named": "Padrão do sistema ({{device}})",
         "ffmpeg_is_missing_voice_recordings_from_the_brow": "O ffmpeg está ausente — as gravações de voz do navegador não podem ser transcritas até que ele seja instalado.",
         "the_bundled_audio_decoder_is_missing_or_damaged": "O decodificador de áudio incluído está ausente ou danificado. Reinstale o app {{productName}} para desktop; não instale o FFmpeg separadamente.",
         "then_restart_the_gateway_so_it_can_import_the_ne": "Depois reinicie o gateway para que ele possa importar os novos pacotes.",

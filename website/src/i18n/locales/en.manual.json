@@ -3415,7 +3415,18 @@
       "saved_device_unavailable": "Your saved microphone is unavailable — using the system default.",
       "switching_drops_audio": "Switching while recording drops about 0.2s of audio.",
       "system_default": "System default",
+      "system_default_named": "System default ({{device}})",
       "unnamed_input": "Unnamed input"
+    },
+    "micTestStrip": {
+      "test": "Test microphone",
+      "stop": "Stop test",
+      "level": "Microphone level",
+      "idle_hint": "Shows your microphone's level. Nothing is recorded or sent.",
+      "opening": "Opening the microphone…",
+      "listening": "Listening. Speak and the level bar should move.",
+      "listening_on": "Listening on {{device}}. Speak and the level bar should move.",
+      "disconnected": "The microphone disconnected. Reconnect it or pick another one above."
     },
     "askAgent": {
       "ask_the_agent": "Ask the agent",
@@ -7455,6 +7466,7 @@
         "failed_to_save_stt_config": "Failed to save STT config",
         "microphone_2": "Microphone {{n}}",
         "system_default": "System default",
+        "system_default_named": "System default ({{device}})",
         "endpointing": "Auto-submit when I finish speaking",
         "endpointing_desc": "Use a fast model to detect when you've finished a complete request and send it automatically. Streaming providers only.",
         "provider_apple": "Apple Speech (on-device — macOS 26+)",

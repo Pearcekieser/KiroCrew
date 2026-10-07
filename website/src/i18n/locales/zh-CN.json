@@ -7395,7 +7395,18 @@
       "saved_device_unavailable": "保存的麦克风不可用 —— 正在使用系统默认设备。",
       "switching_drops_audio": "录音中切换会丢弃约 0.2 秒音频。",
       "system_default": "系统默认",
+      "system_default_named": "系统默认（{{device}}）",
       "unnamed_input": "未命名输入设备"
+    },
+    "micTestStrip": {
+      "test": "测试麦克风",
+      "stop": "停止测试",
+      "level": "麦克风音量",
+      "idle_hint": "显示麦克风的音量。不会录音或发送任何内容。",
+      "opening": "正在打开麦克风…",
+      "listening": "正在监听。说话时音量条应会跳动。",
+      "listening_on": "正在通过 {{device}} 监听。说话时音量条应会跳动。",
+      "disconnected": "麦克风已断开。请重新连接，或在上方选择其他麦克风。"
     },
     "migrationBanner": {
       "install_app_from_apps": "从“应用”安装“{{app}}”，以便在下次 {{productName}} 更新后继续使用。",
@@ -15932,6 +15943,7 @@
         "status": "状态",
         "streaming": "流式",
         "system_default": "系统默认",
+        "system_default_named": "系统默认（{{device}}）",
         "ffmpeg_is_missing_voice_recordings_from_the_brow": "ffmpeg 缺失 — 在安装它之前，无法转写来自浏览器的语音录音。",
         "the_bundled_audio_decoder_is_missing_or_damaged": "内置的音频解码器缺失或已损坏。请重新安装 {{productName}} 桌面应用；无需单独安装 FFmpeg。",
         "then_restart_the_gateway_so_it_can_import_the_ne": "然后重启 gateway，以便加载新安装的包。",
