@@ -2216,6 +2216,12 @@ interface ChatSidebarProps {
   historyHasMore: boolean
   defaultAgent: string
   installedAgents: AgentInfo[]
+  /** What row and history labels are TINTED from (agent colour, inherited
+   *  session colour). The host passes the last loaded roster so a session
+   *  switch, which empties `installedAgents` until the new fetch lands, does
+   *  not flash every label to muted and back. Display only: pickers such as
+   *  FolderConfigModal keep reading the scoped `installedAgents`. Defaults to it. */
+  rowAgents?: AgentInfo[]
   mode?: string
   onWidthChange?: (w: number) => void
   onDragChange?: (dragging: boolean) => void
@@ -2347,7 +2353,7 @@ function ChatSidebar({
   // only the binding is scoped, which forces every call site inside this file
   // to say which collection it means.
   slots: localSlots, activeSlot, unreadSlots, history, historyHasMore,
-  defaultAgent, installedAgents, mode, onWidthChange, onDragChange, fillsHost, onSelectSlot, onOpenSlotInNewTab, onOpenSource, onOpenPeerSession, collapsible,
+  defaultAgent, installedAgents, rowAgents, mode, onWidthChange, onDragChange, fillsHost, onSelectSlot, onOpenSlotInNewTab, onOpenSource, onOpenPeerSession, collapsible,
   chatDropTarget, onDropSessionRef, staticRows,
 }: ChatSidebarProps) {
   useLanguageGeneration() // memo() bails out of the provider-level repaint; subscribe directly
@@ -3380,14 +3386,15 @@ function ChatSidebar({
   const dragInFlight = !!activeDrag
   const activeDraggedKey = activeDrag?.type === 'session' ? activeDrag.id : null
   const activeDraggedPinnedIndex = activeDraggedKey !== null ? (pinnedRank.get(activeDraggedKey) ?? -1) : -1
+  const tintAgents = rowAgents ?? installedAgents
   const rowShell: RowShell = useMemo(() => ({
-    connected, mode, defaultAgent, installedAgents, tagById, paletteColors, boost, boostFor, colorMode, recentTintCount,
+    connected, mode, defaultAgent, installedAgents: tintAgents, tagById, paletteColors, boost, boostFor, colorMode, recentTintCount,
     // A session row on any touch screen (an iPad too) gets the single ⋯ menu,
     // not the overlay cluster.
     isMobile: isMobile || isTouchDevice,
     dragInFlight, activeDraggedKey, activeDraggedPinnedIndex,
   }), [
-    connected, mode, defaultAgent, installedAgents, tagById, paletteColors, boost, boostFor, colorMode, recentTintCount,
+    connected, mode, defaultAgent, tintAgents, tagById, paletteColors, boost, boostFor, colorMode, recentTintCount,
     isMobile, isTouchDevice, dragInFlight, activeDraggedKey, activeDraggedPinnedIndex,
   ])
   // What this render shows rows with. The row model reads the local-only members
@@ -6512,7 +6519,7 @@ function ChatSidebar({
                 // Derive agent color the same way renderSessionRow does so history rows
                 // match the session-row visual language (agent name tinted by source).
                 const agentColorFor = (agentName: string): string => {
-                  const meta = installedAgents.find(a => a.name === agentName)
+                  const meta = tintAgents.find(a => a.name === agentName)
                   if (meta?.source === 'package') return 'text-[var(--aim)]'
                   if (meta?.source === 'builtin') return 'text-muted'
                   return 'text-muted'
