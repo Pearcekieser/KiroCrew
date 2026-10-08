@@ -2395,6 +2395,9 @@
       "click_to_remove_from_input": "Click to remove from input",
       "click_to_remove_from_input_double_click_to_send": "Click to remove from input (double-click to send)",
       "click_to_send_instantly_shift_click_to_select_mu": "Click to send instantly, Shift+Click to select multiple",
+      "click_to_send_instantly_shift_click_to_add_without_sending": "Click to send instantly, Shift+Click to add to the message without sending",
+      "click_to_replace_selection": "Click to replace selection",
+      "click_to_replace_selection_double_click_to_send": "Click to replace selection (double-click to send)",
       "send_now_2": "Send now: {{option}}"
     },
     "followUpCard": {

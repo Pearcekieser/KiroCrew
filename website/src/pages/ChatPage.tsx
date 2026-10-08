@@ -1797,7 +1797,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const isStreaming = lastMsg?.role === 'streaming'
   // Follow-up option chips and the ownership of the text they append.
   const {
-    followUpOptions, followUpSourceKey,
+    followUpOptions, followUpSourceKey, followUpMulti,
     followUpPicked, followUpPickedRef, toggleFollowUpOption,
     composerRootChange, composerUserEdit,
   } = useFollowUpChips({
@@ -6489,6 +6489,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               quickSend={dashCfg?.quick_send}
               followUpLayout={chatConfig.followUpLayout}
               followUpSourceKey={followUpSourceKey}
+              followUpMulti={followUpMulti}
               onFollowUpSelect={(o: string, e: React.MouseEvent, _key: string | null | undefined, sendNow: (text: string) => void) => {
                 // One-click: enabled + no shift + not busy + not already in multi-select.
                 // `sendNow` is the composer's chip send: it steers or queues per the slot's busy-send mode.
