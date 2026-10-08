@@ -112,16 +112,20 @@ export function createTelemetryEndpoints({ get, post, j, jfetch: fetch }: Client
     /** The conductor's accepted work, not worker-reported completion. */
     sessionWorkProjection: (slot: string) =>
       get(`/api/sessions/${encodeURIComponent(slot)}/crew-log/projection/work`).then(j),
-    telemetryStartup: () => fetch('/api/telemetry/startup').then(j),
+    /** The Telemetry panel's payload. `range` is a query string (`days=7`, or
+     *  `since=<epoch>&until=<epoch>`); the gateway clamps it and echoes the window
+     *  it actually used as `window_days` / `window_start` / `window_end`. */
+    telemetryStartup: (range = '') => fetch('/api/telemetry/startup' + (range ? '?' + range : '')).then(j),
     // Per-turn context injection breakdown for one session. Independent of the
     // telemetry main switch: the usage rows it reads are always written.
     telemetryContextTrace: (slot: string) =>
       fetch('/api/telemetry/context-trace?slot=' + encodeURIComponent(slot)).then(j),
     /** Per-turn usage rows for one session — the Spend table's drill-down.
      *  Same always-written row store as the context trace; the dashboard reads
-     *  every row (the endpoint's app-ownership filter applies to app callers). */
-    usageTurns: (slot: string) =>
-      fetch('/api/usage/turns?slot=' + encodeURIComponent(slot)).then(j),
+     *  every row (the endpoint's app-ownership filter applies to app callers).
+     *  `range` is the same query string the panel's payload was fetched with. */
+    usageTurns: (slot: string, range = '') =>
+      fetch('/api/usage/turns?slot=' + encodeURIComponent(slot) + (range ? '&' + range : '')).then(j),
     /** The Usage tab's stacked spend-over-time series: whole-install credits by
      *  one dimension; the same always-written row store as `usageTurns`, with no
      *  slot filter, which is why the route refuses app tokens. */
