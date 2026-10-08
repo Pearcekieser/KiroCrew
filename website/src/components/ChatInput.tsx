@@ -372,7 +372,7 @@ function ChatInput({
       : `${base}\n${i18nT('components.chatInput.branch', { branch: projectBranch })}`
   }, [project, projectBranch, projectDetached])
   const { ctxPopoverOpen, setCtxPopoverOpen, ctxWrapRef } = useContextPopover()
-  const plus = usePlusMenu({ pickers, value, onChange, composerControl })
+  const plus = usePlusMenu({ pickers, value, onChange, composerControl, fileInputRef })
   const { setPlusOpen, sketchOpen, setSketchOpen } = plus
   // Client-side `accept` is a UX hint only (input-validation guidance: server enforces type via
   // magic bytes, size, and malware scanning — never trust the extension/MIME here).
