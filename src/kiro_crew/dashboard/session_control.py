@@ -3315,8 +3315,9 @@ async def fork_session(
     be an eligible CREATOR -- the same refusal set ``create_session`` applies,
     because a fork manufactures a session the caller then owns.
 
-    What the child gets on top of the human fork: ``title`` (else the fork's own
-    ``Fork of <parent>``), ``folder_id`` (else the parent's folder, as the human
+    What the child gets on top of the human fork: ``title`` (final; else the
+    fork's own ``Fork of <parent>``, which the fork's background title pass may
+    rename), ``folder_id`` (else the parent's folder, as the human
     fork inherits it), creator attribution (``created_by`` = the caller, so the
     other verbs reach it afterwards and the per-creator ceiling counts it) and the
     caller's session posture (``_trust`` / ``_trust_reads`` -- the same two
@@ -3540,6 +3541,9 @@ async def fork_session(
         if clean_title:
             child.title = clean_title
             child._titled = True
+            # The caller chose this name, so it is final: the fork's own
+            # background title pass and the refresh both leave it alone.
+            child._title_origin = "user"
         if folder_id:
             child.folder_id = folder_id
 
