@@ -1035,6 +1035,7 @@ function ChatInput({
                 onReady={markLexicalReady}
                 onSelectionChange={publishLexicalSelection}
                 onHistoryStep={stepUndoHistory}
+                onEndUndoBurst={endUndoBurst}
                 sentMessages={sentMessages}
                 historyScope={slotId}
                 onEditLastRequest={onEditLastRequest}
