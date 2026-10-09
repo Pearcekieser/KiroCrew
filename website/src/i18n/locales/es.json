@@ -7586,7 +7586,8 @@
       "couldnt_copy_the_image_path": "No se pudo copiar la ruta de la imagen",
       "the_copy_failed_ctrl_cmd_click_copies_the_path_label": "La copia falló. Ctrl/Cmd+clic copia la ruta {{label}}.",
       "closed_session_open_failed": "No se pudo abrir {{name}}.",
-      "closed_session_try_again": "Reintentar"
+      "closed_session_try_again": "Reintentar",
+      "unclosed_diff_warning": "El formato se rompió aquí, así que el resto de la respuesta puede aparecer dentro de este diff."
     },
     "markdownToc": {
       "contents": "Contenido",

@@ -7362,7 +7362,8 @@
       "couldnt_copy_the_image_path": "画像のパスをコピーできませんでした",
       "the_copy_failed_ctrl_cmd_click_copies_the_path_label": "コピーできませんでした。Ctrl/Cmd+クリックでパス {{label}} をコピーします。",
       "closed_session_open_failed": "{{name}} を開けませんでした。",
-      "closed_session_try_again": "再試行"
+      "closed_session_try_again": "再試行",
+      "unclosed_diff_warning": "ここで書式が崩れたため、返答の残りがこの差分の中に表示されている可能性があります。"
     },
     "markdownToc": {
       "contents": "目次",

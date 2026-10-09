@@ -7586,7 +7586,8 @@
       "couldnt_copy_the_image_path": "Não foi possível copiar o caminho da imagem",
       "the_copy_failed_ctrl_cmd_click_copies_the_path_label": "A cópia falhou. Ctrl/Cmd+clique copia o caminho {{label}}.",
       "closed_session_open_failed": "Não foi possível abrir {{name}}.",
-      "closed_session_try_again": "Tentar novamente"
+      "closed_session_try_again": "Tentar novamente",
+      "unclosed_diff_warning": "A formatação quebrou aqui, então o restante da resposta pode aparecer dentro deste diff."
     },
     "markdownToc": {
       "contents": "Conteúdo",
