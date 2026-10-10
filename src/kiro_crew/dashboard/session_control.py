@@ -66,7 +66,6 @@ from kiro_crew.dashboard.chat_delivery import (
     queue_entry_is_user_origin,
     queued_text_for_display,
     sanitize_outbound,
-    start_queue_persist,
 )
 from kiro_crew.dashboard.chat_folders import (
     _folder_declared_project,
@@ -8792,18 +8791,25 @@ def _queue_entry_from(entry: dict[str, Any], caller_key: str, caller_tab: str) -
     A person's own typed message is checked first so that no stamp, however it
     got there, can make one read as the caller's.
 
-    Only a PLAIN entry can be the caller's: one with no producer ``kind`` and no
-    consumption callback. ``session_send`` queues exactly that shape. A recovery
-    requeue or a plan-stage delivery can inherit the sender stamp through its
+    Only a PLAIN entry can be the caller's: one with no producer ``kind``, no
+    consumption callback and no steer delivery. ``session_send`` queues exactly
+    that shape. A plan-stage delivery can inherit the sender stamp through its
     meta, yet it carries a kind the drain acts on and callbacks a waiter settles
-    on, so removing or reordering it here would strand that waiter. Those read as
-    ``other``.
+    on, so removing or reordering it here would strand that waiter. A steer that
+    ``_requeue_unconsumed_steers`` put back because its turn ended first carries
+    the send's stamp too, with no kind and no callback, but its persisted steer
+    row already says it will run as its own turn, and that row is not a
+    ``queued`` row a cancel reaches; ``steer_delivery_id``, which
+    ``steer_into_running_turn`` mints for every steer, marks it. All of these
+    read as ``other``.
     """
     if queue_entry_is_user_origin(entry):
         return QUEUE_FROM_PERSON
     if entry.get("kind") or "_on_consumed" in entry or "_on_irreversibly_consumed" in entry:
         return QUEUE_FROM_OTHER
     meta = entry.get("meta")
+    if isinstance(meta, dict) and meta.get("steer_delivery_id"):
+        return QUEUE_FROM_OTHER
     if caller_tab and send_origin_slot(meta) == caller_key and send_origin_tab(meta) == caller_tab:
         return QUEUE_FROM_CALLER
     return QUEUE_FROM_OTHER
@@ -8827,16 +8833,18 @@ def _queue_entry_id(item: dict[str, Any]) -> str:
 
     Ids this process mints are 12 hex characters, but an entry restored from disk
     keeps whatever id its line carried (``sanitize_restored_queue`` bounds only the
-    whole entry). An id over the ``entry`` argument's own cap could never be named
-    back to cancel or move anyway, so it is cut to that cap and marked.
+    whole entry), and that file can be edited outside the gateway. So the id
+    passes the same ``sanitize_outbound`` chain as every other outbound field
+    before it is cut. An id that redaction or the cut changed could never be
+    named back to cancel or move anyway, so nothing usable is lost.
     """
-    raw = str(item.get("id") or "")
+    raw = sanitize_outbound(str(item.get("id") or ""))
     if len(raw) <= QUEUE_ENTRY_ID_MAX_CHARS:
         return raw
-    return raw[:QUEUE_ENTRY_ID_MAX_CHARS] + "…"
+    return raw[: QUEUE_ENTRY_ID_MAX_CHARS - 1] + "…"
 
 
-def queue_target(
+async def queue_target(
     state: "DashboardState",
     *,
     caller_session_key: str,
@@ -8865,10 +8873,15 @@ def queue_target(
       message or another session's; a move later only lets others run sooner,
       and is always allowed.
 
-    Synchronous from the gate to the mutation: no suspension point sits between
-    the ownership check and the queue write, so the entry that was checked is
-    the entry that moves. The handler warms the config read before calling in,
-    as ``read_summary``'s does.
+    Synchronous from the gate to the reply: nothing here suspends, so the entry
+    that was checked is the entry that changes, and the listing is read from the
+    queue the gates approved. The handler warms the config read before calling
+    in, as ``read_summary``'s does.
+
+    A cancel or move takes the queue card's own path (``DELETE .../queue/{id}``
+    and ``PUT .../queue/order``): it changes memory, which is the queue's
+    authority, broadcasts the same frame, and leaves the save to the periodic
+    flush. It makes the same durability promise as the card, no more.
     """
     deny = _deny_factory(caller_session_key=caller_session_key, operation="queue", target=target)
     if action not in QUEUE_ACTIONS:
@@ -8902,6 +8915,7 @@ def queue_target(
                 "not_your_entry",
             )
         detail["entry"] = entry
+        frame: tuple[str, dict[str, Any]] | None = None
 
         if action == "cancel":
             slot.queue_remove_by_id(entry)
@@ -8911,7 +8925,7 @@ def queue_target(
             # the card. Content is withheld: the client restores a cancelled
             # entry's text into the composer only on the tab that pressed cancel,
             # and nobody pressed it here.
-            state.broadcast_ws("queue_cancel", {"slot": slot.key, "queue_id": entry, "content": ""})
+            frame = ("queue_cancel", {"slot": slot.key, "queue_id": entry, "content": ""})
             result["cancelled"] = entry
         else:
             if position is None:
@@ -8936,19 +8950,18 @@ def queue_target(
                 order = [item["id"] for item in queue]
                 _reorder_queued_rows(slot.messages, order)
                 slot.invalidate_source_links()
-                state.broadcast_ws("queue_reorder", {"slot": slot.key, "order": order})
+                frame = ("queue_reorder", {"slot": slot.key, "order": order})
             detail["from"] = index
             detail["to"] = new_index
             result["moved"] = entry
             result["position"] = new_index
 
-        # A cancel that does not reach disk comes back on the next restart, which
-        # is the one outcome a caller that took its message back must not see.
-        start_queue_persist(state, slot)
-        try:
-            state.push_slots_update()
-        except Exception:  # pragma: no cover - sidebar refresh is best-effort
-            logger.debug("session_queue: push_slots_update failed", exc_info=True)
+        if frame is not None:
+            state.broadcast_ws(*frame)
+            try:
+                state.push_slots_update()
+            except Exception:  # pragma: no cover - sidebar refresh is best-effort
+                logger.debug("session_queue: push_slots_update failed", exc_info=True)
 
     entries: list[dict[str, Any]] = []
     for pos, item in enumerate(queue[:MAX_QUEUE_LIST_ENTRIES]):
@@ -8971,7 +8984,7 @@ def queue_target(
     return {
         "ok": True,
         "target": slot.key,
-        "title": sanitize_outbound(slot.display_title),
+        "title": _bounded_status_title(slot.display_title),
         "running": bool(slot.running or getattr(slot, "_in_stage_execution", False)),
         "action": action,
         "count": len(queue),

@@ -714,7 +714,7 @@ async def api_session_control_queue(request: web.Request) -> web.Response:
         # After the body read, like `summary`: `queue_target` is synchronous from
         # its gate to its write, so this is the last suspension before the gate.
         await sc.prewarm_enabled_check()
-        result = sc.queue_target(
+        result = await sc.queue_target(
             state,
             caller_session_key=_read_session_key(request),
             target=target,
