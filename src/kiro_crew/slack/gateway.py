@@ -932,49 +932,6 @@ async def _pinned_kiro_cli(purpose: str) -> str | None:
 # installed service would stat HOME, which may be a hung network mount.
 BOOT_RESTART_HINT = "kirocrew restart"
 
-# Boot deadline for the signing-key preflight. Its lstat and key load normally
-# take milliseconds (the loader's own retry budget is well under a second), so a
-# preflight still running at this point is stuck on the filesystem.
-_SIGNING_KEY_PREFLIGHT_TIMEOUT_SECS = 30.0
-
-
-async def _run_signing_key_preflight_bounded(timeout: float | None = None) -> None:
-    """Run :func:`signing_key_preflight` off the loop, with a deadline.
-
-    A daemon thread rather than ``asyncio.to_thread``: a default-executor worker
-    stuck in a filesystem call is joined at interpreter exit, so the timeout's
-    ``SystemExit`` would itself hang. A daemon thread is abandoned at exit, which
-    is what lets the boot fail closed when the data home stops answering.
-
-    Raises whatever the preflight raised (its ``SystemExit`` refusal included),
-    ``TimeoutError`` at the deadline, and ``RuntimeError`` when no thread can be
-    started.
-    """
-    loop = asyncio.get_running_loop()
-    outcome: asyncio.Future[BaseException | None] = loop.create_future()
-
-    def _settle(exc: BaseException | None) -> None:
-        if not outcome.done():
-            outcome.set_result(exc)
-
-    def _worker() -> None:
-        result: BaseException | None = None
-        try:
-            signing_key_preflight()
-        except BaseException as exc:  # noqa: BLE001 - re-raised on the loop
-            result = exc
-        try:
-            loop.call_soon_threadsafe(_settle, result)
-        except RuntimeError:
-            pass  # the loop already closed: the boot gave up on this thread
-
-    threading.Thread(target=_worker, name="kc-signing-key-preflight", daemon=True).start()
-    exc = await asyncio.wait_for(
-        outcome, _SIGNING_KEY_PREFLIGHT_TIMEOUT_SECS if timeout is None else timeout
-    )
-    if exc is not None:
-        raise exc
-
 
 def signing_key_preflight() -> None:
     """Refuse to boot on a truncated dashboard signing key.
@@ -13880,23 +13837,11 @@ class GatewayOrchestrator:
             raise SystemExit(1)
 
         # Refuse to boot on a truncated signing key (see signing_key_preflight).
-        # Off-loop for the same reason as the persistence probe, and bounded: a
-        # key leaf on a disconnected mount must refuse the boot, not stall it.
+        # Off-loop for the same reason as the persistence probe. No deadline of its
+        # own: the persistence probe above already touches the same data home with
+        # none, so a stalled home hangs there first.
         try:
-            await _run_signing_key_preflight_bounded()
-        except (TimeoutError, asyncio.TimeoutError) as exc:
-            logger.critical(
-                "Signing key preflight failed — refusing to start: it did not finish "
-                "within %.0fs (unresponsive data home?)",
-                _SIGNING_KEY_PREFLIGHT_TIMEOUT_SECS,
-            )
-            print(
-                f"❌ The signing key preflight did not finish within "
-                f"{_SIGNING_KEY_PREFLIGHT_TIMEOUT_SECS:.0f}s. Check that the data "
-                f"home is reachable, then restart: {BOOT_RESTART_HINT}",
-                file=sys.stderr,
-            )
-            raise SystemExit(1) from exc
+            await asyncio.to_thread(signing_key_preflight)
         except RuntimeError as exc:
             # No worker thread at boot (executor exhaustion/shutdown). Running
             # the preflight inline would put its lstat and key load on the event

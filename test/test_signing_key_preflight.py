@@ -10,7 +10,6 @@ action (see the ``signing_key_preflight`` docstring).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import types
@@ -506,85 +505,21 @@ class TestPreflightNeverRunsOnTheEventLoop:
         inline: list[str] = []
         monkeypatch.setattr(gateway, "signing_key_preflight", lambda: inline.append("ran"))
 
-        async def _to_thread(fn, *args, **kwargs):
-            return None  # the persistence probe passes
+        calls: list[object] = []
 
-        def _no_thread(self) -> None:
+        async def _to_thread(fn, *args, **kwargs):
+            calls.append(fn)
+            if len(calls) == 1:
+                return None  # the persistence probe passes
             raise RuntimeError("can't start new thread")
 
         monkeypatch.setattr(gateway.asyncio, "to_thread", _to_thread)
-        monkeypatch.setattr(gateway.threading.Thread, "start", _no_thread)
         with pytest.raises(SystemExit) as exit_info:
             await orch.run()
         assert exit_info.value.code == 1
+        assert len(calls) == 2, "the preflight must be handed to a worker thread"
         assert inline == [], "the preflight must never run on the event loop"
         assert "signing key preflight" in capsys.readouterr().err
-
-
-class TestPreflightHasABootDeadline:
-    """A key leaf on a disconnected mount must refuse the boot, not stall it."""
-
-    @pytest.mark.asyncio
-    async def test_a_stuck_preflight_refuses_the_boot_at_its_deadline(
-        self, monkeypatch, tmp_path: Path, capsys
-    ) -> None:
-        import threading
-        from unittest.mock import MagicMock
-
-        orch = gateway.GatewayOrchestrator.__new__(gateway.GatewayOrchestrator)
-        monkeypatch.setattr(gateway.crash_guard, "install_loop_handler", MagicMock())
-        monkeypatch.setattr(gateway.platform_compat, "raise_nofile_soft_limit", MagicMock())
-        monkeypatch.setattr(gateway, "data_home", lambda: tmp_path)
-
-        async def _to_thread(fn, *args, **kwargs):
-            return None  # the persistence probe passes
-
-        release = threading.Event()
-        entered = threading.Event()
-        workers: list[threading.Thread] = []
-
-        def _stuck() -> None:
-            workers.append(threading.current_thread())
-            entered.set()
-            release.wait(30)  # a filesystem call that never returns
-
-        async def _deadline_after_entry(aw, timeout):
-            # The deadline fires only once the worker is inside the preflight, so
-            # the verdict never depends on how fast the thread got scheduled.
-            loop = asyncio.get_running_loop()
-            assert await loop.run_in_executor(None, entered.wait, 30), "worker never ran"
-            raise TimeoutError
-
-        monkeypatch.setattr(gateway.asyncio, "to_thread", _to_thread)
-        monkeypatch.setattr(gateway.asyncio, "wait_for", _deadline_after_entry)
-        monkeypatch.setattr(gateway, "signing_key_preflight", _stuck)
-        try:
-            with pytest.raises(SystemExit) as exit_info:
-                await orch.run()
-        finally:
-            release.set()
-            for worker in workers:
-                worker.join(5)
-        assert exit_info.value.code == 1
-        assert "did not finish within" in capsys.readouterr().err
-        assert workers and workers[0].daemon, "a stuck worker must not block interpreter exit"
-
-    @pytest.mark.asyncio
-    async def test_the_preflight_refusal_reaches_the_loop(self, monkeypatch) -> None:
-        def _refuse() -> None:
-            raise SystemExit(1)
-
-        monkeypatch.setattr(gateway, "signing_key_preflight", _refuse)
-        with pytest.raises(SystemExit) as exit_info:
-            await gateway._run_signing_key_preflight_bounded(timeout=5)
-        assert exit_info.value.code == 1
-
-    @pytest.mark.asyncio
-    async def test_a_passing_preflight_returns(self, monkeypatch) -> None:
-        ran: list[str] = []
-        monkeypatch.setattr(gateway, "signing_key_preflight", lambda: ran.append("ok"))
-        await gateway._run_signing_key_preflight_bounded(timeout=5)
-        assert ran == ["ok"]
 
 
 class TestSigningKeyRemedy:
