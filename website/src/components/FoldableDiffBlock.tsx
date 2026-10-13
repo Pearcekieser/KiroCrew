@@ -41,9 +41,17 @@ import { pathBasename } from '../utils/pathBasename'
  */
 const expandedDiffFences = new Set<string>()
 
+/**
+ * Warned fences that have already opened themselves once, keyed by `foldKey`.
+ * Without it a re-mount runs the auto-open effect again and re-opens a chip
+ * the user folded.
+ */
+const autoOpenedDiffFences = new Set<string>()
+
 /** Exported for tests: forget every remembered expansion. */
 export function resetExpandedDiffFences(): void {
   expandedDiffFences.clear()
+  autoOpenedDiffFences.clear()
 }
 
 export default memo(function FoldableDiffBlock({ code, complete, onFileOpen, pathHint, foldKey, warning }: {
@@ -77,13 +85,20 @@ export default memo(function FoldableDiffBlock({ code, complete, onFileOpen, pat
       return next
     })
   }, [foldKey])
-  // Open once when the warning arrives. The user can still fold it again; the
-  // effect does not fight that, because `warning` does not change afterwards.
+  // Open once when the warning arrives, and only once per fence: the effect
+  // keys on whether a warning exists, not on its text, so a language switch
+  // does not re-run it, and a re-mount finds the fence in
+  // `autoOpenedDiffFences` and leaves the user's fold alone.
+  const warned = !!warning
   useEffect(() => {
-    if (!warning) return
+    if (!warned) return
+    if (foldKey) {
+      if (autoOpenedDiffFences.has(foldKey)) return
+      autoOpenedDiffFences.add(foldKey)
+      expandedDiffFences.add(foldKey)
+    }
     setExpanded(true)
-    if (foldKey) expandedDiffFences.add(foldKey)
-  }, [warning, foldKey])
+  }, [warned, foldKey])
 
   const stats = useMemo(() => countDiffStats(code), [code])
   const headerPath = useMemo(() => extractFilePath(code)?.path, [code]) ?? pathHint ?? null
