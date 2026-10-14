@@ -12525,6 +12525,7 @@
       "hide_all_source_links": "সব PR ও Issue চিপ লুকাও",
       "hide_all_source_links_confirm": "সব চিপ ({{count}}) স্থায়ীভাবে লুকাতে আবার নির্বাচন করো",
       "hide_all_source_links_progress": "চিপ লুকানো হচ্ছে: {{done}}/{{n}}",
+      "hide_all_source_links_retry": "আবার চেষ্টা করতে, এই মেনু থেকে বাকিগুলো লুকাও।",
       "hide_all_source_links_stopped": "{{n}}-টির মধ্যে {{done}}টি চিপ লুকানোর পরে থেমে গেছে। তালিকায় থাকা চিপগুলো লুকানো হয়নি।",
       "source_link_actions": "একটি PR বা Issue চিপ লুকাও",
       "unlink_source_link": "এই সেশন থেকে স্থায়ীভাবে লুকাতে একটি PR বা Issue চিপ নির্বাচন করো। উৎস ও কথোপকথনের রেকর্ড অপরিবর্তিত থাকবে।",

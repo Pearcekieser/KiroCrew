@@ -12724,6 +12724,7 @@
       "hide_all_source_links": "Nascondi tutti i chip PR e issue",
       "hide_all_source_links_confirm": "Seleziona di nuovo per nascondere definitivamente tutti i {{count}} chip",
       "hide_all_source_links_progress": "Nascondo il chip {{done}} di {{n}}",
+      "hide_all_source_links_retry": "Per riprovare, nascondi gli altri da questo menu.",
       "hide_all_source_links_stopped": "Interrotto dopo averne nascosti {{done}} su {{n}}. I chip ancora elencati non sono stati nascosti.",
       "source_link_actions": "Nascondi un chip PR o issue",
       "unlink_source_link": "Seleziona un chip PR o issue per nasconderlo definitivamente in questa sessione. L’origine e la trascrizione restano invariate.",
