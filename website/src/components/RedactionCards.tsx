@@ -24,6 +24,8 @@ import type { Element as HastElement, Root as HastRoot, RootContent, Text as Has
 import { copyToClipboard } from '../utils/clipboard'
 import ErrorNotice from './ErrorNotice'
 import { api } from '../api/client'
+import { queryClient } from '../api/queryClient'
+import { REDACTION_ALLOWED_HOSTS_QUERY_KEY } from '../api/redactionAllowedHostsQuery'
 import { falsePositiveIssueUrl } from '../prompts/redactionReport'
 import { i18nT } from '../i18n/t'
 import { useLanguageGeneration } from '../i18n/useLanguageGeneration'
@@ -1504,16 +1506,30 @@ export function BlockedLinkChip({ domain, placeholder, block }: {
  * was not kept says why and offers no way to open it.
  */
 function BlockedLinkPreview({ preview, domain, group }: { preview: MarkerPreview; domain: string; group: readonly BlockedLink[] }) {
+  const { slotKey } = useRedactionUi()
   const single = group.length === 1 ? group[0] : null
+  // Offered on the same terms as the card's own button: a kept address, a
+  // rule an allowed host relaxes, and an owner slot to save it against. An
+  // address withheld for a credential stays hidden after any allow, so the
+  // preview does not offer one. The saved state, its Undo and the link to
+  // the Settings list show in the card this hands off to.
+  const allowable = single !== null && single.url !== null && ALLOWABLE_RULES.has(single.rule) && !!slotKey
   return (
     <PreviewPanel
       preview={preview}
       title={i18nT('components.redaction.preview_link_title', { host: domain })}
       testId="blocked-link-preview"
       actions={single?.url != null && (
-        <button type="button" className={btnCls} data-testid="blocked-link-preview-open-once" onClick={() => preview.toCard('open')}>
-          {i18nT('components.redaction.link_open_once')}
-        </button>
+        <>
+          <button type="button" className={btnCls} data-testid="blocked-link-preview-open-once" onClick={() => preview.toCard('open')}>
+            {i18nT('components.redaction.link_open_once')}
+          </button>
+          {allowable && (
+            <button type="button" className={btnCls} data-testid="blocked-link-preview-allow" onClick={() => preview.toCard('allow')}>
+              {i18nT('components.redaction.link_allow')}
+            </button>
+          )}
+        </>
       )}
     >
       {single ? (
@@ -1548,9 +1564,18 @@ function MarkedUrl({ url }: { url: string }) {
   )
 }
 
+/**
+ * Refetch the Settings allowed-hosts list after this chat changed it. The
+ * dashboard's queries never go stale on their own, so a list already loaded in
+ * Settings would keep showing the old hosts without this.
+ */
+function refreshAllowedHostsList(): void {
+  void queryClient.invalidateQueries({ queryKey: REDACTION_ALLOWED_HOSTS_QUERY_KEY })
+}
+
 type Confirming = null | 'open' | 'allow'
 /** A card opened from its hover preview, armed with one of its confirmations. */
-export interface CardIntent { id: string; action: 'open' }
+export interface CardIntent { id: string; action: Exclude<Confirming, null> }
 type Feedback = null | { kind: 'opened' } | { kind: 'allowed'; workspace: string } | { kind: 'undone' }
 
 function BlockedLinkEntry({ record, showTarget, cardId, armed = null }: { record: BlockedLink; showTarget: boolean; cardId: string; armed?: Confirming }) {
@@ -1597,6 +1622,7 @@ function BlockedLinkEntry({ record, showTarget, cardId, armed = null }: { record
       // hold keeps this card open over them with its Undo.
       if (replyKey) setAllowHold(replyKey, record.domain, { workspace: res.workspace, records: blockedLinksForDomain(blockedLinks, record.domain), outcome: 'allowed', cardId })
       window.dispatchEvent(new CustomEvent('mc:redaction-hosts-changed', { detail: { slot: slotKey, messageTs } }))
+      refreshAllowedHostsList()
     } catch {
       setError(i18nT('components.redaction.link_allow_failed'))
     }
@@ -1609,6 +1635,7 @@ function BlockedLinkEntry({ record, showTarget, cardId, armed = null }: { record
       setFeedback({ kind: 'undone' })
       if (replyKey && hold) setAllowHold(replyKey, record.domain, { ...hold, outcome: 'undone' })
       if (slotKey) window.dispatchEvent(new CustomEvent('mc:redaction-hosts-changed', { detail: { slot: slotKey, messageTs } }))
+      refreshAllowedHostsList()
       setTimeout(() => setFeedback(null), 1600)
     } catch {
       setError(i18nT('components.redaction.link_undo_failed'))
@@ -1703,7 +1730,7 @@ function BlockedLinkEntry({ record, showTarget, cardId, armed = null }: { record
             {shownFeedback.kind === 'allowed' && (
               <>
                 <button type="button" className={linkBtnCls} data-testid="blocked-link-undo" onClick={() => void undo(shownFeedback.workspace)}>{i18nT('components.redaction.undo')}</button>
-                <a href="/settings/security/redaction" className={`${linkBtnCls} no-underline`}>{i18nT('components.redaction.link_manage')}</a>
+                <a href="/settings/security/redaction" className={`${linkBtnCls} no-underline`} data-testid="blocked-link-manage">{i18nT('components.redaction.link_manage')}</a>
               </>
             )}
           </StatusLine>

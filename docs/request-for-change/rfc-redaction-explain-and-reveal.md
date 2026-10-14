@@ -356,7 +356,11 @@ no button for that. It carries an action only where it saves a step:
   floor: the value was never saved, so nothing on the page can show it.
 - **Blocked link, address kept.** *Open once*. It opens the card with its own
   *Open once* confirmation already showing and Cancel focused, so the
-  confirmation is still the only thing that opens anything. The preview never
+  confirmation is still the only thing that opens anything. When the card
+  would offer *Allow for this host* (a rule an allowed host relaxes, and an
+  owner slot to save it against), the preview offers it beside *Open once*.
+  It opens the card with the card's own allow confirmation showing, and that
+  confirmation alone saves the host. The preview never
   shows the full address: as in §3, that appears only inside the card, after
   the reader asks for it.
 - **Blocked link, address withheld.** Only the card's withheld sentence (it

@@ -61,7 +61,7 @@ describe('Blocked link preview', () => {
     // The full address appears only inside the card, after the reader asks.
     expect(panel.textContent).not.toContain('filter=abc')
     const actions = within(getByTestId('redaction-preview-actions'))
-    expect(actions.getAllByRole('button').map(b => b.textContent)).toEqual(['Open once'])
+    expect(actions.getAllByRole('button').map(b => b.textContent)).toEqual(['Open once', 'Allow for this host'])
     expect(getByTestId('blocked-link-inspect').getAttribute('aria-describedby')).toBe(panel.id)
   })
 
@@ -80,7 +80,7 @@ describe('Blocked link preview', () => {
   })
 
   it('a press in the panel keeps focus on the marker, so the click still lands', () => {
-    const { getByTestId } = render(<MarkdownRenderer content={PH('reviews.corp.example')} blockedLinks={[link()]} slotKey="s1" />)
+    const { getByTestId } = render(<MarkdownRenderer content={PH('reviews.corp.example')} blockedLinks={[link()]} />)
     const inspect = getByTestId('blocked-link-inspect')
     act(() => { inspect.focus() })
     const openOnce = getByTestId('blocked-link-preview-open-once')
@@ -93,7 +93,7 @@ describe('Blocked link preview', () => {
   it('Tab past the last action skips a link taken out of the tab order', () => {
     const { getByTestId, getByText } = render(
       <>
-        <MarkdownRenderer content={PH('reviews.corp.example')} blockedLinks={[link()]} slotKey="s1" />
+        <MarkdownRenderer content={PH('reviews.corp.example')} blockedLinks={[link()]} />
         <a href="#skip" tabIndex={-1}>skipped</a>
         <button type="button">after</button>
       </>,
@@ -219,7 +219,7 @@ describe('Blocked link preview', () => {
   it('Tab past the last action moves on to the control after the marker', () => {
     const { getByTestId, getByText } = render(
       <>
-        <MarkdownRenderer content={PH('reviews.corp.example')} blockedLinks={[link()]} slotKey="s1" />
+        <MarkdownRenderer content={PH('reviews.corp.example')} blockedLinks={[link()]} />
         <button type="button">after</button>
       </>,
     )
@@ -240,7 +240,7 @@ describe('Blocked link preview', () => {
   })
 
   it('stays hidden while the card is open, and the focus the card returns does not reopen it', () => {
-    const { getByTestId } = render(<MarkdownRenderer content={PH('reviews.corp.example')} blockedLinks={[link()]} slotKey="s1" />)
+    const { getByTestId } = render(<MarkdownRenderer content={PH('reviews.corp.example')} blockedLinks={[link()]} />)
     const inspect = getByTestId('blocked-link-inspect')
     act(() => { inspect.focus() })
     fireEvent.click(getByTestId('blocked-link-preview-open-once'))
