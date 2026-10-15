@@ -1507,9 +1507,27 @@ def serves_managed_tools(call_tool_fn: Callable[..., Any]) -> bool:
         return True
     try:
         real = os.path.realpath(filename)
-        return os.path.commonpath([real, _PACKAGE_DIR]) == _PACKAGE_DIR
     except (OSError, ValueError):
         return True
+    return _is_within(real, _PACKAGE_DIR)
+
+
+def _is_within(path: str, root: str, pathmod: Any = os.path) -> bool:
+    """True when the real path *path* is *root* or lies under it.
+
+    On Windows ``commonpath`` raises ValueError for paths on different drives.
+    A handler on another drive than the package is outside it, so that case
+    answers False rather than falling into the keep-the-policy default.
+    """
+    drive, _ = pathmod.splitdrive(path)
+    root_drive, _ = pathmod.splitdrive(root)
+    if pathmod.normcase(drive) != pathmod.normcase(root_drive):
+        return False
+    try:
+        common = pathmod.commonpath([path, root])
+    except ValueError:
+        return True
+    return pathmod.normcase(common) == pathmod.normcase(root)
 
 
 def respond(req_id: Any, result: Any, error: dict | None = None) -> None:

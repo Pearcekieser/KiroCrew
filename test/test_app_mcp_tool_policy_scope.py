@@ -14,6 +14,8 @@ from __future__ import annotations
 import functools
 import importlib.util
 import json
+import ntpath
+import posixpath
 import sys
 
 from test_mcp_shared import _LoopHarness, _tools_call
@@ -56,6 +58,17 @@ class TestServesManagedTools:
         app = _app_module(tmp_path, monkeypatch)
         assert mcp_shared.serves_managed_tools(app.call_tool) is False
         assert mcp_shared.serves_managed_tools(functools.partial(app.call_tool, "x")) is False
+
+    def test_a_handler_on_another_windows_drive_is_not_managed(self):
+        root = r"D:\a\KiroCrew\src\kiro_crew"
+        assert mcp_shared._is_within(r"C:\Temp\app_backend\mcp_server.py", root, ntpath) is False
+        assert mcp_shared._is_within(r"d:\a\kirocrew\src\kiro_crew\mcp_shared.py", root, ntpath)
+        assert mcp_shared._is_within(r"D:\a\KiroCrew\src\kiro_crew_x\m.py", root, ntpath) is False
+
+    def test_a_posix_path_outside_the_package_is_not_managed(self):
+        root = "/opt/kc/src/kiro_crew"
+        assert mcp_shared._is_within("/opt/kc/src/kiro_crew/apps/x.py", root, posixpath) is True
+        assert mcp_shared._is_within("/tmp/app_backend/mcp_server.py", root, posixpath) is False
 
     def test_a_handler_with_no_code_location_keeps_the_policy(self):
         assert mcp_shared.serves_managed_tools(len) is True
