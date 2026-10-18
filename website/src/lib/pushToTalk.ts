@@ -144,6 +144,38 @@ export function matchesBinding(e: KeyLike, b: PttBinding): boolean {
 }
 
 /**
+ * True when Shift is part of the binding itself, either as a chord flag or as
+ * the bare modifier. Shift then cannot also mean "keep as draft": it is down
+ * for every press of the binding.
+ */
+export function bindingUsesShift(b: PttBinding): boolean {
+  return !!b.shift || MODIFIER_FAMILY[b.code] === 'shift'
+}
+
+/**
+ * Does Shift on this event ask to keep the dictation as a draft?
+ *
+ * Only for a binding that does not use Shift, for the reason in
+ * `bindingUsesShift`.
+ */
+export function shiftKeepsDraft(e: Pick<KeyboardEvent, 'shiftKey'>, b: PttBinding): boolean {
+  return e.shiftKey && !bindingUsesShift(b)
+}
+
+/**
+ * The binding pressed with Shift added, for a binding that does not use Shift.
+ *
+ * `matchesBinding` refuses this press, because an extra modifier usually means
+ * a different shortcut. While a capture is running it is the way to stop and
+ * keep the transcript as a draft, so the press that ends a latched capture
+ * accepts it.
+ */
+export function matchesBindingWithShift(e: KeyLike, b: PttBinding): boolean {
+  if (!e.shiftKey || bindingUsesShift(b)) return false
+  return matchesBinding({ code: e.code, altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: false }, b)
+}
+
+/**
  * Is the binding's key STILL physically down, according to a later event?
  *
  * The reconciliation half of the stuck-mic defence: a KeyboardEvent's modifier

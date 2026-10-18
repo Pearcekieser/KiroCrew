@@ -6280,6 +6280,10 @@
       "hold_to_talk": "按住说话",
       "release_to_cancel": "松手取消",
       "slide_up_to_cancel": "上滑取消",
+      "release_to_send": "松手发送",
+      "release_to_keep_draft": "松手保留为草稿",
+      "slide_up_to_cancel_sideways_to_keep_draft": "上滑取消，侧滑保留为草稿",
+      "stop_and_send": "停止并发送（按住 Shift 点击可保留草稿）",
       "switch_to_keyboard": "切换到键盘",
       "switch_to_voice": "切换到语音",
       "drop_to_attach": "松开即可附加",
@@ -8855,6 +8859,7 @@
     },
     "voiceDictationPanel": {
       "esc_to_cancel_click_mic_to_finish": "Esc 取消，点击麦克风完成",
+      "esc_to_cancel_click_mic_to_send": "Esc 取消，Shift+点击保留草稿，点击麦克风发送",
       "esc_to_cancel_enter_to_send": "Esc 取消，Enter 发送",
       "listening": "正在聆听"
     },
@@ -17167,6 +17172,8 @@
         "enabled": "已启用",
         "endpointing": "说完后自动发送",
         "endpointing_desc": "用一个快速模型判断你是否已说完一个完整请求，然后自动发送。仅流式 provider 可用。",
+        "submit_on_release": "停止录音后发送",
+        "submit_on_release_desc": "停止即发送消息。按住 Shift，或在手机上侧滑，即可保留为草稿。",
         "failed_to_save_stt_config": "保存 STT 配置失败",
         "input_device_used_to_capture_your_voice": "用于采集语音的输入设备",
         "language": "语言",

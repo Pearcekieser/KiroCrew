@@ -6389,6 +6389,10 @@
       "hold_to_talk": "বলতে চেপে ধরুন",
       "release_to_cancel": "বাতিল করতে ছেড়ে দিন",
       "slide_up_to_cancel": "বাতিল করতে উপরে সোয়াইপ করুন",
+      "release_to_send": "পাঠাতে ছেড়ে দাও",
+      "release_to_keep_draft": "খসড়া হিসেবে রাখতে ছেড়ে দাও",
+      "slide_up_to_cancel_sideways_to_keep_draft": "বাতিল করতে উপরে সোয়াইপ করো, খসড়া রাখতে পাশে সরাও",
+      "stop_and_send": "থামাও ও পাঠাও (Shift-ক্লিকে খসড়া থেকে যায়)",
       "switch_to_keyboard": "কীবোর্ডে যান",
       "switch_to_voice": "ভয়েসে যান",
       "drop_to_attach": "ছেড়ে সংযুক্ত করুন",
@@ -8991,6 +8995,7 @@
     },
     "voiceDictationPanel": {
       "esc_to_cancel_click_mic_to_finish": "বাতিল করতে Esc, শেষ করতে মাইকে ক্লিক করুন",
+      "esc_to_cancel_click_mic_to_send": "বাতিল করতে Esc, খসড়া রাখতে Shift-ক্লিক, পাঠাতে মাইকে ক্লিক করো",
       "esc_to_cancel_enter_to_send": "বাতিল করতে Esc, পাঠাতে Enter",
       "listening": "শোনা হচ্ছে"
     },
@@ -17432,6 +17437,8 @@
         "enabled": "সক্রিয়",
         "endpointing": "বলা শেষ হলে স্বয়ংক্রিয়ভাবে পাঠান",
         "endpointing_desc": "একটি দ্রুত মডেল দিয়ে শনাক্ত করুন কখন আপনি একটি সম্পূর্ণ অনুরোধ শেষ করেছেন এবং স্বয়ংক্রিয়ভাবে পাঠান। শুধু স্ট্রিমিং প্রোভাইডার।",
+        "submit_on_release": "রেকর্ডিং থামালে পাঠাও",
+        "submit_on_release_desc": "থামালেই মেসেজ পাঠানো হয়। খসড়া রাখতে Shift চেপে ধরো, বা ফোনে পাশে সরাও।",
         "failed_to_save_stt_config": "STT কনফিগ সেভ করা যায়নি",
         "input_device_used_to_capture_your_voice": "আপনার কণ্ঠস্বর ধারণ করতে ব্যবহৃত ইনপুট ডিভাইস",
         "language": "ভাষা",

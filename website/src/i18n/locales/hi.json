@@ -6389,6 +6389,10 @@
       "hold_to_talk": "बोलने के लिए दबाए रखें",
       "release_to_cancel": "रद्द करने के लिए छोड़ें",
       "slide_up_to_cancel": "रद्द करने के लिए ऊपर स्वाइप करें",
+      "release_to_send": "भेजने के लिए छोड़ो",
+      "release_to_keep_draft": "ड्राफ़्ट के रूप में रखने के लिए छोड़ो",
+      "slide_up_to_cancel_sideways_to_keep_draft": "रद्द करने के लिए ऊपर स्वाइप करो, ड्राफ़्ट रखने के लिए किनारे की ओर",
+      "stop_and_send": "रोको और भेजो (Shift-क्लिक से ड्राफ़्ट बना रहता है)",
       "switch_to_keyboard": "कीबोर्ड पर जाएँ",
       "switch_to_voice": "वॉइस पर जाएँ",
       "drop_to_attach": "छोड़कर अटैच करें",
@@ -8991,6 +8995,7 @@
     },
     "voiceDictationPanel": {
       "esc_to_cancel_click_mic_to_finish": "रद्द करने के लिए Esc, समाप्त करने के लिए माइक पर क्लिक करें",
+      "esc_to_cancel_click_mic_to_send": "रद्द करने के लिए Esc, ड्राफ़्ट रखने के लिए Shift-क्लिक, भेजने के लिए माइक पर क्लिक करो",
       "esc_to_cancel_enter_to_send": "रद्द करने के लिए Esc, भेजने के लिए Enter",
       "listening": "सुन रहा है"
     },
@@ -17432,6 +17437,8 @@
         "enabled": "सक्षम",
         "endpointing": "बोलना समाप्त करने पर स्वतः भेजें",
         "endpointing_desc": "एक तेज़ मॉडल से पता लगाएं कि आपने पूरा अनुरोध कब समाप्त किया और उसे स्वतः भेजें। केवल स्ट्रीमिंग प्रोवाइडर।",
+        "submit_on_release": "रिकॉर्डिंग रोकने पर भेजो",
+        "submit_on_release_desc": "रोकते ही मैसेज भेज दिया जाता है। ड्राफ़्ट रखने के लिए Shift दबाए रखो, या फ़ोन पर किनारे की ओर स्लाइड करो।",
         "failed_to_save_stt_config": "STT कॉन्फ़िग सहेजने में विफल",
         "input_device_used_to_capture_your_voice": "आपकी आवाज़ कैप्चर करने के लिए उपयोग होने वाला इनपुट डिवाइस",
         "language": "भाषा",

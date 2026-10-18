@@ -6498,6 +6498,10 @@
       "hold_to_talk": "Maintenir pour parler",
       "release_to_cancel": "Relâcher pour annuler",
       "slide_up_to_cancel": "Glisser vers le haut pour annuler",
+      "release_to_send": "Relâcher pour envoyer",
+      "release_to_keep_draft": "Relâcher pour garder en brouillon",
+      "slide_up_to_cancel_sideways_to_keep_draft": "Glisser vers le haut pour annuler, sur le côté pour garder en brouillon",
+      "stop_and_send": "Arrêter et envoyer (Maj+clic garde un brouillon)",
       "switch_to_keyboard": "Passer au clavier",
       "switch_to_voice": "Passer à la voix",
       "drop_to_attach": "Relâchez pour joindre",
@@ -9127,6 +9131,7 @@
     },
     "voiceDictationPanel": {
       "esc_to_cancel_click_mic_to_finish": "Échap pour annuler, cliquez sur le micro pour terminer",
+      "esc_to_cancel_click_mic_to_send": "Échap pour annuler, Maj+clic garde un brouillon, clique sur le micro pour envoyer",
       "esc_to_cancel_enter_to_send": "Échap pour annuler, Entrée pour envoyer",
       "listening": "Écoute en cours"
     },
@@ -17697,6 +17702,8 @@
         "enabled": "Activé",
         "endpointing": "Envoyer automatiquement quand j'ai fini de parler",
         "endpointing_desc": "Utilise un modèle rapide pour détecter la fin d’une demande complète et l’envoyer automatiquement. Fournisseurs de streaming uniquement.",
+        "submit_on_release": "Envoyer quand j’arrête l’enregistrement",
+        "submit_on_release_desc": "Arrêter envoie le message. Maintiens Maj, ou glisse sur le côté sur le téléphone, pour garder un brouillon.",
         "failed_to_save_stt_config": "Échec de l’enregistrement de la configuration STT",
         "input_device_used_to_capture_your_voice": "Périphérique d'entrée utilisé pour capter votre voix",
         "language": "Langue",

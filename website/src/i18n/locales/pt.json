@@ -6498,6 +6498,10 @@
       "hold_to_talk": "Mantenha pressionado para falar",
       "release_to_cancel": "Solte para cancelar",
       "slide_up_to_cancel": "Deslize para cima para cancelar",
+      "release_to_send": "Solte para enviar",
+      "release_to_keep_draft": "Solte para manter como rascunho",
+      "slide_up_to_cancel_sideways_to_keep_draft": "Deslize para cima para cancelar ou para o lado para manter como rascunho",
+      "stop_and_send": "Parar e enviar (Shift+clique mantém um rascunho)",
       "switch_to_keyboard": "Mudar para o teclado",
       "switch_to_voice": "Mudar para voz",
       "drop_to_attach": "Solte para anexar",
@@ -9127,6 +9131,7 @@
     },
     "voiceDictationPanel": {
       "esc_to_cancel_click_mic_to_finish": "Esc para cancelar, clique no microfone para terminar",
+      "esc_to_cancel_click_mic_to_send": "Esc para cancelar, Shift+clique mantém um rascunho, clique no microfone para enviar",
       "esc_to_cancel_enter_to_send": "Esc para cancelar, Enter para enviar",
       "listening": "Ouvindo"
     },
@@ -17697,6 +17702,8 @@
         "enabled": "Ativado",
         "endpointing": "Enviar automaticamente quando eu terminar de falar",
         "endpointing_desc": "Usa um modelo rápido para detectar quando você terminou uma solicitação completa e enviá-la automaticamente. Apenas provedores de streaming.",
+        "submit_on_release": "Enviar quando eu parar a gravação",
+        "submit_on_release_desc": "Parar envia a mensagem. Mantenha Shift pressionado, ou deslize para o lado no celular, para manter um rascunho.",
         "failed_to_save_stt_config": "Falha ao salvar a configuração de STT",
         "input_device_used_to_capture_your_voice": "Dispositivo de entrada usado para capturar sua voz",
         "language": "Idioma",

@@ -6498,6 +6498,10 @@
       "hold_to_talk": "Tieni premuto per parlare",
       "release_to_cancel": "Rilascia per annullare",
       "slide_up_to_cancel": "Scorri verso l'alto per annullare",
+      "release_to_send": "Rilascia per inviare",
+      "release_to_keep_draft": "Rilascia per tenerlo come bozza",
+      "slide_up_to_cancel_sideways_to_keep_draft": "Scorri verso l'alto per annullare, di lato per tenerlo come bozza",
+      "stop_and_send": "Interrompi e invia (Maiusc+clic lo tiene come bozza)",
       "switch_to_keyboard": "Passa alla tastiera",
       "switch_to_voice": "Passa alla voce",
       "drop_to_attach": "Rilascia per allegare",
@@ -9127,6 +9131,7 @@
     },
     "voiceDictationPanel": {
       "esc_to_cancel_click_mic_to_finish": "Esc per annullare, clicca sul microfono per terminare",
+      "esc_to_cancel_click_mic_to_send": "Esc per annullare, Maiusc+clic tiene una bozza, clicca sul microfono per inviare",
       "esc_to_cancel_enter_to_send": "Esc per annullare, Invio per inviare",
       "listening": "In ascolto"
     },
@@ -17697,6 +17702,8 @@
         "enabled": "Attivato",
         "endpointing": "Invia automaticamente quando finisco di parlare",
         "endpointing_desc": "Usa un modello veloce per capire quando hai completato una richiesta e inviarla automaticamente. Solo provider di streaming.",
+        "submit_on_release": "Invia quando interrompo la registrazione",
+        "submit_on_release_desc": "Interrompere invia il messaggio. Tieni premuto Maiusc, o scorri di lato sul telefono, per tenere una bozza.",
         "failed_to_save_stt_config": "Impossibile salvare la configurazione STT",
         "input_device_used_to_capture_your_voice": "Dispositivo di input usato per acquisire la tua voce",
         "language": "Lingua",

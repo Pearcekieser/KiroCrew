@@ -6498,6 +6498,10 @@
       "hold_to_talk": "Mantén pulsado para hablar",
       "release_to_cancel": "Suelta para cancelar",
       "slide_up_to_cancel": "Desliza hacia arriba para cancelar",
+      "release_to_send": "Suelta para enviar",
+      "release_to_keep_draft": "Suelta para guardar como borrador",
+      "slide_up_to_cancel_sideways_to_keep_draft": "Desliza hacia arriba para cancelar o hacia un lado para guardar como borrador",
+      "stop_and_send": "Detener y enviar (Shift+clic guarda un borrador)",
       "switch_to_keyboard": "Cambiar al teclado",
       "switch_to_voice": "Cambiar a voz",
       "drop_to_attach": "Suelta para adjuntar",
@@ -9127,6 +9131,7 @@
     },
     "voiceDictationPanel": {
       "esc_to_cancel_click_mic_to_finish": "Esc para cancelar, haz clic en el micrófono para terminar",
+      "esc_to_cancel_click_mic_to_send": "Esc para cancelar, Shift+clic guarda un borrador, haz clic en el micrófono para enviar",
       "esc_to_cancel_enter_to_send": "Esc para cancelar, Enter para enviar",
       "listening": "Escuchando"
     },
@@ -17697,6 +17702,8 @@
         "enabled": "Activado",
         "endpointing": "Enviar automáticamente cuando termine de hablar",
         "endpointing_desc": "Usa un modelo rápido para detectar cuándo has terminado una solicitud completa y enviarla automáticamente. Solo proveedores de streaming.",
+        "submit_on_release": "Enviar cuando detenga la grabación",
+        "submit_on_release_desc": "Al detener se envía el mensaje. Mantén pulsado Shift, o desliza hacia un lado en el teléfono, para guardar un borrador.",
         "failed_to_save_stt_config": "No se pudo guardar la configuración de STT",
         "input_device_used_to_capture_your_voice": "Dispositivo de entrada usado para capturar tu voz",
         "language": "Idioma",

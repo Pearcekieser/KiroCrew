@@ -61,6 +61,7 @@ interface SttConfig {
   silence_ms?: number
   partial_interval_ms?: number
   endpointing?: boolean
+  submit_on_release?: boolean
   dictation_panel?: boolean
   transcribe_region?: string
   transcribe_profile?: string
@@ -1533,6 +1534,11 @@ export default function SttSettings({ cardIndex }: {
                   no dial. */}
             </>
           )}
+
+          {/* Outside the streaming block: a deliberate stop ends batch and
+              streaming dictation alike, so this works on every provider. Kept
+              apart from Auto-submit above, which judges the speech itself. */}
+          <SettingsToggle label={i18nT('pages.settings.sttSettings.submit_on_release')} hint={i18nT('pages.settings.sttSettings.submit_on_release_desc')} checked={!!stt.submit_on_release} onChange={v => set({ submit_on_release: v })} disabled={saving} configKey="stt.submit_on_release" />
 
           <SettingsToggle label={i18nT('pages.settings.sttSettings.dictation_panel')} hint={i18nT('pages.settings.sttSettings.show_an_animated_panel_while_recording_instead_of')} checked={stt.dictation_panel !== false} onChange={v => set({ dictation_panel: v })} disabled={saving} />
 

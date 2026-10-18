@@ -6389,6 +6389,10 @@
       "hold_to_talk": "Zum Sprechen halten",
       "release_to_cancel": "Loslassen zum Abbrechen",
       "slide_up_to_cancel": "Nach oben wischen zum Abbrechen",
+      "release_to_send": "Loslassen zum Senden",
+      "release_to_keep_draft": "Loslassen, um als Entwurf zu behalten",
+      "slide_up_to_cancel_sideways_to_keep_draft": "Nach oben wischen zum Abbrechen, zur Seite für einen Entwurf",
+      "stop_and_send": "Beenden und senden (Shift-Klick behält einen Entwurf)",
       "switch_to_keyboard": "Zur Tastatur wechseln",
       "switch_to_voice": "Zur Sprache wechseln",
       "drop_to_attach": "Loslassen zum Anhängen",
@@ -8991,6 +8995,7 @@
     },
     "voiceDictationPanel": {
       "esc_to_cancel_click_mic_to_finish": "Esc zum Abbrechen, Mikrofon klicken zum Beenden",
+      "esc_to_cancel_click_mic_to_send": "Esc zum Abbrechen, Shift-Klick behält Entwurf, Mikrofon klicken zum Senden",
       "esc_to_cancel_enter_to_send": "Esc zum Abbrechen, Enter zum Senden",
       "listening": "Hört zu"
     },
@@ -17432,6 +17437,8 @@
         "enabled": "Aktiviert",
         "endpointing": "Automatisch senden, wenn ich fertig gesprochen habe",
         "endpointing_desc": "Ein schnelles Modell erkennt, wann du eine vollständige Anfrage beendet hast, und sendet sie automatisch. Nur Streaming-Anbieter.",
+        "submit_on_release": "Senden, wenn ich die Aufnahme beende",
+        "submit_on_release_desc": "Beim Beenden wird die Nachricht gesendet. Halte Shift gedrückt oder wische auf dem Smartphone zur Seite, um einen Entwurf zu behalten.",
         "failed_to_save_stt_config": "STT-Konfiguration konnte nicht gespeichert werden",
         "input_device_used_to_capture_your_voice": "Eingabegerät zur Aufnahme Ihrer Stimme",
         "language": "Sprache",

@@ -6280,6 +6280,10 @@
       "hold_to_talk": "押して話す",
       "release_to_cancel": "離してキャンセル",
       "slide_up_to_cancel": "上にスワイプでキャンセル",
+      "release_to_send": "離して送信",
+      "release_to_keep_draft": "離して下書きとして残す",
+      "slide_up_to_cancel_sideways_to_keep_draft": "上にスワイプでキャンセル、横にスライドで下書きとして残す",
+      "stop_and_send": "停止して送信（Shift キーを押しながらクリックで下書きとして残す）",
       "switch_to_keyboard": "キーボードに切り替え",
       "switch_to_voice": "音声に切り替え",
       "drop_to_attach": "ドロップして添付",
@@ -8855,6 +8859,7 @@
     },
     "voiceDictationPanel": {
       "esc_to_cancel_click_mic_to_finish": "Escキーでキャンセル、マイクをクリックして終了",
+      "esc_to_cancel_click_mic_to_send": "Escキーでキャンセル、Shift+クリックで下書きを保持、マイクをクリックして送信",
       "esc_to_cancel_enter_to_send": "Escキーでキャンセル、Enterキーで送信",
       "listening": "リッスン中"
     },
@@ -17167,6 +17172,8 @@
         "enabled": "有効",
         "endpointing": "話し終わったら自動送信",
         "endpointing_desc": "高速モデルを使用してリクエスト完了を検出し、自動的に送信します。ストリーミングプロバイダのみ。",
+        "submit_on_release": "録音を止めたら送信",
+        "submit_on_release_desc": "停止するとメッセージを送信します。下書きとして残すには、Shift キーを押したままにするか、スマートフォンで横にスライドします。",
         "failed_to_save_stt_config": "STT 設定を保存できませんでした",
         "input_device_used_to_capture_your_voice": "音声をキャプチャするために使用される入力デバイス",
         "language": "言語",

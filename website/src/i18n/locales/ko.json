@@ -6280,6 +6280,10 @@
       "hold_to_talk": "눌러서 말하기",
       "release_to_cancel": "놓으면 취소",
       "slide_up_to_cancel": "위로 밀어 취소",
+      "release_to_send": "놓으면 전송",
+      "release_to_keep_draft": "놓으면 초안으로 유지",
+      "slide_up_to_cancel_sideways_to_keep_draft": "위로 밀어 취소, 옆으로 밀어 초안 유지",
+      "stop_and_send": "중지 후 전송 (Shift-클릭하면 초안 유지)",
       "switch_to_keyboard": "키보드로 전환",
       "switch_to_voice": "음성으로 전환",
       "drop_to_attach": "놓아서 첨부",
@@ -8855,6 +8859,7 @@
     },
     "voiceDictationPanel": {
       "esc_to_cancel_click_mic_to_finish": "Esc로 취소, 마이크를 클릭하면 완료",
+      "esc_to_cancel_click_mic_to_send": "Esc로 취소, Shift+클릭으로 초안 유지, 마이크를 클릭하면 전송",
       "esc_to_cancel_enter_to_send": "Esc로 취소, Enter로 전송",
       "listening": "듣는 중"
     },
@@ -17167,6 +17172,8 @@
         "enabled": "사용",
         "endpointing": "말을 마치면 자동 전송",
         "endpointing_desc": "빠른 모델로 요청이 끝났는지 감지해 자동으로 전송합니다. 스트리밍 제공자만 지원합니다.",
+        "submit_on_release": "녹음을 멈추면 전송",
+        "submit_on_release_desc": "중지하면 메시지를 전송합니다. 초안으로 남기려면 Shift 키를 누르고 있거나 휴대폰에서 옆으로 미세요.",
         "failed_to_save_stt_config": "STT 설정을 저장하지 못했습니다",
         "input_device_used_to_capture_your_voice": "음성을 캡처하는 데 사용할 입력 장치",
         "language": "언어",
