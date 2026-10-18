@@ -4502,7 +4502,6 @@
       "failed_to_run_job": "Failed to run job"
     },
     "useKeyboardShortcuts": {
-      "close_this_session": "Close this session?",
       "chats_panel": "Chats panel",
       "cycle_agent": "Cycle agent",
       "cycle_approval_mode": "Cycle approval mode",
@@ -4570,7 +4569,19 @@
       "working": "Working"
     },
     "useSessionActions": {
-      "close_this_session": "Close this session?",
+      "close_confirm": {
+        "title": "Close this session?",
+        "reason_approval": "A tool call is waiting for your approval. Closing cancels it.",
+        "reason_turn": "It is still working on a reply. Closing stops that reply.",
+        "reason_subagents": "It has sub-agents running or waiting to start. Closing stops them.",
+        "reason_queue": "It has messages waiting to send. They are not sent; when you reopen the session they are back for you to send or delete.",
+        "reason_workflow": "A workflow is running in it. Closing stops the workflow.",
+        "reason_goal_loop": "It has a goal loop running. Closing stops the loop.",
+        "reason_monitor": "It has a monitor watching for changes. Closing stops the monitor.",
+        "reason_work": "It still has work running. Closing stops that work.",
+        "reason_setting": "Nothing is running in it. You are asked because “{{setting}}” is turned on in Settings.",
+        "actions": "The conversation and the draft in your message box are kept, and you can reopen the session later."
+      },
       "reload_failed": "Session reload failed. The agent may be mid-turn or the gateway unreachable; try again when the session is idle.",
       "duplicate_unreachable": "Couldn't duplicate this session. {{productName}} couldn't be reached. Check your connection and try again.",
       "reload_failed_subagents": "Sub-agents are still working on this session. Try again when they finish.",

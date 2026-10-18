@@ -10379,7 +10379,6 @@
     },
     "useKeyboardShortcuts": {
       "chats_panel": "Panel de chats",
-      "close_this_session": "¿Cerrar esta sesión?",
       "cycle_agent": "Alternar agente",
       "cycle_approval_mode": "Alternar modo de aprobación",
       "cycle_model": "Alternar modelo",
@@ -10478,7 +10477,19 @@
       "working": "Trabajando"
     },
     "useSessionActions": {
-      "close_this_session": "¿Cerrar esta sesión?",
+      "close_confirm": {
+        "title": "¿Cerrar esta sesión?",
+        "reason_approval": "Una llamada a una herramienta espera tu aprobación. Cerrar la cancela.",
+        "reason_turn": "Todavía está escribiendo una respuesta. Cerrar detiene esa respuesta.",
+        "reason_subagents": "Tiene subagentes en ejecución o esperando para empezar. Cerrar los detiene.",
+        "reason_queue": "Tiene mensajes esperando para enviarse. No se envían; cuando reabras la sesión volverán para que los envíes o los borres.",
+        "reason_workflow": "Hay un flujo de trabajo en ejecución en ella. Cerrar detiene el flujo de trabajo.",
+        "reason_goal_loop": "Tiene un bucle de objetivo en marcha. Cerrar detiene el bucle.",
+        "reason_monitor": "Tiene un monitor pendiente de cambios. Cerrar detiene el monitor.",
+        "reason_work": "Todavía tiene trabajo en curso. Cerrar detiene ese trabajo.",
+        "reason_setting": "No hay nada en ejecución. Se te pregunta porque “{{setting}}” está activado en Ajustes.",
+        "actions": "La conversación y el borrador de tu cuadro de mensaje se conservan, y puedes reabrir la sesión más tarde."
+      },
       "reload_failed": "No se pudo recargar la sesión. Puede que el agente esté respondiendo o que el gateway no esté accesible; inténtalo de nuevo cuando la sesión esté inactiva.",
       "duplicate_unreachable": "No se pudo duplicar esta sesión. No se pudo contactar con {{productName}}. Comprueba tu conexión e inténtalo de nuevo.",
       "reload_failed_subagents": "Los subagentes siguen trabajando en esta sesión. Inténtalo de nuevo cuando terminen.",

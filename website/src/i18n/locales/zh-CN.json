@@ -10093,7 +10093,6 @@
     },
     "useKeyboardShortcuts": {
       "chats_panel": "聊天面板",
-      "close_this_session": "关闭此会话？",
       "cycle_agent": "循环切换代理",
       "cycle_approval_mode": "循环切换审批模式",
       "cycle_model": "循环切换模型",
@@ -10190,7 +10189,19 @@
       "working": "工作中"
     },
     "useSessionActions": {
-      "close_this_session": "关闭此会话？",
+      "close_confirm": {
+        "title": "关闭此会话？",
+        "reason_approval": "一个工具调用正在等待你的批准。关闭会取消它。",
+        "reason_turn": "它仍在撰写回复。关闭会停止这条回复。",
+        "reason_subagents": "它有正在运行或等待启动的子代理。关闭会停止它们。",
+        "reason_queue": "它有等待发送的消息。这些消息不会发送；重新打开会话时它们仍在，可以发送或删除。",
+        "reason_workflow": "它有一个正在运行的工作流。关闭会停止该工作流。",
+        "reason_goal_loop": "它有一个正在运行的目标循环。关闭会停止该循环。",
+        "reason_monitor": "它有一个正在监视变更的监视器。关闭会停止该监视器。",
+        "reason_work": "它仍有工作在运行。关闭会停止这些工作。",
+        "reason_setting": "它没有正在运行的内容。之所以询问，是因为设置中开启了“{{setting}}”。",
+        "actions": "对话和消息框中的草稿都会保留，之后可以重新打开会话。"
+      },
       "reload_failed": "会话重新加载失败。代理可能正在处理消息或网关不可达；请等会话空闲后重试。",
       "duplicate_unreachable": "无法复制此会话。无法连接到 {{productName}}。请检查网络连接后重试。",
       "reload_failed_subagents": "该会话的子代理仍在工作中。等它们完成后再试。",

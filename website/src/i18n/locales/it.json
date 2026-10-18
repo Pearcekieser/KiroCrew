@@ -10379,7 +10379,6 @@
     },
     "useKeyboardShortcuts": {
       "chats_panel": "Pannello delle chat",
-      "close_this_session": "Chiudere questa sessione?",
       "cycle_agent": "Scorri gli agenti",
       "cycle_approval_mode": "Scorri le modalità di approvazione",
       "cycle_model": "Scorri i modelli",
@@ -10478,7 +10477,19 @@
       "working": "Al lavoro"
     },
     "useSessionActions": {
-      "close_this_session": "Chiudere questa sessione?",
+      "close_confirm": {
+        "title": "Chiudere questa sessione?",
+        "reason_approval": "Una chiamata a uno strumento attende la tua approvazione. Chiuderla la annulla.",
+        "reason_turn": "Sta ancora scrivendo una risposta. Chiuderla interrompe quella risposta.",
+        "reason_subagents": "Ha sub-agenti in esecuzione o in attesa di partire. Chiuderla li ferma.",
+        "reason_queue": "Ha messaggi in attesa di invio. Non vengono inviati; quando riapri la sessione li ritrovi da inviare o eliminare.",
+        "reason_workflow": "Un workflow è in esecuzione al suo interno. Chiuderla ferma il workflow.",
+        "reason_goal_loop": "Ha un ciclo obiettivo in esecuzione. Chiuderla ferma il ciclo.",
+        "reason_monitor": "Ha un monitor che controlla le modifiche. Chiuderla ferma il monitor.",
+        "reason_work": "Ha ancora lavoro in corso. Chiuderla ferma quel lavoro.",
+        "reason_setting": "Non c’è nulla in esecuzione. Te lo chiediamo perché «{{setting}}» è attivo nelle Impostazioni.",
+        "actions": "La conversazione e la bozza nella casella del messaggio vengono conservate, e puoi riaprire la sessione in seguito."
+      },
       "reload_failed": "Ricarica della sessione non riuscita. L'agente potrebbe essere impegnato in un turno o il gateway non raggiungibile; riprova quando la sessione è inattiva.",
       "duplicate_unreachable": "Impossibile duplicare questa sessione. {{productName}} non è raggiungibile. Controlla la connessione e riprova.",
       "reload_failed_subagents": "I sub-agenti stanno ancora lavorando su questa sessione. Riprova quando avranno finito.",

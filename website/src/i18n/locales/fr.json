@@ -10379,7 +10379,6 @@
     },
     "useKeyboardShortcuts": {
       "chats_panel": "Panneau des chats",
-      "close_this_session": "Fermer cette session ?",
       "cycle_agent": "Faire défiler les agents",
       "cycle_approval_mode": "Faire défiler les modes d’approbation",
       "cycle_model": "Faire défiler les modèles",
@@ -10478,7 +10477,19 @@
       "working": "En cours"
     },
     "useSessionActions": {
-      "close_this_session": "Fermer cette session ?",
+      "close_confirm": {
+        "title": "Fermer cette session ?",
+        "reason_approval": "Un appel d’outil attend ton approbation. La fermer l’annule.",
+        "reason_turn": "Elle est encore en train de rédiger une réponse. La fermer arrête cette réponse.",
+        "reason_subagents": "Des sous-agents y sont en cours d’exécution ou en attente de démarrage. La fermer les arrête.",
+        "reason_queue": "Des messages y attendent d’être envoyés. Ils ne partent pas ; quand tu rouvres la session, ils sont là pour que tu les envoies ou les supprimes.",
+        "reason_workflow": "Un workflow y est en cours d’exécution. La fermer arrête le workflow.",
+        "reason_goal_loop": "Une boucle d’objectif y tourne. La fermer arrête la boucle.",
+        "reason_monitor": "Un moniteur y surveille les changements. La fermer arrête le moniteur.",
+        "reason_work": "Du travail y est encore en cours. La fermer arrête ce travail.",
+        "reason_setting": "Rien n’y est en cours. Cette question s’affiche parce que « {{setting}} » est activé dans les Paramètres.",
+        "actions": "La conversation et le brouillon de ta zone de message sont conservés, et tu peux rouvrir la session plus tard."
+      },
       "reload_failed": "Échec du rechargement de la session. L'agent est peut-être en train de répondre ou la passerelle est injoignable ; réessayez quand la session est inactive.",
       "duplicate_unreachable": "Impossible de dupliquer cette session. {{productName}} est injoignable. Vérifie ta connexion et réessaie.",
       "reload_failed_subagents": "Des sous-agents travaillent encore sur cette session. Réessayez quand ils auront terminé.",

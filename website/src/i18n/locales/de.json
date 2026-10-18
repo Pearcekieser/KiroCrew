@@ -10236,7 +10236,6 @@
     },
     "useKeyboardShortcuts": {
       "chats_panel": "Chats-Panel",
-      "close_this_session": "Diese Sitzung schließen?",
       "cycle_agent": "Agenten durchschalten",
       "cycle_approval_mode": "Genehmigungsmodus durchschalten",
       "cycle_model": "Modell durchschalten",
@@ -10334,7 +10333,19 @@
       "working": "Arbeitet"
     },
     "useSessionActions": {
-      "close_this_session": "Diese Sitzung schließen?",
+      "close_confirm": {
+        "title": "Diese Sitzung schließen?",
+        "reason_approval": "Ein Tool-Aufruf wartet auf deine Genehmigung. Schließen bricht ihn ab.",
+        "reason_turn": "Sie arbeitet noch an einer Antwort. Schließen bricht diese Antwort ab.",
+        "reason_subagents": "In ihr laufen Sub-Agents oder warten auf ihren Start. Schließen stoppt sie.",
+        "reason_queue": "In ihr warten Nachrichten auf den Versand. Die Nachrichten werden nicht gesendet; wenn du die Sitzung erneut öffnest, sind sie wieder da und du kannst sie senden oder löschen.",
+        "reason_workflow": "In ihr läuft ein Workflow. Schließen stoppt den Workflow.",
+        "reason_goal_loop": "In ihr läuft eine Zielschleife. Schließen stoppt die Schleife.",
+        "reason_monitor": "In ihr achtet ein Monitor auf Änderungen. Schließen stoppt den Monitor.",
+        "reason_work": "In ihr läuft noch Arbeit. Schließen stoppt diese Arbeit.",
+        "reason_setting": "In ihr läuft nichts. Du wirst gefragt, weil „{{setting}}“ in den Einstellungen aktiviert ist.",
+        "actions": "Die Unterhaltung und der Entwurf in deinem Eingabefeld bleiben erhalten, und du kannst die Sitzung später wieder öffnen."
+      },
       "reload_failed": "Sitzung konnte nicht neu geladen werden. Der Agent ist möglicherweise mitten in einem Zug oder das Gateway ist nicht erreichbar; versuchen Sie es erneut, wenn die Sitzung inaktiv ist.",
       "duplicate_unreachable": "Diese Sitzung konnte nicht dupliziert werden. {{productName}} ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.",
       "reload_failed_subagents": "Unteragenten arbeiten noch an dieser Sitzung. Versuchen Sie es erneut, wenn sie fertig sind.",

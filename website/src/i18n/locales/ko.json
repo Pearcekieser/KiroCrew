@@ -10093,7 +10093,6 @@
     },
     "useKeyboardShortcuts": {
       "chats_panel": "채팅 패널",
-      "close_this_session": "이 세션을 닫으시겠습니까?",
       "cycle_agent": "에이전트 순환",
       "cycle_approval_mode": "승인 모드 순환",
       "cycle_model": "모델 순환",
@@ -10190,7 +10189,19 @@
       "working": "작업 중"
     },
     "useSessionActions": {
-      "close_this_session": "이 세션을 닫으시겠습니까?",
+      "close_confirm": {
+        "title": "이 세션을 닫으시겠습니까?",
+        "reason_approval": "도구 호출이 승인을 기다리고 있습니다. 닫으면 취소됩니다.",
+        "reason_turn": "아직 응답을 작성하고 있습니다. 닫으면 그 응답이 중지됩니다.",
+        "reason_subagents": "실행 중이거나 시작을 기다리는 하위 에이전트가 있습니다. 닫으면 모두 중지됩니다.",
+        "reason_queue": "전송을 기다리는 메시지가 있습니다. 전송되지 않으며, 세션을 다시 열면 그대로 남아 있어 보내거나 삭제할 수 있습니다.",
+        "reason_workflow": "이 세션에서 워크플로가 실행 중입니다. 닫으면 워크플로가 중지됩니다.",
+        "reason_goal_loop": "목표 루프가 실행 중입니다. 닫으면 루프가 중지됩니다.",
+        "reason_monitor": "변경 사항을 감시하는 모니터가 있습니다. 닫으면 모니터가 중지됩니다.",
+        "reason_work": "아직 진행 중인 작업이 있습니다. 닫으면 그 작업이 중지됩니다.",
+        "reason_setting": "실행 중인 것은 없습니다. 설정에서 ‘{{setting}}’이(가) 켜져 있어서 확인합니다.",
+        "actions": "대화와 메시지 입력란의 초안은 유지되며 나중에 세션을 다시 열 수 있습니다."
+      },
       "reload_failed": "세션 다시 로드에 실패했습니다. 에이전트가 응답 중이거나 게이트웨이에 연결할 수 없습니다. 세션이 유휴 상태일 때 다시 시도하세요.",
       "duplicate_unreachable": "이 세션을 복제할 수 없습니다. {{productName}}에 연결할 수 없습니다. 연결을 확인한 뒤 다시 시도하세요.",
       "reload_failed_subagents": "이 세션의 하위 에이전트가 아직 작업 중입니다. 완료된 후 다시 시도하세요.",
