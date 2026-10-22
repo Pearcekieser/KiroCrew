@@ -6,6 +6,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import type { ChatMessage, SubagentActivity, ToolActivity } from '../types'
+import { reduceResume } from './resumeLanded'
 import reducer, {
   setActiveSlot,
   appendMessage,
@@ -195,22 +196,14 @@ describe('slotHistory — session navigation stack', () => {
 
   it('resumeFromHistory.fulfilled with a chat-page surface still consumes the row and switches', () => {
     let state = { ...initial, activeSlot: 'A', history: [{ key: 'H', title: 'old', messages: 1 }] }
-    state = reducer(state, {
-      type: 'chat/resumeFromHistory/fulfilled',
-      meta: { arg: { key: 'H', title: 'old' }, requestId: 'r1', requestStatus: 'fulfilled' as const },
-      payload: { ok: true, key: 'H', surface: 'orchestrator', messages: [], hasMore: false, total: 0 },
-    })
+    state = reduceResume(reducer, state, { ok: true, key: 'H', surface: 'orchestrator', messages: [], hasMore: false, total: 0 }, 'r1', { key: 'H', title: 'old' })
     expect(state.history).toEqual([])
     expect(state.activeSlot).toBe('H')
   })
 
   it('resumeFromHistory.fulfilled pushes activeSlot onto history', () => {
     let state = { ...initial, activeSlot: 'A' }
-    state = reducer(state, {
-      type: 'chat/resumeFromHistory/fulfilled',
-      meta: { arg: { key: 'H', title: 'old' }, requestId: 'r1', requestStatus: 'fulfilled' as const },
-      payload: { ok: true, key: 'H', messages: [], hasMore: false, total: 0 },
-    })
+    state = reduceResume(reducer, state, { ok: true, key: 'H', messages: [], hasMore: false, total: 0 }, 'r1', { key: 'H', title: 'old' })
     expect(state.activeSlot).toBe('H')
     expect(state.slotHistory).toEqual(['A'])
   })
@@ -257,11 +250,7 @@ describe('slotHistory — session navigation stack', () => {
 
   it('resumeFromHistory removes resumed key from history (invariant: activeSlot ∉ slotHistory)', () => {
     let state = { ...initial, activeSlot: 'A', slotHistory: ['H', 'B'] }
-    state = reducer(state, {
-      type: 'chat/resumeFromHistory/fulfilled',
-      meta: { arg: { key: 'H', title: 'old' }, requestId: 'r1', requestStatus: 'fulfilled' as const },
-      payload: { ok: true, key: 'H', messages: [], hasMore: false, total: 0 },
-    })
+    state = reduceResume(reducer, state, { ok: true, key: 'H', messages: [], hasMore: false, total: 0 }, 'r1', { key: 'H', title: 'old' })
     expect(state.activeSlot).toBe('H')
     expect(state.slotHistory).not.toContain('H')
     expect(state.slotHistory).toContain('A')

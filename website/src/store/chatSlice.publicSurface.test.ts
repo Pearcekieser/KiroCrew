@@ -113,7 +113,7 @@ const INITIAL_STATE = {
   slotSwitchRequestId: null, slotSwitchTarget: null, slotSwitchLatestRequestId: null, slotSwitchOrigin: null, switchSlotGone: null,
   loadingOlder: false, slotOlderError: false, lastChunkSeq: undefined, lastChunkGen: undefined,
   _wsChunkedDuringFetch: false, liveFrameSeq: 0, refreshAppliedSeq: {}, _redeliveredFramesDropped: 0, history: [], historyHasMore: false,
-  historyOffset: 0, unresumableResume: null, lastResumeRequestId: null, undeletableHistory: null,
+  historyOffset: 0, unresumableResume: null, lastResumeRequestId: null, pendingResumeKey: null, undeletableHistory: null,
   pendingInput: null, mainComposerAppend: null, agentSwitchNotice: null, creatingSlot: false, foregroundCreateId: null, pendingForkOpens: 0,
   lastCreatedActivation: null, slotContextPct: {}, slotContextTokens: {}, voicePlaying: false,
   voicePreparing: false, voiceAudio: null, subagents: {}, subagentQueued: {}, subagentQueuedReason: {}, automations: {},

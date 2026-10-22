@@ -187,9 +187,17 @@ export const createSlot = createAsyncThunk<
   },
 )
 
-export const resumeFromHistory = createAsyncThunk(
+export const resumeFromHistory = createAsyncThunk<
+  { ok: boolean; key: string; surface: string; nextBefore: number; messages: ReturnType<typeof filterMessages>; hasMore: boolean; total: number },
+  { key: string; title: string },
+  { fulfilledMeta: { originActiveSlot: string | null; originActiveSlotMoves: number; originActiveSlotAutoMoves: number } }
+>(
   'chat/resumeFromHistory',
-  async ({ key, title }: { key: string; title: string }, { dispatch }) => {
+  async ({ key, title }, { dispatch, getState, fulfillWithValue }) => {
+    // Where the user stands when the resume starts, as `createSlot` captures
+    // it. A resume rebuilds the slot from its transcript and can take seconds;
+    // the fulfilled reducer asks `forkMayOpen` before it opens the session.
+    const origin = captureForkOrigin(getState() as RootState)
     const d = await api.resumeChatSlot(key, title)
     if (d.ok) {
       dispatch(addSlotOptimistic({ key: d.key, title: title || d.key, messages: 0, running: false, memory_mode: d.memory_mode, mode: d.mode, surface: d.surface ?? d.mode, pending_approval: false, waiting_for_input: false, last_activity_ts: undefined }))
@@ -203,7 +211,15 @@ export const resumeFromHistory = createAsyncThunk(
     // shows default/orchestrator, see isChatPageSurface) can tell a
     // silently-unusable resume apart from a genuinely failed one (#3624) --
     // the request succeeds either way, so `ok` alone cannot distinguish them.
-    return { ok: d.ok, key: d.key, surface: d.surface ?? d.mode, nextBefore: cursor ?? 0, messages: filterMessages(d.messages || []), hasMore: cursor !== null && (d.has_more || false), total: d.total || 0 }
+    return fulfillWithValue(
+      { ok: d.ok, key: d.key, surface: d.surface ?? d.mode, nextBefore: cursor ?? 0, messages: filterMessages(d.messages || []), hasMore: cursor !== null && (d.has_more || false), total: d.total || 0 },
+      { originActiveSlot: origin.activeSlot, originActiveSlotMoves: origin.moves, originActiveSlotAutoMoves: origin.autoMoves },
+    )
+  },
+  {
+    // A repeat of the resume already on its way (a double click or a double
+    // Enter on a slow row) is dropped here, for every entry point at once.
+    condition: ({ key }, { getState }) => (getState() as RootState).chat.pendingResumeKey !== key,
   },
 )
 
@@ -459,9 +475,12 @@ export function addLifecycleCases(builder: ActionReducerMapBuilder<ChatState>): 
       // A new attempt supersedes whatever the previous one narrated, and its
       // requestId becomes the only answer allowed to write the notice below.
       state.lastResumeRequestId = action.meta.requestId
+      state.pendingResumeKey = action.meta.arg.key
       state.unresumableResume = null
     })
     .addCase(resumeFromHistory.fulfilled, (state, action) => {
+      const latest = action.meta.requestId === state.lastResumeRequestId
+      if (latest) state.pendingResumeKey = null
       // A resume that resolved to a surface ChatPage cannot display must not
       // mutate this slice at all: consuming the history row while the notice
       // says "can't be opened" reads as data loss, and switching activeSlot
@@ -510,6 +529,14 @@ export function addLifecycleCases(builder: ActionReducerMapBuilder<ChatState>): 
           // nothing here and must not move the offset.
           state.historyOffset = Math.max(0, state.historyOffset - 1)
         }
+        // The session is an open tab now either way; only taking the view is
+        // conditional. A later resume is the user's newer pick, so an earlier
+        // one answering after it must not open (latest click wins, the same
+        // token that orders the notice). And a session the user opened while
+        // this resume was pending, or a return to the origin, is a choice the
+        // late answer must not undo: the rule creates and forks follow.
+        const origin = { activeSlot: action.meta.originActiveSlot ?? null, moves: action.meta.originActiveSlotMoves ?? 0, autoMoves: action.meta.originActiveSlotAutoMoves ?? 0 }
+        if (!latest || !forkMayOpen({ chat: state }, origin)) return
         state.slotHistory = state.slotHistory.filter(k => k !== action.payload.key)
         if (state.activeSlot) {
           state.slotActivity[state.activeSlot] = { toolLog: state.toolLog, subagents: state.subagents, activityTab: state.activityTab, activityOpen: state.activityOpen }
@@ -548,6 +575,7 @@ export function addLifecycleCases(builder: ActionReducerMapBuilder<ChatState>): 
       // `void dispatch`, the notification panel's console log -- so the click
       // looked exactly as dead as the bug this field exists to fix.
       if (action.meta.requestId !== state.lastResumeRequestId) return
+      state.pendingResumeKey = null
       state.unresumableResume = {
         key: action.meta.arg.key,
         title: action.meta.arg.title,
