@@ -7,7 +7,7 @@ import { api } from '../../api/client'
 import type { ChatLaunchOptions } from '../../app-sdk'
 import { i18nT } from '../../i18n/t'
 import { useSessionTabs } from '../../hooks/useSessionTabs'
-import { useAppSelector, type AppDispatch } from '../../store'
+import { useAppSelector, useAppStore, type AppDispatch } from '../../store'
 import {
   createSlot,
   deleteSlot,
@@ -1146,8 +1146,8 @@ export function useChatPageSessionController({
   // The hub's record of this pane's last chat (#16009), used for the first
   // pick only. A soft hint, unlike ?sid=: a chat that is gone falls through.
   const slotHintRef = useRef(embedded ? null : searchParams.get(PANE_SLOT_HINT_PARAM))
-  // A create or fork started here that will open its own chat when it lands.
-  const openPending = useAppSelector(s => s.chat.foregroundCreateId != null || (s.chat.pendingForkOpens ?? 0) > 0)
+  // A create, fork or resume started here that will open its own chat when it lands.
+  const openPending = useAppSelector(s => s.chat.foregroundCreateId != null || (s.chat.pendingForkOpens ?? 0) > 0 || s.chat.pendingResumeKey != null)
   // The wait is a lease, not a promise: create and fork POSTs carry no
   // deadline, so a request the connection never settles would otherwise keep
   // the page empty for good. The lease starts when the page loses its chat
@@ -1223,6 +1223,7 @@ export function useChatPageSessionController({
   // "at bottom" on switch used to yank a restored mid-history reader the moment
   // a tip band or a running-state tick fired.
 
+  const store = useAppStore()
   const handleResumeSession = useCallback(async (key: string, title: string) => {
     try {
       const result = await dispatch(resumeFromHistory({ key, title })).unwrap()
@@ -1236,12 +1237,16 @@ export function useChatPageSessionController({
       // apart: the wire request succeeds either way, which is why the thunk
       // returns `surface` at all.
       if (!result.ok || !isChatPageSurface(result.surface)) return
+      // Nor when the resume did not take the view: the user opened another
+      // session (or clicked a newer row) while it was pending, so the tab it
+      // would retire is not being replaced.
+      if (store.getState().chat.activeSlot !== result.key) return
       if (activeSlot && activeSlot !== key) {
         delete drafts.current[activeSlot]; delete fileDrafts.current[activeSlot]; delete pasteDrafts.current[activeSlot]; prevSlot.current = null; saveDrafts()
         dispatch(deleteSlot(activeSlot)).unwrap().catch(() => {})
       }
     } catch { /* resume failed — keep current slot */ }
-  }, [activeSlot, dispatch, drafts, fileDrafts, pasteDrafts, prevSlot, saveDrafts])
+  }, [activeSlot, dispatch, drafts, fileDrafts, pasteDrafts, prevSlot, saveDrafts, store])
 
   return {
     closeSessionTab,

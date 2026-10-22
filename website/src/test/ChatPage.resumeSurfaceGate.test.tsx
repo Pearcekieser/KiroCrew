@@ -34,7 +34,7 @@ vi.mock('../api/client', () => ({
   },
 }))
 
-import chatReducer, { resumeFromHistory, deleteSlot } from '../store/chatSlice'
+import chatReducer, { resumeFromHistory, deleteSlot, setActiveSlot } from '../store/chatSlice'
 import dashboardReducer from '../store/dashboardSlice'
 import { isChatPageSurface } from '../utils/channelOrigin'
 import { api } from '../api/client'
@@ -63,6 +63,7 @@ function makeHandleResumeSession(
     try {
       const result = await store.dispatch(resumeFromHistory({ key, title }) as never).unwrap()
       if (!result.ok || !isChatPageSurface(result.surface)) return
+      if (store.getState().chat.activeSlot !== result.key) return
       if (activeSlot && activeSlot !== key) {
         delete drafts[activeSlot]
         await store.dispatch(deleteSlot(activeSlot) as never).unwrap().catch(() => {})
@@ -102,6 +103,26 @@ describe('ChatPage handleResumeSession surface gate (#5925)', () => {
     expect(deleteChatSlotMock).toHaveBeenCalledWith('chat-1')
     expect(drafts['chat-1']).toBeUndefined()
     expect(store.getState().chat.activeSlot).toBe('chat-9')
+  })
+
+  // The resume answered after the user opened another session, so it did not
+  // take the view (`forkMayOpen`). The tab it would have replaced stays.
+  it('does not delete the origin tab when the user moved while the resume ran', async () => {
+    let land!: (v: unknown) => void
+    resumeChatSlotMock.mockReturnValue(new Promise(r => { land = r }))
+    const store = makeStore()
+    store.dispatch(setActiveSlot('chat-1'))
+    const drafts: Record<string, string> = { 'chat-1': 'half-typed question' }
+
+    const done = makeHandleResumeSession(store, 'chat-1', drafts)('chat-9', 'Older chat')
+    await vi.waitFor(() => expect(resumeChatSlotMock).toHaveBeenCalled())
+    store.dispatch(setActiveSlot('chat-2'))
+    land({ ok: true, key: 'chat-9', mode: '', messages: [] })
+    await done
+
+    expect(deleteChatSlotMock).not.toHaveBeenCalled()
+    expect(drafts['chat-1']).toBe('half-typed question')
+    expect(store.getState().chat.activeSlot).toBe('chat-2')
   })
 
   it('leaves the current slot alone when the resume failed outright', async () => {

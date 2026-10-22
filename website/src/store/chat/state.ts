@@ -351,6 +351,12 @@ export interface ChatState {
    *  sequence ref, which could only order ITS OWN clicks -- a palette resume
    *  racing a sidebar resume was unordered before. */
   lastResumeRequestId: string | null
+  /** The history key the most recent resume asked for while it is pending,
+   *  else null. A second resume of the same key is dropped while it is set
+   *  (a double click on a slow resume), and the chat page counts it like a
+   *  pending create or fork: it does not auto-open another session while the
+   *  resume that will open one is on its way. */
+  pendingResumeKey?: string | null
   /** A history delete the gateway REFUSED (409 with a `code`), sibling of
    *  `unresumableResume` above and rendered at the same site. The row is still
    *  in `history` -- nothing was deleted -- so without this the click looked
@@ -710,6 +716,7 @@ export const initialState: ChatState = {
   historyOffset: 0,
   unresumableResume: null,
   lastResumeRequestId: null,
+  pendingResumeKey: null,
   undeletableHistory: null,
   pendingInput: null,
   mainComposerAppend: null,
