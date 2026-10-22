@@ -101,6 +101,29 @@ def _created_slot_row(state: Any, request: web.Request, slot: Any) -> dict[str, 
     return row
 
 
+def _retract_failed_newborn(state: DashboardState, slot: _ChatSlot) -> bool:
+    """Withdraw a slot this create minted and is answering with a failure.
+
+    The mint runs inside the create's ``suspend_slots_push`` block, so a newborn
+    still in ``state._slots`` when a failure returns goes out in the block's owed
+    frame: every client lists a session the caller was told did not get created,
+    and each retry adds another empty row. Removed synchronously, before the
+    block exits, so that frame never lists it, together with the restricted and
+    ephemeral keys the mint registered. Retracted only while it is provably the
+    newborn: a slot replaced under its key, or one a turn started on during the
+    create's awaits, stays (liveness over tidiness). Returns whether it was
+    retracted, so the caller undoes the selection it recorded for the key only
+    when no slot holds that key any more.
+    """
+    if slot.running or slot.messages or state._slots.get(slot.key) is not slot:
+        return False
+    state._slots.pop(slot.key, None)
+    state._restricted_keys.discard(f"dashboard:{slot.key}")
+    state._ephemeral_keys.discard(f"dashboard:{slot.key}")
+    _sync_dashboard_slots(state)
+    return True
+
+
 async def api_chat_slot_create(request: web.Request) -> web.Response:
     """POST /api/chat/slots — create a new chat slot."""
     state: DashboardState = request.app["state"]
@@ -537,6 +560,8 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
         # know about. The reason stays in the audit row.
         denied = deny_app_slot_session_access(request_app, slot, slot.key, "chat_slot_create")
         if denied is not None:
+            if is_new_slot:
+                _retract_failed_newborn(state, slot)
             return denied
         # Pin title if explicitly provided (prevents auto-title from overwriting).
         # A cron caller uses this route as both create and reopen. Its title names
@@ -741,6 +766,9 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                 except Exception as exc:
                     from kiro_crew.dashboard.handlers.memory import _store_unavailable_response
 
+                    # The selection record returns its change only on success,
+                    # so this path has no recorded pick to restore.
+                    _retract_failed_newborn(state, slot)
                     return _store_unavailable_response(slot.memory_store, exc)
                 if (
                     state._slots.get(slot.key) is not slot
@@ -748,6 +776,7 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                     or slot.agent != assignment_agent
                     or slot.project != assignment_project
                 ):
+                    _retract_failed_newborn(state, slot)
                     await drained_to_thread(
                         restore_agent_selection, assignment_key, selection_change
                     )
@@ -812,19 +841,15 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
             except asyncio.CancelledError:
                 # A shutdown mid-write is the same unbound newborn; retract it on
                 # the way out, as the twin does.
-                if not slot.running and not slot.messages and state._slots.get(slot.key) is slot:
-                    state._slots.pop(slot.key, None)
+                _retract_failed_newborn(state, slot)
                 raise
             if not persisted:
-                if not slot.running and not slot.messages and state._slots.get(slot.key) is slot:
-                    state._slots.pop(slot.key, None)
-                    # The pick recorded above and the dashboard-tab registry both
-                    # name a key no slot holds now; undo them with the slot, as
-                    # the `session_rebound` branch does.
+                if _retract_failed_newborn(state, slot):
+                    # The pick recorded above names a key no slot holds now;
+                    # undo it with the slot, as the `session_rebound` branch does.
                     await drained_to_thread(
                         restore_agent_selection, assignment_key, selection_change
                     )
-                    _sync_dashboard_slots(state)
                 else:
                     slot._dirty = True
                 return web.json_response(
