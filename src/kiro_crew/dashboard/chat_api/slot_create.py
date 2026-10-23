@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
     from kiro_crew.dashboard.chat_handlers import (
         _CREATABLE_MODES,
         _DEFERRED_PLAIN_CREATE_KNOWN_KEYS,
@@ -69,6 +71,7 @@ if TYPE_CHECKING:
         voice_runtime_workspace_conflict,
         wait_for_memory_preparation,
     )
+    from kiro_crew.session_agent_selection import SelectionChange
 
 
 def _default_template_stamp(cfg: KiroCrewConfig) -> str:
@@ -512,6 +515,30 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                     exc,
                 )
             return web.json_response({"error": str(exc)}, status=409)
+        # Set by the member assignment below once it records a pick, so a
+        # failure after that point can undo the pick with the slot.
+        assignment_key = ""
+        selection_change: SelectionChange | None = None
+        if is_new_slot:
+
+            async def _retract_newborn_on_raise(
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                tb: TracebackType | None,
+            ) -> bool:
+                # The failure returns below retract the newborn themselves. This
+                # covers everything else that can leave the block after the
+                # mint: an unexpected exception at any await, and a
+                # cancellation, which no `except Exception` catches. Registered
+                # after `suspend_slots_push`, so it unwinds first and the frame
+                # that block flushes on the way out never lists the newborn.
+                if exc_type is not None and _retract_failed_newborn(state, slot):
+                    await drained_to_thread(
+                        restore_agent_selection, assignment_key, selection_change
+                    )
+                return False
+
+            creation_stack.push_async_exit(_retract_newborn_on_raise)
         if is_new_slot and agent_kind and not slot.agent_kind:
             # The namespace the name was stated (or stamped) in travels with the
             # slot from birth, for every caller: the owner branch below re-records
@@ -731,7 +758,6 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
                 assignment_agent = slot.agent
                 assignment_project = slot.project
                 await creation_stack.enter_async_context(_slot_switch_session_lock(assignment_key))
-                selection_change = None
                 try:
                     # An explicit template choice is the shared template even when
                     # a member carries the same name: it never pins member memory.
@@ -836,13 +862,9 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
             # restart would bring it back without its binding. Retracted only
             # while it is still provably the newborn: a turn that started on it
             # during the write keeps the slot (liveness over tidiness).
-            try:
-                persisted = await _persist_app_agent_owner(state, slot)
-            except asyncio.CancelledError:
-                # A shutdown mid-write is the same unbound newborn; retract it on
-                # the way out, as the twin does.
-                _retract_failed_newborn(state, slot)
-                raise
+            # A shutdown mid-write is the same unbound newborn, retracted on the
+            # way out by the unwind callback registered at the mint.
+            persisted = await _persist_app_agent_owner(state, slot)
             if not persisted:
                 if _retract_failed_newborn(state, slot):
                     # The pick recorded above names a key no slot holds now;
