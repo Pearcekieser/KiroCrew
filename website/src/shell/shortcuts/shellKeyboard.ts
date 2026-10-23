@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useAppSelector, useAppDispatch, store } from '../../store'
+import { useAppSelector, useAppDispatch, useAppStore, store } from '../../store'
 import { changeApprovalMode, updateSlot } from '../../store/dashboardSlice'
-import { createSlot, setAgentSwitchNotice } from '../../store/chatSlice'
+import { setAgentSwitchNotice } from '../../store/chatSlice'
+import { createChatForView, showCreatedChat } from '../../lib/createdChatView'
 import { pendingSlotSwitch, pendingSlotSwitchTarget, performSlotSwitch } from '../../lib/slotSwitch'
 import { performAgentSlotSwitch } from '../../lib/agentSwitch'
 import { focusComposerElement, queryComposerOrExpand } from '../../pages/chat/composerFocus'
@@ -42,16 +43,26 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
 }) {
   const navigate = useNavigate()
   const dispatch = useAppDispatch()
+  // The Provider's store, so the create is judged against the store it was
+  // dispatched to; the module singleton would bypass a test-injected store.
+  const appStore = useAppStore()
   const queryClient = useQueryClient()
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const toggleShortcutsModal = useCallback(() => setShortcutsOpen(p => !p), [])
   // Search Everywhere command palette — global double-Shift / ⌘K
   // trigger + open state. Mounted once at the app shell (`shell/appShell.tsx`).
   const commandPalette = useCommandPalette()
+  // Set before `mutate` and cleared on settle, because `isPending` only
+  // changes after a render: a second press during one create is dropped, so
+  // one create makes one session, the same rule as the header New button.
+  const newChatInFlightRef = useRef(false)
   const newChatMutation = useMutation({
-    mutationFn: () => dispatch(createSlot({ defaultFolder: true })).unwrap(),
-    onSuccess: () => {
-      navigate('/chat')
+    mutationFn: () => createChatForView(dispatch, appStore.getState, { defaultFolder: true }),
+    onSettled: () => { newChatInFlightRef.current = false },
+    onSuccess: (view) => {
+      // A create the user moved away from (another session, another page)
+      // leaves the user there: no navigate and no composer focus.
+      if (!showCreatedChat(view, navigate)) return
       // Unguarded on purpose: this mutation only fires from the new-chat
       // keyboard shortcut, and a pressed shortcut proves a keyboard exists —
       // focusComposer()'s touch-device skip would wrongly suppress focus on a
@@ -95,7 +106,11 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
       dispatch(setAgentSwitchNotice(agentSwitchFailureMessage(error)))
     }
   }, [dispatch])
-  useKeyboardShortcuts({ onToggleShortcutsModal: toggleShortcutsModal, onNewChat: () => newChatMutation.mutate(), disabled: shortcutsOpen,
+  useKeyboardShortcuts({ onToggleShortcutsModal: toggleShortcutsModal, onNewChat: () => {
+    if (newChatInFlightRef.current) return
+    newChatInFlightRef.current = true
+    newChatMutation.mutate()
+  }, disabled: shortcutsOpen,
     onToggleFocusMode: toggleFocusMode,
     onCycleAgent: () => {
       const slots = store.getState().dashboard.slots

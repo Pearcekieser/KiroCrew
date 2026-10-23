@@ -21,19 +21,27 @@ vi.mock('react-router-dom', async (importOriginal) => ({
 }))
 
 const createSlotOutcome = vi.hoisted(() => ({ fail: false }))
+/** The real thunk's `fulfilled` creator, so a mocked create opens its session
+ *  through the real reducer and records `lastCreatedActivation`. */
+const realCreateSlot = vi.hoisted(() => ({ fulfilled: null as null | ((...a: unknown[]) => unknown) }))
 const createSlot = vi.hoisted(() =>
-  vi.fn(() => () => {
+  vi.fn(() => (dispatch: (a: unknown) => unknown, getState: () => { chat: { activeSlot: string | null; activeSlotMoves?: number; activeSlotAutoMoves?: number } }) => {
+    const requestId = 'zzq-create'
+    const { chat } = getState()
+    const meta = { originActiveSlot: chat.activeSlot, originActiveSlotMoves: chat.activeSlotMoves ?? 0, originActiveSlotAutoMoves: chat.activeSlotAutoMoves ?? 0, activate: true }
+    const slot = { key: 'zzq-new-slot', title: '', messages: 0, running: false }
     const p = createSlotOutcome.fail
       ? Promise.reject(new Error('zzq create failed'))
-      : Promise.resolve('zzq-new-slot')
+      : Promise.resolve(slot).then((s) => { dispatch(realCreateSlot.fulfilled!(s, requestId, undefined, meta)); return s })
     // Mimic createAsyncThunk's dispatch return: a promise carrying unwrap().
-    return Object.assign(p.catch(() => undefined), { unwrap: () => p })
+    return Object.assign(p.catch(() => undefined), { unwrap: () => p, requestId })
   }),
 )
-vi.mock('../../store/chatSlice', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  createSlot,
-}))
+vi.mock('../../store/chatSlice', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../store/chatSlice')>()
+  realCreateSlot.fulfilled = actual.createSlot.fulfilled as unknown as (...a: unknown[]) => unknown
+  return { ...actual, createSlot }
+})
 
 import { createTestStore } from '../../test/helpers'
 import { setActiveSlot } from '../../store/chatSlice'

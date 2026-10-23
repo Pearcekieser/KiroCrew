@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { matchPath, useLocation, useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
-import { useAppSelector, useAppDispatch } from '../store'
-import { createSlot } from '../store/chatSlice'
+import { useAppSelector, useAppDispatch, useAppStore } from '../store'
+import { createChatForView, type CreatedChatView } from '../lib/createdChatView'
 import { X, Plus } from 'lucide-react'
 import ErrorNotice from './ErrorNotice'
 import { errMessage } from '../utils/thunkError'
@@ -17,8 +17,6 @@ import {
   truncateTabTitle,
   type TabStatus,
 } from '../lib/sessionTabs'
-import type { ChatSlot } from '../types'
-
 import { i18nT } from '../i18n/t'
 interface Tab { slug: string }
 
@@ -68,6 +66,7 @@ function loadTabs(activeSlot: string | null): { tabs: Tab[]; index: number } {
 export default function EmbedTabStrip() {
   const navigate = useNavigate()
   const dispatch = useAppDispatch()
+  const store = useAppStore()
   const slots = useAppSelector(s => s.dashboard.slots)
   const activeSlot = useAppSelector(s => s.chat.activeSlot)
 
@@ -97,16 +96,28 @@ export default function EmbedTabStrip() {
     else navigate('/embed/sessions', { replace: true })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Set before `mutate` and cleared on settle, because `isPending` only
+  // changes after a render: a repeated Shift+click during one create is
+  // dropped, so it makes one session and one tab.
+  const createInFlightRef = useRef(false)
   const createSlotMutation = useMutation({
-    mutationFn: () => dispatch(createSlot(undefined)).unwrap(),
-    onSuccess: (slot: ChatSlot) => {
+    // The tab the user was on when they asked, passed in so a late success can
+    // tell a tab switch. The route is no guide here: the embedded chat rewrites
+    // its own `/embed/chat/<slug>` when the create opens the new session.
+    mutationFn: (_fromTab: number) => createChatForView(dispatch, store.getState, undefined),
+    onSettled: () => { createInFlightRef.current = false },
+    onSuccess: ({ slot, opened }: CreatedChatView, fromTab: number) => {
       const key = slot?.key
       if (!key) return
+      const shown = opened && activeIndexRef.current === fromTab
+      // A user who switched tabs while the create ran keeps the tab they
+      // picked; the new session still gets its tab, behind it.
+      if (!shown && tabsRef.current.some(t => t.slug === key)) return
       const newTabs = [...tabsRef.current, { slug: key }]
-      const newIndex = newTabs.length - 1
+      const newIndex = shown ? newTabs.length - 1 : activeIndexRef.current
       setTabs(newTabs)
       setActiveIndex(newIndex)
-      navigate(`/embed/chat/${key}?sid=${key}`)
+      if (shown) navigate(`/embed/chat/${key}?sid=${key}`)
       persist(newTabs, newIndex)
     },
   })
@@ -528,7 +539,9 @@ export default function EmbedTabStrip() {
         onClick={e => {
           if (e.shiftKey) {
             // Shift+click: create new session directly
-            createSlotMutation.mutate()
+            if (createInFlightRef.current) return
+            createInFlightRef.current = true
+            createSlotMutation.mutate(activeIndexRef.current)
           } else {
             addTab()
           }
