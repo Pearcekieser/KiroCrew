@@ -4,9 +4,9 @@ import { Check, Upload, Loader2 } from 'lucide-react'
 import { api } from '../api/client'
 import { ApiError } from '../api/apiError'
 import { findReport, parseErrorCode, type ErrorReport } from '../utils/errorReport'
-import { useAppDispatch } from '../store'
+import { useAppDispatch, useAppStore } from '../store'
 import { addSlotOptimistic, fetchSlots } from '../store/dashboardSlice'
-import { switchSlot } from '../store/chatSlice'
+import { captureForkOrigin, forkMayOpen, requestSlotFolderOpen, switchSlot, type ForkOrigin } from '../store/chatSlice'
 import ErrorNotice, {
   ErrorNoticeMenuItem,
   type ErrorNoticeMenuItemComponent,
@@ -196,7 +196,8 @@ interface ImportSessionItemProps {
  * **The outcome does not depend on the menu staying open.** Selecting the row
  * prevents the select-close, but the picker itself blurs the window and Radix
  * closes the menu then anyway. So a success OPENS the imported session — the
- * one signal that survives the menu — and a refusal the unmounted row can no
+ * one signal that survives the menu — unless the user opened another session
+ * while the file uploaded, and a refusal the unmounted row can no
  * longer show goes to `ImportSessionOutcomeNotice`. While the row is still
  * mounted it reports the outcome inline, and an import in flight keeps the row
  * disabled across remounts, so reopening the menu cannot start a second one.
@@ -204,6 +205,7 @@ interface ImportSessionItemProps {
 export default function ImportSessionItem({ Item }: ImportSessionItemProps) {
   const errorId = useId()
   const dispatch = useAppDispatch()
+  const store = useAppStore()
   const [state, setState] = useState<ImportState>({ kind: 'idle' })
   const { pending } = useImportOutcome()
   const mountedRef = useRef(true)
@@ -215,12 +217,13 @@ export default function ImportSessionItem({ Item }: ImportSessionItemProps) {
   // Option-level callbacks, not `mutate()` ones: the row has usually unmounted
   // before the pick lands, and only these run for an unmounted observer.
   const importMutation = useMutation({
-    mutationFn: (file: File) => api.importSessionFromFile(file),
+    // `origin` is where the user stood when they chose the row; see onSuccess.
+    mutationFn: ({ file }: { file: File; origin: ForkOrigin }) => api.importSessionFromFile(file),
     onMutate: () => {
       setOutcome({ pending: true, failure: null })
       if (mountedRef.current) setState({ kind: 'importing' })
     },
-    onSuccess: async (r) => {
+    onSuccess: async (r, { origin }) => {
       if (mountedRef.current) setState({ kind: 'done', title: r.title })
       // Listed as a membership add before anything else, like a create or a
       // fork: a full `slots` frame the gateway built before the import can
@@ -231,9 +234,16 @@ export default function ImportSessionItem({ Item }: ImportSessionItemProps) {
       // stamp to run to its cap. A failed refresh is deliberately not
       // surfaced: the import succeeded, the row is already listed, and the
       // switch loads the session by key.
-      dispatch(addSlotOptimistic({ key: r.key, title: r.title || r.key, messages: r.messages || 0, running: false }))
+      dispatch(addSlotOptimistic({ key: r.key, title: r.title || r.key, messages: r.messages || 0, running: false, ...(r.folder_id ? { folder_id: r.folder_id } : {}) }))
       await dispatch(fetchSlots())
+      // A large file can upload for seconds. A session the user opened in that
+      // time is a choice the import must not undo, the same rule a create or
+      // fork follows; the imported session stays listed either way.
+      if (!forkMayOpen(store.getState(), origin)) return
       dispatch(switchSlot({ key: r.key, keepTargetOnMissing: true }))
+      // Filed under Imported, which the user may have collapsed after an
+      // earlier import: open that path so the active row shows.
+      dispatch(requestSlotFolderOpen({ key: r.key, folder_id: r.folder_id }))
     },
     onError: (e) => {
       // Looked up by the RAW message: the catalog rewording below would miss
@@ -263,7 +273,10 @@ export default function ImportSessionItem({ Item }: ImportSessionItemProps) {
         disabled={pending}
         onSelect={(event: Event) => {
           event.preventDefault()
-          pickSessionFile((file) => { importMutation.mutate(file) })
+          // Taken at the click: the picker is modal, so nothing the user does
+          // can come between this and the pick.
+          const origin = captureForkOrigin(store.getState())
+          pickSessionFile((file) => { importMutation.mutate({ file, origin }) })
         }}
       >
         <Upload size={13} className="shrink-0 text-muted" />

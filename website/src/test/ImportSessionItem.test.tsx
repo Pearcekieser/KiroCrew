@@ -33,8 +33,9 @@ vi.mock('../api/client', () => ({
 
 const switched = vi.hoisted(() => [] as unknown[])
 const chatState = vi.hoisted(() => ({ activeSlot: 'origin' as string | null }))
+const dispatchSpy = vi.hoisted(() => ({ current: null as null | ((a: unknown) => void) }))
 vi.mock('../store', () => ({
-  useAppDispatch: () => (a: unknown) => a,
+  useAppDispatch: () => (a: unknown) => { dispatchSpy.current?.(a); return a },
   useAppStore: () => ({ getState: () => ({ chat: chatState }) }),
 }))
 const slotRefresh = vi.hoisted(() => ({ rejected: false }))
@@ -46,8 +47,14 @@ vi.mock('../store/dashboardSlice', () => ({
     ? { type: 'dashboard/fetchSlots/rejected', meta: { requestId: 'r1', requestStatus: 'rejected' }, error: { message: 'HTTP 500' } }
     : { type: 'dashboard/fetchSlots/fulfilled', meta: { requestId: 'r1', requestStatus: 'fulfilled' } }),
 }))
+const folderOpens = vi.hoisted(() => [] as unknown[])
 vi.mock('../store/chatSlice', () => ({
   switchSlot: (arg: unknown) => { switched.push(arg); return { type: 'test/switchSlot' } },
+  // The origin rule reduced to the active slot; its move counters are pinned
+  // in createRespectsSwitchBack.test.ts.
+  captureForkOrigin: (s: { chat: { activeSlot: string | null } }) => ({ activeSlot: s.chat.activeSlot }),
+  forkMayOpen: (s: { chat: { activeSlot: string | null } }, o: { activeSlot: string | null }) => s.chat.activeSlot === o.activeSlot,
+  requestSlotFolderOpen: (arg: unknown) => { folderOpens.push(arg); return { type: 'test/requestSlotFolderOpen' } },
 }))
 
 import ImportSessionItem, { ImportSessionOutcomeNotice } from '../components/ImportSessionItem'
@@ -112,6 +119,8 @@ describe('ImportSessionItem', () => {
   beforeEach(() => {
     mocks.importSessionFromFile.mockReset()
     switched.length = 0
+    folderOpens.length = 0
+    dispatchSpy.current = null
     chatState.activeSlot = 'origin'
     slotRefresh.rejected = false
     window.history.pushState({}, '', '/chat')
@@ -337,10 +346,9 @@ describe('ImportSessionItem', () => {
     expect(pickerInput()).toBeNull()
   })
 
-  it('opens the imported session wherever the user is, and shows nothing when the list refresh fails', async () => {
-    // A successful import always opens: the page, a session opened meanwhile
-    // and a failed slot-list refresh change nothing, because the switch loads
-    // the session by key and the next slot frame lists it.
+  it('opens the imported session on any page, and shows nothing when the list refresh fails', async () => {
+    // The page and a failed slot-list refresh change nothing, because the
+    // switch loads the session by key and the next slot frame lists it.
     window.history.pushState({}, '', '/popout/chat/origin')
     slotRefresh.rejected = true
     try {
@@ -349,7 +357,6 @@ describe('ImportSessionItem', () => {
       await userEvent.click(screen.getByTestId('row'))
       const input = pickerInput()
       unmount()
-      chatState.activeSlot = 'opened-meanwhile'
 
       await userEvent.upload(input!, exportedFile())
 
@@ -359,6 +366,41 @@ describe('ImportSessionItem', () => {
     } finally {
       window.history.pushState({}, '', '/chat')
     }
+  })
+
+  it('leaves a user who opened another session during the upload where they are', async () => {
+    // A large file uploads for seconds. The session opened meanwhile is the
+    // user's choice; the import is listed and not switched to.
+    const dispatched: { type?: string }[] = []
+    dispatchSpy.current = a => { dispatched.push(a as { type?: string }) }
+    const { unmount } = renderRow()
+    await userEvent.click(screen.getByTestId('row'))
+    const input = pickerInput()
+    unmount()
+    chatState.activeSlot = 'opened-meanwhile'
+
+    await userEvent.upload(input!, exportedFile())
+
+    // The list refresh is the last dispatch before the switch would run.
+    await waitFor(() => expect(dispatched.map(a => a.type)).toContain('dashboard/fetchSlots/fulfilled'))
+    await new Promise(r => setTimeout(r, 0))
+    expect(dispatched.map(a => a.type)).toContain('dashboard/addSlotOptimistic')
+    expect(switched).toEqual([])
+    expect(folderOpens).toEqual([])
+  })
+
+  it('opens the folder path the import was filed in, and lists the row in that folder', async () => {
+    mocks.importSessionFromFile.mockResolvedValue({
+      ok: true, key: 'imported-1', title: 'chat (from mac)', messages: 3, resume_mode: 'prefix', folder_id: 'f-imported',
+    })
+    const dispatched: unknown[] = []
+    dispatchSpy.current = a => { dispatched.push(a) }
+    renderRow()
+    await pick(exportedFile())
+
+    await waitFor(() => expect(folderOpens).toEqual([{ key: 'imported-1', folder_id: 'f-imported' }]))
+    expect(switched).toEqual([{ key: 'imported-1', keepTargetOnMissing: true }])
+    expect(dispatched).toContainEqual({ type: 'dashboard/addSlotOptimistic', payload: expect.objectContaining({ key: 'imported-1', folder_id: 'f-imported' }) })
   })
 
   it('renders a refusal the unmounted row can no longer show in the app shell', async () => {
