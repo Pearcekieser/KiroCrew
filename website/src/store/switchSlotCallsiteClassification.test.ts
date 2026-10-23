@@ -114,4 +114,32 @@ describe('switchSlot call-site classification ratchet (#6372)', () => {
     // here with the file name in the diff.
     expect(actual).toEqual(expected)
   })
+
+  // The ratchet above counts `dispatch(switchSlot(` sites, so a hand-off that
+  // opens the session a `/to-chat` route created by navigating alone
+  // (`navigate('/chat?slot=' + key)`) has no site to count and slips past it.
+  // Such a caller never stamps the key as a membership add, and a full slots
+  // frame serialized before the create drops it after the switch. Pin every
+  // file that calls a `/to-chat` route to the number of `openCreatedSlot(`
+  // calls it makes: a new caller, or one that stops opening through the
+  // helper, fails here.
+  it('every /to-chat caller opens the session through openCreatedSlot', () => {
+    const TO_CHAT_CALL = /\bapi\.(cronToChat|taskRunToChat)\(/g
+    const seen: Record<string, { toChat: number; openCreated: number }> = {}
+    for (const file of walk(SRC)) {
+      const rel = 'src/' + file.slice(SRC.length + 1).replaceAll('\\', '/')
+      const code = readFileSync(file, 'utf-8')
+        .split('\n')
+        .filter(l => !/^\s*(\*|\/\/)/.test(l))
+        .join('\n')
+      const toChat = code.match(TO_CHAT_CALL)?.length ?? 0
+      if (toChat === 0) continue
+      seen[rel] = { toChat, openCreated: code.match(/\bopenCreatedSlot\(dispatch,/g)?.length ?? 0 }
+    }
+    expect(seen).toEqual({
+      'src/components/notifications/NotificationDetailPanel.tsx': { toChat: 2, openCreated: 2 },
+      'src/hooks/useCronActions.ts': { toChat: 1, openCreated: 1 },
+      'src/pages/ProjectsPage.tsx': { toChat: 1, openCreated: 1 },
+    })
+  })
 })
