@@ -16,7 +16,8 @@ type Arg = { key: string; title: string }
 export function resumeLandedActions(chat: ChatState, payload: unknown, requestId: string, arg: Arg): [UnknownAction, UnknownAction] {
   const origin = captureForkOrigin({ chat })
   return [
-    resumeFromHistory.pending(requestId, arg),
+    // The fulfilled action follows at once, so the entry's age never matters.
+    resumeFromHistory.pending(requestId, arg, { startedAt: 0 }),
     resumeFromHistory.fulfilled(payload as never, requestId, arg, {
       originActiveSlot: origin.activeSlot,
       originActiveSlotMoves: origin.moves,
