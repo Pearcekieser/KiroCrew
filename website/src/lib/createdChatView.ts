@@ -1,6 +1,7 @@
 import type { AppDispatch, RootState } from '../store'
 import { createSlot } from '../store/chatSlice'
 import type { ChatSlot } from '../types'
+import { isChatPath } from '../hooks/notificationBanner'
 import { appPathname } from './basePath'
 
 type CreateSlotArg = Parameters<typeof createSlot>[0]
@@ -13,22 +14,38 @@ export interface CreatedChatView {
    *  session or put anything in its composer. */
   shown: boolean
   /** The create switched the chat to its new session, whatever page the user
-   *  is on. A surface that tracks its own "where the user is", such as the
-   *  embed tab strip, combines this with that instead of `shown`. */
+   *  is on. A surface that also tracks its own "where the user is", such as
+   *  the embed tab strip's tab, checks that alongside `shown`. */
   opened: boolean
   /** The app route the user was on when the create started. */
   from: string
 }
 
-/** Whether a route is the chat page, which follows `activeSlot` on its own. */
-export function isChatRoute(pathname: string): boolean {
-  return pathname === '/chat' || pathname.startsWith('/chat/')
+/** The chat pages whose `/<prefix>/<slug>` follows `activeSlot`, so a create
+ *  rewrites the slug without the user changing page. Used only to group a
+ *  route by page; whether a route is a chat surface at all is `isChatPath`.
+ *  A popout or embed window mounts the same shell keyboard and palette as the
+ *  dashboard, and its router redirects any other route back into its own
+ *  frame, so it must never be sent to `/chat`. */
+const SELF_ROUTING_CHAT_PAGES = ['/chat', '/popout/chat', '/embed/chat']
+
+/** An embed tab shows either its session at `/embed/chat/<slug>` or, while it
+ *  has none, the Sessions list. When a create opens a session from a Sessions
+ *  tab, the tab strip fills that tab and routes it to the chat, so both routes
+ *  are the one tab page the user stayed on. */
+const SAME_PAGE_AS: Record<string, string> = { '/embed/sessions': '/embed/chat' }
+
+/** The frames whose router sends any route outside the frame back into it. */
+const FRAME_PREFIXES = ['/popout/', '/embed/']
+
+function chatPageOf(pathname: string): string | null {
+  return SELF_ROUTING_CHAT_PAGES.find(p => pathname === p || pathname.startsWith(`${p}/`)) ?? null
 }
 
-/** The page a route shows. Every `/chat/<slug>` is the one chat page: its
- *  slug follows the active session, so the create itself rewrites it. */
+/** The page a route shows. Every `<chat page>/<slug>` is that one chat page:
+ *  its slug follows the active session, so the create itself rewrites it. */
 function pageOf(pathname: string): string {
-  return isChatRoute(pathname) ? '/chat' : pathname
+  return chatPageOf(pathname) ?? SAME_PAGE_AS[pathname] ?? pathname
 }
 
 /**
@@ -61,12 +78,15 @@ export async function createChatForView(
 }
 
 /**
- * Bring the user to a create that took the view. The chat page already shows
+ * Bring the user to a create that took the view. A chat page already shows
  * the new session and writes its `?sid=`, so a create started there navigates
  * nowhere: an extra push of `/chat` would add a history entry that Back lands
- * on instead of the session the user came from. Returns `shown`.
+ * on instead of the session the user came from. A popout or embed frame never
+ * navigates to `/chat` from any of its pages: its router would redirect that
+ * out of the chat, and the frame shows the session on its own. Returns `shown`.
  */
 export function showCreatedChat(view: CreatedChatView, navigate: (route: string) => void): boolean {
-  if (view.shown && !isChatRoute(view.from)) navigate('/chat')
+  const framed = FRAME_PREFIXES.some(p => view.from.startsWith(p))
+  if (view.shown && !framed && !isChatPath(view.from)) navigate('/chat')
   return view.shown
 }

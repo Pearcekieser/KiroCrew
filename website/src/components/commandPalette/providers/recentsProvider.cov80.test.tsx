@@ -283,11 +283,17 @@ describe('useRecentsProvider — Current group', () => {
   })
 
   it('creates the session before navigating when the create row is activated', async () => {
-    const { result } = harness([slot({ key: 'zzq-a', title: 'zzq A' })])
-    const rows = await result.current.search('')
-    rows[0].onActivate?.()
-    expect(thunks.createSlot).toHaveBeenCalledTimes(1)
-    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/chat'))
+    // Asked from a page that is not a chat surface, so the create navigates.
+    window.history.replaceState(null, '', '/settings')
+    try {
+      const { result } = harness([slot({ key: 'zzq-a', title: 'zzq A' })])
+      const rows = await result.current.search('')
+      rows[0].onActivate?.()
+      expect(thunks.createSlot).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/chat'))
+    } finally {
+      window.history.replaceState(null, '', '/')
+    }
   })
 
   it('lets an existing empty untitled slot BE the create row (no synthetic row)', async () => {

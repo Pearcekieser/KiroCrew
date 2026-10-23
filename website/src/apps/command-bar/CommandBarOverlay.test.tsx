@@ -209,11 +209,16 @@ describe('CommandBarOverlay rows', () => {
   it('navigates to the new session so a success is visible off the chat page', async () => {
     // Created from Settings or Task Runner without this, the session lands off-screen
     // and the success reads as a failure -- the user runs it again into a duplicate.
-    openingDispatch({ slot: 'slot-1', requestId: 'req-1' })
-    const onClose = mount()
-    fireEvent.mouseDown(rowByText('New Session'))
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith('/chat'))
-    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    window.history.replaceState(null, '', '/settings')
+    try {
+      openingDispatch({ slot: 'slot-1', requestId: 'req-1' })
+      const onClose = mount()
+      fireEvent.mouseDown(rowByText('New Session'))
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith('/chat'))
+      await waitFor(() => expect(onClose).toHaveBeenCalled())
+    } finally {
+      window.history.replaceState(null, '', '/')
+    }
   })
 
   it('stays put when the user opened another session during the create', async () => {

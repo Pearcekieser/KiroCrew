@@ -7,10 +7,13 @@
  *   - Alt+Shift+N brings the user to the new chat from another page, but not
  *     after they went to another page while the create ran, and not by an
  *     extra `/chat` push when they are already on the chat page.
- *   - Two Alt+Shift+N presses, or two Shift+clicks on the embed "+", during one
- *     create make one session.
+ *   - A popout or embed chat rewrites its own slug for the new session, so a
+ *     create started there is still shown: it stages its token and focuses the
+ *     composer, and nothing navigates the frame to `/chat`.
+ *   - Two separate Alt+Shift+N presses during one create make two sessions.
  *   - An embed Shift+click create the user switched tabs away from adds its tab
- *     behind the one the user picked.
+ *     behind the one the user picked, or fills the Sessions tab the user
+ *     opened. A drag reorder of the user's own tab is not a switch.
  *
  * The create runs through the real `createSlot` thunk with the API held
  * pending, so the switched-away decision is the reducer's own.
@@ -45,6 +48,12 @@ vi.mock('../hooks/useInstanceShortcuts', () => ({ useInstanceShortcuts: () => {}
 vi.mock('../hooks/useAutoConnectInstances', () => ({ useAutoConnectInstances: () => {} }))
 vi.mock('../hooks/useCommandPalette', () => ({ useCommandPalette: () => ({ open: false, setOpen: () => {} }) }))
 vi.mock('../providers/context', () => ({ useProvider: () => ({}) }))
+// Alt+Shift+N's composer focus, which it asks for only when the create is shown.
+const focusSpy = vi.hoisted(() => vi.fn())
+vi.mock('../pages/chat/composerFocus', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  queryComposerOrExpand: focusSpy,
+}))
 
 import { setActiveSlot } from '../store/chatSlice'
 import { usePaletteActions } from '../components/commandPalette/paletteActions'
@@ -93,6 +102,7 @@ beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
   navigateSpy.mockClear()
+  focusSpy.mockClear()
   held = deferred<unknown>()
   mocks.createChatSlot.mockReset().mockReturnValue(held.promise)
 })
@@ -131,6 +141,36 @@ describe('New session with token', () => {
     await act(async () => { held.resolve({ key: NEW }) })
     await waitFor(() => expect(store.getState().chat.pendingInput).toBe('@zzq-prompt'))
     // Already on the chat page: no extra `/chat` entry for Back to land on.
+    expect(navigateSpy).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['popout', '/popout/chat'],
+    ['embed', '/embed/chat'],
+  ])('stages the token in a %s chat that rewrites its own slug, without leaving it', async (_frame, page) => {
+    const store = makeStore(ORIGIN)
+    goTo(`${page}/slug-a?sid=${ORIGIN}`)
+    const { result } = renderHook(() => usePaletteActions(), { wrapper: wrapper(store) })
+    act(() => result.current.newSessionWithToken('@zzq-prompt'))
+    await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalledTimes(1))
+    goTo(`${page}/new-session?sid=${NEW}`)
+    await act(async () => { held.resolve({ key: NEW }) })
+    await waitFor(() => expect(store.getState().chat.pendingInput).toBe('@zzq-prompt'))
+    // The frame's router would redirect `/chat` out of the chat it shows.
+    expect(navigateSpy).not.toHaveBeenCalled()
+  })
+
+  it('stages the token when an embed Sessions tab is filled with the new session', async () => {
+    const store = makeStore(ORIGIN)
+    goTo('/embed/sessions')
+    const { result } = renderHook(() => usePaletteActions(), { wrapper: wrapper(store) })
+    act(() => result.current.newSessionWithToken('@zzq-prompt'))
+    await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalledTimes(1))
+    // The tab strip routes the Sessions tab to the session the create opened.
+    goTo(`/embed/chat/${NEW}?sid=${NEW}`)
+    await act(async () => { held.resolve({ key: NEW }) })
+    await waitFor(() => expect(store.getState().chat.pendingInput).toBe('@zzq-prompt'))
+    // The embed frame's router would redirect `/chat` back to its Sessions list.
     expect(navigateSpy).not.toHaveBeenCalled()
   })
 
@@ -183,30 +223,44 @@ describe('Alt+Shift+N', () => {
     expect(navigateSpy).not.toHaveBeenCalled()
   })
 
-  it('makes one session for two presses during one create', async () => {
+  it('focuses the new chat in a popout without navigating the popout', async () => {
+    goTo(`/popout/chat/slug-a?sid=${ORIGIN}`)
+    const store = harness()
+    press()
+    await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalledTimes(1))
+    // The popout's URL sync names the new session.
+    goTo(`/popout/chat/new-session?sid=${NEW}`)
+    await act(async () => { held.resolve({ key: NEW }) })
+    await waitFor(() => expect(focusSpy).toHaveBeenCalled())
+    expect(store.getState().chat.activeSlot).toBe(NEW)
+    expect(navigateSpy).not.toHaveBeenCalled()
+  })
+
+  it('makes a session for each of two separate presses during one create', async () => {
     goTo(`/chat?sid=${ORIGIN}`)
     harness()
     press()
     await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalledTimes(1))
     press()
-    await act(async () => { held.resolve({ key: NEW }) })
-    expect(mocks.createChatSlot).toHaveBeenCalledTimes(1)
-    // Once the create settles, the next press creates again.
-    mocks.createChatSlot.mockResolvedValue({ key: 'chat-new-2' })
-    press()
     await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalledTimes(2))
+    await act(async () => { held.resolve({ key: NEW }) })
   })
 })
 
 describe('embed tab strip Shift+click "+"', () => {
-  function mount() {
-    const store = makeStore(ORIGIN)
-    goTo(`/embed/chat/${ORIGIN}`)
+  function mount(tabs?: string[], activeSlot: string | null = ORIGIN) {
+    if (tabs) {
+      sessionStorage.setItem('kirocrew-embed-tabs', JSON.stringify(tabs))
+      sessionStorage.setItem('kirocrew-embed-active-index', '0')
+    }
+    const store = makeStore(activeSlot)
+    const entry = activeSlot ? `/embed/chat/${activeSlot}?sid=${activeSlot}` : '/embed/sessions'
+    goTo(entry)
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
     render(
       <Provider store={store}>
         <QueryClientProvider client={qc}>
-          <MemoryRouter initialEntries={[`/embed/chat/${ORIGIN}?sid=${ORIGIN}`]}>
+          <MemoryRouter initialEntries={[entry]}>
             <EmbedTabStrip />
           </MemoryRouter>
         </QueryClientProvider>
@@ -217,13 +271,81 @@ describe('embed tab strip Shift+click "+"', () => {
   }
   const shiftPlus = () => fireEvent.click(screen.getByLabelText('New tab'), { shiftKey: true })
 
-  it('makes one session for two Shift+clicks during one create', async () => {
+  const storedTabs = () => JSON.parse(sessionStorage.getItem('kirocrew-embed-tabs') ?? '[]') as string[]
+  const storedIndex = () => Number(sessionStorage.getItem('kirocrew-embed-active-index'))
+
+  it('opens the new tab when the user stayed on theirs', async () => {
     mount()
     shiftPlus()
-    shiftPlus()
     await act(async () => { held.resolve({ key: NEW }) })
-    expect(mocks.createChatSlot).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith(`/embed/chat/${NEW}?sid=${NEW}`))
+    expect(storedTabs()).toEqual([ORIGIN, NEW])
+    expect(storedIndex()).toBe(1)
+  })
+
+  it('treats a drag reorder of the user\'s own tab as staying on it', async () => {
+    mount([ORIGIN, OTHER])
+    shiftPlus()
+    await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalledTimes(1))
+    // jsdom lays every tab out at x=0, so a drop to the right of 0 lands the
+    // dragged tab last: the user's tab moves from index 0 to index 1.
+    const strip = screen.getAllByRole('tab')[0].parentElement as HTMLElement
+    fireEvent.pointerDown(screen.getAllByRole('tab')[0], { clientX: 0, pointerId: 1 })
+    fireEvent.pointerMove(strip, { clientX: 100, pointerId: 1 })
+    fireEvent.pointerUp(strip, { clientX: 100, pointerId: 1 })
+    await waitFor(() => expect(storedTabs()).toEqual([OTHER, ORIGIN]))
+    expect(storedIndex()).toBe(1)
+    navigateSpy.mockClear()
+    await act(async () => { held.resolve({ key: NEW }) })
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith(`/embed/chat/${NEW}?sid=${NEW}`))
+    expect(storedTabs()).toEqual([OTHER, ORIGIN, NEW])
+    expect(storedIndex()).toBe(2)
+  })
+
+  it('fills the Sessions tab a user opened with plain "+" during the create', async () => {
+    const store = mount()
+    shiftPlus()
+    await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByLabelText('New tab'))
+    await waitFor(() => expect(storedTabs()).toEqual([ORIGIN, '']))
+    navigateSpy.mockClear()
+    await act(async () => { held.resolve({ key: NEW }) })
+    // No slot moved, so the create opens; the user's new Sessions tab takes it.
+    expect(store.getState().chat.activeSlot).toBe(NEW)
+    await waitFor(() => expect(storedTabs()).toEqual([ORIGIN, NEW]))
+    expect(storedIndex()).toBe(1)
+    expect(storedTabs().filter(s => s === NEW)).toHaveLength(1)
+  })
+
+  it('adds the tab behind a Sessions tab opened during the first create of a fresh embed', async () => {
+    // No session was active yet, so the strip leaves the create's activation
+    // to this callback: only the origin-tab verdict keeps the user's tab.
+    mount([''], null)
+    shiftPlus()
+    await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByLabelText('New tab'))
+    await waitFor(() => expect(storedTabs()).toEqual(['', '']))
+    navigateSpy.mockClear()
+    await act(async () => { held.resolve({ key: NEW }) })
+    await waitFor(() => expect(storedTabs()).toEqual(['', '', NEW]))
+    expect(storedIndex()).toBe(1)
+    expect(navigateSpy).not.toHaveBeenCalled()
+  })
+
+  it('leaves a user who opened embedded Settings during the create on Settings', async () => {
+    mount()
+    shiftPlus()
+    await waitFor(() => expect(mocks.createChatSlot).toHaveBeenCalledTimes(1))
+    // The microphone dialog's "Open Settings" moves the route but keeps the
+    // tab object and the active index.
+    goTo('/embed/settings')
+    navigateSpy.mockClear()
+    await act(async () => { held.resolve({ key: NEW }) })
+    await waitFor(() => expect(storedTabs()).toEqual([ORIGIN, NEW]))
+    // The store opened NEW, so the strip highlights NEW's tab: Settings' Back
+    // goes to NEW, and the highlight must name it. Only the navigate is held.
+    expect(storedIndex()).toBe(1)
+    expect(navigateSpy).not.toHaveBeenCalled()
   })
 
   it('keeps the tab a user switched to during the create', async () => {
@@ -237,6 +359,6 @@ describe('embed tab strip Shift+click "+"', () => {
     await act(async () => { held.resolve({ key: NEW }) })
     expect(navigateSpy).not.toHaveBeenCalledWith(`/embed/chat/${NEW}?sid=${NEW}`)
     expect(store.getState().chat.activeSlot).toBe(OTHER)
-    expect(JSON.parse(sessionStorage.getItem('kirocrew-embed-tabs') ?? '[]')).toContain(NEW)
+    expect(storedTabs()).toContain(NEW)
   })
 })

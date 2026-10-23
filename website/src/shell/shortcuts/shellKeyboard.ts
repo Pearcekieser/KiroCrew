@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppSelector, useAppDispatch, useAppStore, store } from '../../store'
@@ -52,13 +52,8 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
   // Search Everywhere command palette — global double-Shift / ⌘K
   // trigger + open state. Mounted once at the app shell (`shell/appShell.tsx`).
   const commandPalette = useCommandPalette()
-  // Set before `mutate` and cleared on settle, because `isPending` only
-  // changes after a render: a second press during one create is dropped, so
-  // one create makes one session, the same rule as the header New button.
-  const newChatInFlightRef = useRef(false)
   const newChatMutation = useMutation({
     mutationFn: () => createChatForView(dispatch, appStore.getState, { defaultFolder: true }),
-    onSettled: () => { newChatInFlightRef.current = false },
     onSuccess: (view) => {
       // A create the user moved away from (another session, another page)
       // leaves the user there: no navigate and no composer focus.
@@ -106,11 +101,7 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
       dispatch(setAgentSwitchNotice(agentSwitchFailureMessage(error)))
     }
   }, [dispatch])
-  useKeyboardShortcuts({ onToggleShortcutsModal: toggleShortcutsModal, onNewChat: () => {
-    if (newChatInFlightRef.current) return
-    newChatInFlightRef.current = true
-    newChatMutation.mutate()
-  }, disabled: shortcutsOpen,
+  useKeyboardShortcuts({ onToggleShortcutsModal: toggleShortcutsModal, onNewChat: () => newChatMutation.mutate(), disabled: shortcutsOpen,
     onToggleFocusMode: toggleFocusMode,
     onCycleAgent: () => {
       const slots = store.getState().dashboard.slots

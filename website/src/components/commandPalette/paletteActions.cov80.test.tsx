@@ -92,15 +92,21 @@ describe('insertToken', () => {
 
 describe('newSessionWithToken', () => {
   it('creates the session first, then seeds it and navigates to chat', async () => {
-    const { result, store } = harness(null)
-    act(() => result.current.newSessionWithToken('@zzq/prompt'))
-    // Nothing is seeded or navigated until the create resolves.
-    expect(store.getState().chat.pendingInput).toBeNull()
-    expect(navigateSpy).not.toHaveBeenCalled()
+    // Asked from a page that is not a chat surface, so the create navigates.
+    window.history.replaceState(null, '', '/settings')
+    try {
+      const { result, store } = harness(null)
+      act(() => result.current.newSessionWithToken('@zzq/prompt'))
+      // Nothing is seeded or navigated until the create resolves.
+      expect(store.getState().chat.pendingInput).toBeNull()
+      expect(navigateSpy).not.toHaveBeenCalled()
 
-    await waitFor(() => expect(createSlot).toHaveBeenCalledTimes(1))
-    await waitFor(() => expect(store.getState().chat.pendingInput).toBe('@zzq/prompt'))
-    expect(navigateSpy).toHaveBeenCalledWith('/chat')
+      await waitFor(() => expect(createSlot).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(store.getState().chat.pendingInput).toBe('@zzq/prompt'))
+      expect(navigateSpy).toHaveBeenCalledWith('/chat')
+    } finally {
+      window.history.replaceState(null, '', '/')
+    }
   })
 
   it('reports a failed create and seeds nothing', async () => {
