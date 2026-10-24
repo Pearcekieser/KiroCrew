@@ -435,7 +435,7 @@ const FRAME_CASES: Array<[string, Frame[], Frame[]]> = [
       { type: 'other', data: {} },
     ] } },
   ]],
-  ['subagent status and text', [], [
+  ['subagent status and text dispatch nothing', [], [
     { type: 'subagent_status', data: { slot: ACTIVE, running: 1 } },
     { type: 'subagent_status', data: { running: 1 } },
     { type: 'subagent_text', data: { slot: ACTIVE, id: 'sa-1', text: 't' } },
@@ -1300,10 +1300,8 @@ const EXPECTED_FRAMES: Record<string, string[]> = {
     'frame',
     'cancel-frame 3',
   ],
-  "subagent status and text": [
-    'action dashboard/sseSubagentStatus {"slot":"slot-a","running":1}',
-    'action dashboard/sseSubagentText {"slot":"slot-a","id":"sa-1","text":"t"}',
-  ],
+  // Every sub-agent surface reads the chat slice's per-agent frames instead.
+  "subagent status and text dispatch nothing": [],
   "app_reload": [
     'event mc:app-reload {"app":"notes"}',
   ],
