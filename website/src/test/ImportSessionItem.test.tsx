@@ -32,7 +32,11 @@ vi.mock('../api/client', () => ({
 }))
 
 const switched = vi.hoisted(() => [] as unknown[])
-const chatState = vi.hoisted(() => ({ activeSlot: 'origin' as string | null }))
+// The fields the real `captureForkOrigin` and `forkMayOpen` read. A user's
+// switch moves `activeSlot` and counts one `activeSlotMoves`, as
+// `enterActiveSlot` does.
+const chatState = vi.hoisted(() => ({ activeSlot: 'origin' as string | null, activeSlotMoves: 0, activeSlotAutoMoves: 0 }))
+const userSwitch = (key: string) => { chatState.activeSlot = key; chatState.activeSlotMoves += 1 }
 const dispatchSpy = vi.hoisted(() => ({ current: null as null | ((a: unknown) => void) }))
 vi.mock('../store', () => ({
   useAppDispatch: () => (a: unknown) => { dispatchSpy.current?.(a); return a },
@@ -48,14 +52,17 @@ vi.mock('../store/dashboardSlice', () => ({
     : { type: 'dashboard/fetchSlots/fulfilled', meta: { requestId: 'r1', requestStatus: 'fulfilled' } }),
 }))
 const folderOpens = vi.hoisted(() => [] as unknown[])
-vi.mock('../store/chatSlice', () => ({
-  switchSlot: (arg: unknown) => { switched.push(arg); return { type: 'test/switchSlot' } },
-  // The origin rule reduced to the active slot; its move counters are pinned
-  // in createRespectsSwitchBack.test.ts.
-  captureForkOrigin: (s: { chat: { activeSlot: string | null } }) => ({ activeSlot: s.chat.activeSlot }),
-  forkMayOpen: (s: { chat: { activeSlot: string | null } }, o: { activeSlot: string | null }) => s.chat.activeSlot === o.activeSlot,
-  requestSlotFolderOpen: (arg: unknown) => { folderOpens.push(arg); return { type: 'test/requestSlotFolderOpen' } },
-}))
+vi.mock('../store/chatSlice', async () => {
+  // The real origin rule, so a switch away and back during the upload is
+  // judged by the same move count a create or fork uses.
+  const { captureForkOrigin, forkMayOpen } = await vi.importActual<typeof import('../store/chatSlice')>('../store/chatSlice')
+  return {
+    switchSlot: (arg: unknown) => { switched.push(arg); return { type: 'test/switchSlot' } },
+    captureForkOrigin,
+    forkMayOpen,
+    requestSlotFolderOpen: (arg: unknown) => { folderOpens.push(arg); return { type: 'test/requestSlotFolderOpen' } },
+  }
+})
 
 import ImportSessionItem, { ImportSessionOutcomeNotice } from '../components/ImportSessionItem'
 import { ApiError } from '../api/apiError'
@@ -122,6 +129,8 @@ describe('ImportSessionItem', () => {
     folderOpens.length = 0
     dispatchSpy.current = null
     chatState.activeSlot = 'origin'
+    chatState.activeSlotMoves = 0
+    chatState.activeSlotAutoMoves = 0
     slotRefresh.rejected = false
     window.history.pushState({}, '', '/chat')
     pickerInput()?.remove()
@@ -377,16 +386,88 @@ describe('ImportSessionItem', () => {
     await userEvent.click(screen.getByTestId('row'))
     const input = pickerInput()
     unmount()
-    chatState.activeSlot = 'opened-meanwhile'
+    userSwitch('opened-meanwhile')
 
     await userEvent.upload(input!, exportedFile())
 
-    // The list refresh is the last dispatch before the switch would run.
-    await waitFor(() => expect(dispatched.map(a => a.type)).toContain('dashboard/fetchSlots/fulfilled'))
-    await new Promise(r => setTimeout(r, 0))
-    expect(dispatched.map(a => a.type)).toContain('dashboard/addSlotOptimistic')
+    // A fresh row re-enables only once the import has settled, which is after
+    // the success handler has made or skipped the switch.
+    renderRow()
+    await waitFor(() => expect(screen.getByTestId('row')).not.toBeDisabled())
+    expect(dispatched.map(a => a.type)).toEqual(expect.arrayContaining(['dashboard/addSlotOptimistic', 'dashboard/fetchSlots/fulfilled']))
     expect(switched).toEqual([])
     expect(folderOpens).toEqual([])
+  })
+
+  it('leaves a user who switched away and back during the upload where they are', async () => {
+    // Back on the origin is still a choice made during the upload, so the
+    // import must not open over it. The active slot alone cannot tell this
+    // apart from never moving; the move count can.
+    let resolve!: (r: unknown) => void
+    mocks.importSessionFromFile.mockImplementation(() => new Promise(res => { resolve = res }))
+    const { unmount } = renderRow()
+    await userEvent.click(screen.getByTestId('row'))
+    const input = pickerInput()
+    unmount()
+    await userEvent.upload(input!, exportedFile())
+    await waitFor(() => expect(mocks.importSessionFromFile).toHaveBeenCalledTimes(1))
+
+    userSwitch('elsewhere')
+    userSwitch('origin')
+    resolve({ ok: true, key: 'imported-1', title: 'chat (from mac)', messages: 3, resume_mode: 'prefix', folder_id: 'f-imported' })
+
+    renderRow()
+    await waitFor(() => expect(screen.getByTestId('row')).not.toBeDisabled())
+    expect(chatState.activeSlot).toBe('origin')
+    expect(switched).toEqual([])
+    expect(folderOpens).toEqual([])
+  })
+
+  it('names an import that finished after the user moved away, and opens it on request', async () => {
+    // The import does not pull the user off the session they opened, and the
+    // menu has closed, so the shell notice is the only sign the import worked.
+    let resolve!: (r: unknown) => void
+    mocks.importSessionFromFile.mockImplementation(() => new Promise(res => { resolve = res }))
+    render(<ImportSessionOutcomeNotice />)
+    const { unmount } = renderRow()
+    await userEvent.click(screen.getByTestId('row'))
+    const input = pickerInput()
+    unmount()
+    await userEvent.upload(input!, exportedFile())
+    await waitFor(() => expect(mocks.importSessionFromFile).toHaveBeenCalledTimes(1))
+
+    userSwitch('elsewhere')
+    resolve({ ok: true, key: 'imported-1', title: 'chat (from mac)', messages: 3, resume_mode: 'prefix', folder_id: 'f-imported' })
+
+    expect(await screen.findByText('Imported: chat (from mac)')).toBeInTheDocument()
+    expect(chatState.activeSlot).toBe('elsewhere')
+    expect(switched).toEqual([])
+    expect(folderOpens).toEqual([])
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open' }))
+    expect(switched).toEqual([{ key: 'imported-1', keepTargetOnMissing: true }])
+    expect(folderOpens).toEqual([{ key: 'imported-1', folder_id: 'f-imported' }])
+    expect(screen.queryByText('Imported: chat (from mac)')).not.toBeInTheDocument()
+  })
+
+  it('lets the user dismiss the moved-away import notice without opening it', async () => {
+    let resolve!: (r: unknown) => void
+    mocks.importSessionFromFile.mockImplementation(() => new Promise(res => { resolve = res }))
+    render(<ImportSessionOutcomeNotice />)
+    const { unmount } = renderRow()
+    await userEvent.click(screen.getByTestId('row'))
+    const input = pickerInput()
+    unmount()
+    await userEvent.upload(input!, exportedFile())
+    await waitFor(() => expect(mocks.importSessionFromFile).toHaveBeenCalledTimes(1))
+
+    userSwitch('elsewhere')
+    resolve({ ok: true, key: 'imported-1', title: 'chat (from mac)', messages: 3, resume_mode: 'prefix', folder_id: 'f-imported' })
+
+    expect(await screen.findByText('Imported: chat (from mac)')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /dismiss/i }))
+    expect(screen.queryByText('Imported: chat (from mac)')).not.toBeInTheDocument()
+    expect(switched).toEqual([])
   })
 
   it('opens the folder path the import was filed in, and lists the row in that folder', async () => {
