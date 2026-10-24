@@ -119,6 +119,7 @@ class SubagentInfo:
     silent: bool = False  # suppress completion notification (dashboard + Slack)
     turns: int = 0
     last_tool: str = ""
+    last_tool_call_id: str = ""  # tool_call_id of last_tool; reconnect replay matches it by id
     tool_count: int = (
         0  # count of observed tool calls (incl. auto-approved); drives running-card progress
     )
