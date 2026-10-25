@@ -33,6 +33,7 @@ vi.mock('../store', () => ({
   useAppDispatch: () => (a: unknown) => holder.dispatch!(a),
   // The user stays on the origin throughout, so the import may open.
   useAppStore: () => ({ getState: () => ({ chat: { activeSlot: 'origin' } }) }),
+  useAppSelector: (sel: (s: { chat: { activeSlot: string } }) => unknown) => sel({ chat: { activeSlot: 'origin' } }),
 }))
 const switched = vi.hoisted(() => [] as unknown[])
 // The slot keys the list held at the moment each switch was built.
