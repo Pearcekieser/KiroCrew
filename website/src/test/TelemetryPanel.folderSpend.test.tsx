@@ -161,9 +161,8 @@ describe('TelemetryPanel — credits by folder', () => {
         row('Ops', 600, { folder_id: 'f-ops' }),
         row('', 1400, {
           folder_id: '',
-          capped_credits: 1234,
-          capped_turns: 56,
-          capped_limit: 7500,
+          unsorted_credits: 1234,
+          unsorted_turns: 56,
         }),
       ],
     })
@@ -175,10 +174,9 @@ describe('TelemetryPanel — credits by folder', () => {
       "Unfiled also includes 1,234 credits and 56 turns from sessions this view couldn't sort into folders.",
     )
     expect(line).not.toHaveClass('text-text')
-    expect(block.queryByText(/7,500/)).toBeNull()
   })
 
-  it('names zero-credit capped turns', async () => {
+  it('names zero-credit unsorted turns', async () => {
     // A token- or cost-only provider bills turns with no credits; those turns
     // are in Unfiled too, so the note must still say so.
     await mount({
@@ -186,9 +184,8 @@ describe('TelemetryPanel — credits by folder', () => {
         row('Ops', 600, { folder_id: 'f-ops' }),
         row('', 400, {
           folder_id: '',
-          capped_credits: 0,
-          capped_turns: 9,
-          capped_limit: 5000,
+          unsorted_credits: 0,
+          unsorted_turns: 9,
         }),
       ],
     })
@@ -196,39 +193,6 @@ describe('TelemetryPanel — credits by folder', () => {
     expect(
       within(blockOf('Credits by folder')).getByText(/also includes 0 credits and 9 turns from sessions/),
     ).toBeInTheDocument()
-  })
-
-  it('counts over-long session IDs in the same line', async () => {
-    await mount({
-      by_folder: [
-        row('Ops', 600, { folder_id: 'f-ops' }),
-        row('', 400, { folder_id: '', long_key_credits: 12, long_key_turns: 3 }),
-      ],
-    })
-    await waitFor(() => expect(screen.getByText('Credits by folder')).toBeInTheDocument())
-    expect(
-      within(blockOf('Credits by folder')).getByText(/also includes 12 credits and 3 turns from sessions/),
-    ).toBeInTheDocument()
-  })
-
-  it('sums both causes into one line', async () => {
-    await mount({
-      by_folder: [
-        row('Ops', 600, { folder_id: 'f-ops' }),
-        row('', 400, {
-          folder_id: '',
-          capped_credits: 100,
-          capped_turns: 4,
-          capped_limit: 5000,
-          long_key_credits: 12,
-          long_key_turns: 3,
-        }),
-      ],
-    })
-    await waitFor(() => expect(screen.getByText('Credits by folder')).toBeInTheDocument())
-    const block = within(blockOf('Credits by folder'))
-    expect(block.getAllByText(/^Unfiled also includes/)).toHaveLength(1)
-    expect(block.getByText(/also includes 112 credits and 7 turns from sessions/)).toBeInTheDocument()
   })
 
   it('shows no capped note when nothing was capped', async () => {
