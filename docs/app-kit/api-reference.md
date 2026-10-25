@@ -1220,7 +1220,8 @@ Use these main-package helpers in Python app backends:
 | `proxy_secret()` | `str` | Read the injected `KIROCREW_PROXY_SECRET`, or an empty string |
 | `verify_proxy_request(header, *, method, target, body, secret=None, now=None)` | `bool` | Verify the body-bound HMAC and fixed ±60-second freshness window; fail closed on malformed input |
 | `verify_proxy_principal_claim(header, *, method, target, body, replay_cache, secret=None, now=None)` | `ProxyPrincipalClaim \| None` | Verify and consume one `X-KiroCrew-Principal` claim for an app that sets `backend.signedPrincipal`. Returns `None` for any malformed, stale, mismatched or replayed claim. See [Signed principal claim](#signed-principal-claim) |
-| `ProxyPrincipalReplayCache(*, max_entries=4096)` | cache | The replay cache the verifier needs. Create one per backend process |
+| `verify_proxy_request_v2(header, nonce, *, method, target, body, replay_cache, secret=None, now=None)` | `bool` | Verify and consume one `X-KiroCrew-Proxy-V2` signature and its `X-KiroCrew-Proxy-Nonce`. Refuses a nonce it has already accepted. See [Replay-proof v2 signature](#replay-proof-v2-signature) |
+| `ProxyPrincipalReplayCache(*, max_entries=4096)` | cache | The replay cache the verifiers need. Create one per backend process |
 
 ---
 
@@ -1517,6 +1518,123 @@ the value in the `X-KiroCrew-Proxy` header (constant-time), rejecting stale time
 > HMACs fails verification against any verifier that omits the body hash, so a
 > backend that implements the HMAC itself has to be updated in lockstep with the gateway.
 
+#### Replay-proof v2 signature
+
+`X-KiroCrew-Proxy` has no nonce. Anyone who sees one signed request can send the
+same bytes to the backend port again, and a v1 verifier accepts the copy until the
+60-second window closes. To close that gap, the gateway also sends two more headers
+on every proxied request, to every app, with no manifest change:
+
+```text
+X-KiroCrew-Proxy-Nonce: <32 lowercase hex characters, fresh per request>
+X-KiroCrew-Proxy-V2: <timestamp>:<hmac-sha256>
+```
+
+The v2 HMAC uses the app secret as the key, over:
+
+```text
+v2:<timestamp>:<nonce>:<method>:<raw-target>:<sha256(body)>
+```
+
+`<timestamp>`, `<raw-target>` and `<sha256(body)>` are the same values v1 signs.
+The `v2:` prefix keeps the two MACs apart, so neither header can stand in for the
+other. A backend that accepts a request only once per nonce refuses a replay.
+
+v1 still works. `X-KiroCrew-Proxy` keeps its name, its value and its signed string,
+and a backend that does not know the new headers ignores them. Moving to v2 is
+optional and adds replay protection. The gateway strips any copy of either new
+header that the caller sent, so a page cannot pick its own nonce.
+
+A Python backend that can import `kiro_crew` verifies v2 with the gateway's helper:
+
+```python
+from kiro_crew.apps.proxy_auth import (
+    ProxyPrincipalReplayCache,
+    raw_request_target,
+    verify_proxy_request_v2,
+)
+
+proxy_replays = ProxyPrincipalReplayCache()  # one per process, not per request
+
+body = await request.read()
+if not verify_proxy_request_v2(
+    request.headers.get('X-KiroCrew-Proxy-V2', ''),
+    request.headers.get('X-KiroCrew-Proxy-Nonce', ''),
+    method=request.method,
+    target=raw_request_target(request),
+    body=body,
+    replay_cache=proxy_replays,
+):
+    return Response(status=401)
+```
+
+The cache keeps each accepted nonce until its 60-second window closes. When it is
+full, it refuses new requests instead of evicting a live nonce, because an evicted
+nonce could be replayed. Each nonce stays in the cache for 60 seconds, so the
+default `max_entries=4096` holds about 68 requests a second. Above that rate the
+verifier refuses real traffic with 401. A busier backend sets `max_entries` to at
+least 60 times its peak requests per second.
+
+A Node.js backend has no SDK package to import. This dependency-free reference
+verifier does the same checks; copy it into the backend:
+
+```js
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+
+const MAX_SKEW_SECONDS = 60;
+const NONCE_RE = /^[0-9a-f]{32}$/;
+const TIMESTAMP_RE = /^[0-9]{1,12}$/;
+
+// Create one verifier per backend process, so its nonce cache outlives each request.
+export function createProxyV2Verifier(secret, { maxEntries = 4096 } = {}) {
+  const seen = new Map(); // nonce -> expiry, in epoch seconds
+
+  // signature: the X-KiroCrew-Proxy-V2 header. nonce: X-KiroCrew-Proxy-Nonce.
+  // target: req.url, which is the raw request-target. body: the raw body as a Buffer.
+  return function verify({ method, target, body, signature, nonce, now = Date.now() / 1000 }) {
+    if (!secret || typeof signature !== 'string' || typeof nonce !== 'string') return false;
+    if (!NONCE_RE.test(nonce)) return false;
+    const sep = signature.indexOf(':');
+    if (sep < 0) return false;
+    const ts = signature.slice(0, sep);
+    const given = Buffer.from(signature.slice(sep + 1), 'utf8');
+    if (!TIMESTAMP_RE.test(ts) || Math.abs(now - Number(ts)) > MAX_SKEW_SECONDS) return false;
+
+    const bodyHash = createHash('sha256').update(body ?? Buffer.alloc(0)).digest('hex');
+    const expected = Buffer.from(
+      createHmac('sha256', secret)
+        .update(`v2:${ts}:${nonce}:${method}:${target}:${bodyHash}`)
+        .digest('hex'),
+      'utf8',
+    );
+    if (given.length !== expected.length || !timingSafeEqual(given, expected)) return false;
+
+    // Record the nonce last, so only a request that passed every check takes an entry.
+    for (const [key, expiry] of seen) if (expiry < now) seen.delete(key);
+    if (seen.has(nonce) || seen.size >= maxEntries) return false;
+    seen.set(nonce, Number(ts) + MAX_SKEW_SECONDS);
+    return true;
+  };
+}
+```
+
+Call it from the request handler after reading the whole body:
+
+```js
+const verifyProxy = createProxyV2Verifier(process.env.KIROCREW_PROXY_SECRET ?? '');
+
+if (!verifyProxy({
+  method: req.method,
+  target: req.url,
+  body: rawBody,
+  signature: req.headers['x-kirocrew-proxy-v2'],
+  nonce: req.headers['x-kirocrew-proxy-nonce'],
+})) {
+  res.writeHead(401).end();
+  return;
+}
+```
+
 #### Signed principal claim
 
 `X-KiroCrew-Proxy` proves that the gateway forwarded a request. It does not say who
@@ -1524,8 +1642,9 @@ the gateway authenticated. An app that needs to know sets
 [`backend.signedPrincipal: true`](manifest-reference.md) in its manifest. The gateway
 then adds `X-KiroCrew-Principal` to every request it proxies to that backend. An app
 without that exact opt-in receives no new header, and its `X-KiroCrew-Proxy` bytes
-do not change. The gateway strips any `X-KiroCrew-Proxy` or `X-KiroCrew-Principal`
-header the caller sent, so a backend only ever sees the gateway's own values.
+do not change. The gateway strips any `X-KiroCrew-Proxy`, `X-KiroCrew-Proxy-V2`,
+`X-KiroCrew-Proxy-Nonce` or `X-KiroCrew-Principal` header the caller sent, so a
+backend only ever sees the gateway's own values.
 
 The header value is the encoded claim, a period, and an HMAC:
 

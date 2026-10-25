@@ -4289,7 +4289,7 @@ the issue time. The wire format and the verifier's steps are in
 
 The proxy strips any caller-sent `X-KiroCrew-Proxy` and `X-KiroCrew-Principal`
 for every app, opted in or not, so a backend sees only the gateway's values. An
-app that does not opt in receives exactly the headers it received before. A
+app that does not opt in receives no principal header. A
 signer refusal returns 502 `proxy_principal_sign_failed` rather than forwarding
 an opted-in request without its claim.
 
@@ -4304,8 +4304,35 @@ that stays the backend's own check.
 The flag is part of the manifest's `backend` dict, so an admission signature
 covers it. Only the JSON boolean `true` turns it on.
 
+### 24a. Every proxied request carries a replay-proof v2 signature
+
+The v1 `X-KiroCrew-Proxy` value, `<ts>:<hmac>` over
+`<ts>:<method>:<raw target>:<sha256(body)>`, has no nonce, so a backend cannot
+refuse a copy of a request it already served. `handle_app_api_proxy` therefore
+also sends, to every app and with no manifest field, `X-KiroCrew-Proxy-Nonce`
+(`new_proxy_nonce`, 32 lowercase hex) and `X-KiroCrew-Proxy-V2`, `<ts>:<hmac>`
+over `v2:<ts>:<nonce>:<method>:<raw target>:<sha256(body)>` with the same secret
+and the same `ts`. The `v2:` prefix keeps the two MAC inputs disjoint.
+
+- v1 is byte-for-byte unchanged. Builtin and third-party verifiers that parse it
+  strictly keep working, and a backend that does not know the new headers
+  ignores them. Opting in would only delay protection, and the new headers cost
+  an unaware backend nothing, so they are always sent.
+- The proxy strips caller-sent `X-KiroCrew-Proxy-V2` and `X-KiroCrew-Proxy-Nonce`
+  for every app, like the v1 and principal headers above.
+- The nonce and a principal claim's `requestId` are independent random values of
+  one shape, checked by one helper, `_is_request_id`.
+- `verify_proxy_request_v2` fails closed on a missing secret or cache, a nonce
+  outside the one shape, a non-ASCII or over-12-digit timestamp, a timestamp
+  outside 60 seconds, and a signature mismatch, compares as bytes in constant
+  time, and consumes the nonce last. A full cache refuses instead of evicting.
+- Node backends have no SDK package. The api reference carries a dependency-free
+  reference verifier, and a test extracts that snippet and runs it under node
+  against the gateway's signer.
+
 Writers: `apps/routes_proxy.py`, `apps/proxy_auth.py`, `apps/manifest_sections.py`. Tests:
-`test/test_app_proxy_auth.py`, `test/test_app_manifest.py`,
+`test/test_app_proxy_auth.py`, `test/test_app_proxy_auth_v2.py`,
+`test/test_app_proxy_auth_v2_node_reference.py`, `test/test_app_manifest.py`,
 `test/test_gateway_appkit_endpoints_signed_proxy.py`.
 
 ## 25. `platform.os` and `platform.installMode` are closed vocabularies, refused at validation
