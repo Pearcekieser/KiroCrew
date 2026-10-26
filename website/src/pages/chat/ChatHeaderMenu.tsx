@@ -30,9 +30,9 @@ export function ChatHeaderMenu({ activeSlot, agent, onReveal, onRename, onAutoTi
   sidebarOnScreen?: boolean
   /** See SessionActionsMenu: the phone bar's ⋯ menu owns the pop-out rows. */
   omitPopout?: boolean
-  /** Phone single top bar: render the session TITLE inside the trigger, ahead of
+  /** Phone single top bar: render the session TITLE inside the trigger, after
    *  the chevron, so title and menu are one control (one tap target, chevron
-   *  flush after the last character). Absent, the trigger is the bare chevron
+   *  flush before the first character, as in the desktop header). Absent, the trigger is the bare chevron
    *  the desktop title row places beside its own rename control. */
   triggerLabel?: React.ReactNode
   /** Phone only: a first item that opens a sibling session in the on-screen
