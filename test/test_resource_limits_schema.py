@@ -251,7 +251,7 @@ class TestCgroupConsumerUnchanged:
         import kiro_crew.sandbox as sb
 
         procs, mem, weight, quota = self._limits(raw)
-        assert procs == sb._CGROUP_DEFAULT_MAX_PROCESSES
+        assert procs == sb._default_max_processes()
         assert mem == sb._default_max_memory_mb()
         assert weight == sb._CGROUP_DEFAULT_CPU_WEIGHT
         assert quota == 0  # opt-in: no CPUQuota emitted
@@ -379,7 +379,7 @@ class TestSliceConsumer:
         ):
             mem, tasks = self._limits(raw)
             assert mem == sb._default_max_total_memory_mb()
-            assert tasks == sb._CGROUP_DEFAULT_MAX_TOTAL_TASKS
+            assert tasks == sb._default_max_total_tasks()
 
 
 class TestRlimitConsumer:

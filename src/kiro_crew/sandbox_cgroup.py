@@ -52,6 +52,8 @@ _CGROUP_DEFAULT_MAX_PROCESSES = 8192  # pids.max counts TASKS (threads), not pro
 # thousands of threads -> pthread_create EAGAIN / 'unable to create native thread'
 # while the host is idle); 8192 still bounds fork bombs which spawn tens of
 # thousands of tasks near-instantly. Override via resource_limits.max_processes.
+# This is the fallback and the floor: the normal default grows with the core
+# count (_default_max_processes).
 
 # CPUWeight — proportional CPU share for agent scopes (systemd default is 100).
 # Setting 50 makes agent scopes yield to interactive work under CPU contention
@@ -478,6 +480,21 @@ def _read_resource_limits() -> ResourceLimitsConfig | None:
         return None
 
 
+def _default_max_processes() -> int:
+    """Default per-scope ``pids.max``, sized from the host.
+
+    See :func:`kiro_crew.host_task_sizing.size_scope_tasks`. Falls back to
+    :data:`_CGROUP_DEFAULT_MAX_PROCESSES` when the host cannot be read.
+    """
+    try:
+        from kiro_crew.host_task_sizing import host_task_facts, size_scope_tasks
+
+        return size_scope_tasks(host_task_facts())
+    except Exception:
+        logger.debug("scope tasks: host reading failed, using the fixed default")
+        return _CGROUP_DEFAULT_MAX_PROCESSES
+
+
 def _cgroup_limits_from_config(
     rl: ResourceLimitsConfig | None = None,
 ) -> tuple[int, int, int, int]:
@@ -488,7 +505,8 @@ def _cgroup_limits_from_config(
     falls back to the module defaults. ``0`` (or junk) means "use default" for
     the cgroup ceiling — unlike the RLIMIT path, we never leave the cgroup DoS
     ceiling unset by default (that is the whole point of this control). The
-    memory default is host-proportional (see :func:`_default_max_memory_mb`).
+    memory default is host-proportional (see :func:`_default_max_memory_mb`),
+    and so is the task default (see :func:`_default_max_processes`).
 
     ``max_cpu_percent`` is the OPT-IN hard CPU quota (``CPUQuota``): ``0``
     (the default) means "no quota property emitted at all" — hard CPU caps
@@ -498,7 +516,7 @@ def _cgroup_limits_from_config(
     *rl* is an already-parsed block (:func:`_read_resource_limits`); without
     one this reads the config itself.
     """
-    max_procs = _CGROUP_DEFAULT_MAX_PROCESSES
+    max_procs = _default_max_processes()
     max_mem_mb = _default_max_memory_mb()
     cpu_weight = _CGROUP_DEFAULT_CPU_WEIGHT
     max_cpu_percent = 0  # opt-in: 0 = emit no CPUQuota

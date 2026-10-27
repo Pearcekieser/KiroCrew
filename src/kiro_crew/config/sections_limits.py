@@ -404,7 +404,8 @@ class ResourceLimitsConfig:
             "leaves the inherited limit unchanged (the default -- see the "
             "per-UID caveat in security._RLIMIT_DEFAULTS). As the cgroup "
             "TasksMax it counts TASKS (threads) in the scope, where 0 is "
-            "rejected by systemd, so 0 or unset means the module default.",
+            "rejected by systemd, so 0 or unset sizes it from the host: "
+            "128 per CPU, at least 8192 and at most the slice ceiling.",
             nullable=True,
         ),
     )
@@ -469,8 +470,12 @@ class ResourceLimitsConfig:
         metadata=_meta(
             "Max total processes",
             "cgroup TasksMax for the whole agents SLICE, counting tasks "
-            "(threads) across every agent tree. 0 or unset uses the module "
-            "default; the aggregate ceiling is never left unset where a "
+            "(threads) across every agent tree. 0 or unset sizes it from the "
+            "host: 512 tasks for every 512 MB of the slice's memory ceiling "
+            "plus one scope ceiling, so legitimate load reaches max_total_memory_mb "
+            "first. At least 32768, at most half the tightest of kernel.pid_max, "
+            "kernel.threads-max and the user slice's TasksMax; kirocrew doctor "
+            "shows the value and its inputs. The aggregate ceiling is never left unset where a "
             "systemd user manager is available (Linux); not enforced on "
             "Windows/macOS.",
             nullable=True,

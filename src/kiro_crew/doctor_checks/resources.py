@@ -658,6 +658,184 @@ def _doctor_acp_runtimes(issues: list[str]) -> None:
         print(line)
 
 
+# ── Task ceilings (agents slice TasksMax, per-scope TasksMax, thread pools) ──
+# Share of a live ``pids.max`` at which the slice or a scope counts as close to
+# the wall. Past it, a burst of new sessions is what makes ``clone()`` fail.
+_TASKS_TIGHT_RATIO = 0.75
+# Most scope directories read under the agents slice. A host runs a few dozen;
+# the cap keeps a leak of thousands from turning doctor into a long walk.
+_TASK_SCOPE_SCAN_CAP = 2048
+
+
+class _ScopeTasks(NamedTuple):
+    """Task counts of the live agent scopes, read from the cgroup tree."""
+
+    scopes: int
+    total: int
+    largest: int
+    near_limit: int
+
+
+def _read_scope_tasks(slice_dir: Path) -> _ScopeTasks:
+    """Every ``*.scope`` up to two levels below *slice_dir*, bounded and non-raising."""
+    count = total = largest = near = 0
+    candidates: list[Path] = []
+    try:
+        for child in slice_dir.iterdir():
+            if child.name.endswith(".scope"):
+                candidates.append(child)
+            elif child.name.endswith(".slice") and child.is_dir():
+                candidates.extend(p for p in child.iterdir() if p.name.endswith(".scope"))
+            if len(candidates) >= _TASK_SCOPE_SCAN_CAP:
+                break
+    except OSError:
+        pass
+    for scope in candidates[:_TASK_SCOPE_SCAN_CAP]:
+        current = cli_doctor.sandbox.read_cgroup_int(scope / "pids.current")
+        if current is None:
+            continue
+        limit = cli_doctor.sandbox.read_cgroup_int(scope / "pids.max")
+        count += 1
+        total += current
+        largest = max(largest, current)
+        if limit and current >= limit * _TASKS_TIGHT_RATIO:
+            near += 1
+    return _ScopeTasks(count, total, largest, near)
+
+
+def _gateway_env_value(name: str) -> str | None:
+    """*name* in the running gateway's environment; ``None`` when unset or unreadable."""
+    pid = cli_doctor._read_gateway_pid()
+    if pid is None:
+        return None
+    try:
+        raw = (_PROC_ROOT / str(pid) / "environ").read_bytes()
+    except OSError:
+        return None
+    prefix = name.encode() + b"="
+    for entry in raw.split(b"\0"):
+        if entry.startswith(prefix):
+            return entry[len(prefix) :].decode("utf-8", "replace")
+    return None
+
+
+def _task_ceiling_lines() -> list[str]:
+    """The Task ceilings rows."""
+    sizing = cli_doctor.host_task_sizing
+    facts = sizing.host_task_facts()
+    rl = cli_doctor.KiroCrewConfig.load().resource_limits
+    lines = [f"  host:        {facts.describe()}"]
+
+    slice_mem = rl.max_total_memory_mb if (rl.max_total_memory_mb or 0) >= 1 else None
+    recommended_slice = sizing.size_slice_tasks(facts, slice_mem)
+    configured_slice = rl.max_total_processes if (rl.max_total_processes or 0) >= 1 else None
+    want_slice = configured_slice or recommended_slice
+    source = "config" if configured_slice else "host-sized"
+    slice_line = f"  slice:       TasksMax {want_slice} ({source})"
+    if configured_slice:
+        slice_line += f", the host-sized value would be {recommended_slice}"
+    lines.append(slice_line)
+
+    slice_dir = cli_doctor.sandbox._agents_slice_cgroup_dir()
+    scopes = _read_scope_tasks(slice_dir) if slice_dir is not None else None
+    if slice_dir is None or scopes is None:
+        lines.append("  live:        ⏹ the agents slice is not active; nothing measured")
+    else:
+        current = cli_doctor.sandbox.read_cgroup_int(slice_dir / "pids.current")
+        live_max = cli_doctor.sandbox.read_cgroup_int(slice_dir / "pids.max")
+        if current is None:
+            lines.append("  live:        ⚠️  pids.current unreadable")
+        else:
+            shown_max = "max" if live_max is None else str(live_max)
+            pct = f" ({100 * current / live_max:.0f}%)" if live_max else ""
+            lines.append(f"  live:        {current} of {shown_max} tasks{pct}")
+            if live_max and live_max < want_slice:
+                lines.append(
+                    f"               ⚠️  the slice's pids.max {live_max} is below this install's "
+                    f"{want_slice}: another gateway or pod wrote it after this one. "
+                    "Restarting this gateway writes its value again."
+                )
+            if live_max and current >= live_max * _TASKS_TIGHT_RATIO:
+                lines.append(
+                    "               ⚠️  close to the ceiling: new sessions fail to start "
+                    "(process exited) once it is reached"
+                )
+            if scopes.scopes:
+                mean = scopes.total / scopes.scopes
+                lines.append(
+                    f"  runtimes:    {scopes.scopes} scopes, {mean:.0f} tasks each on average, "
+                    f"largest {scopes.largest}"
+                )
+                if live_max and mean > 0:
+                    room = int((live_max - current) / mean)
+                    note = f"  headroom:    about {room} more runtimes at the observed average"
+                    if room < scopes.scopes:
+                        note += " ⚠️  fewer than are running now"
+                        if want_slice < recommended_slice:
+                            note += (
+                                f"; raise resource_limits.max_total_processes toward "
+                                f"{recommended_slice} or unset it"
+                            )
+                    lines.append(note)
+
+    recommended_scope = sizing.size_scope_tasks(facts, want_slice)
+    configured_scope = rl.max_processes if (rl.max_processes or 0) >= 1 else None
+    scope_value = configured_scope or recommended_scope
+    scope_source = "config" if configured_scope else "host-sized"
+    scope_line = f"  per scope:   TasksMax {scope_value} ({scope_source})"
+    if configured_scope:
+        scope_line += f", the host-sized value would be {recommended_scope}"
+    lines.append(scope_line)
+    if scopes is not None and scopes.near_limit:
+        lines.append(
+            f"               ⚠️  {scopes.near_limit} scope(s) at {_TASKS_TIGHT_RATIO:.0%} "
+            "or more of their own TasksMax"
+        )
+
+    configured_env = cli_doctor.KiroCrewConfig.load().agent.child_env_defaults
+    host_env = sizing.thread_pool_env_defaults(facts)
+    for name in sizing.THREAD_POOL_ENV:
+        inherited = _gateway_env_value(name)
+        if inherited is not None:
+            value, origin = inherited, "gateway environment"
+        elif name in configured_env:
+            value, origin = configured_env[name], "agent.child_env_defaults"
+        elif name in host_env:
+            value, origin = host_env[name], "host-sized"
+        else:
+            value, origin = "unset", "kiro-cli uses one worker per core"
+        lines.append(f"  {name}: {value} ({origin})")
+    return lines
+
+
+def _doctor_task_ceilings(issues: list[str]) -> None:
+    """Report the task ceilings in force against the host and the live agent slice.
+
+    The kernel counts threads against ``TasksMax``, so a ceiling that fits a
+    laptop fills on a many-core host where every runtime sizes its pools by core
+    count; the symptom is a session dying with ``process exited (rc=None)``.
+    This row prints the host facts, the value in force for the slice, each
+    scope and the thread-pool variables with where each came from, the live
+    usage and an estimate of how many more runtimes fit, with a warning line
+    when the slice is close to its ceiling or holds a lower one than this
+    install's. Advisory only (never appended to ``issues``), like the ACP
+    runtime census: the agents slice is shared by every gateway under this
+    user, so its live state is a fact about the host, not a fault in this
+    install. Linux only: the ceilings are cgroup v2 properties.
+    """
+    del issues  # advisory-only diagnostic; keeps the call-site signature uniform
+    if not sys.platform.startswith("linux"):
+        return
+    print("\nTask ceilings")
+    try:
+        lines = _task_ceiling_lines()
+    except Exception:
+        print("  ceilings:    ⚠️  could not read the host or the agents slice — check skipped")
+        return
+    for line in lines:
+        print(line)
+
+
 # ── Runtime tmpfs headroom (sandbox mount-source roots) ──────────────────────
 # Warn thresholds for the tmpfs roots the sandbox launcher stages bind-mount
 # sources on. Leaked ``tmp*`` mount dirs once filled ``/run/user/$UID`` until its

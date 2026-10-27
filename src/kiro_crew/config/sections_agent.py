@@ -798,10 +798,12 @@ class AgentConfig:
             "kiro-cli Child Env Defaults",
             "Environment variables given to every spawned kiro-cli process (chat "
             "sessions, background sessions and subagents) ONLY when the variable "
-            "is not already set in the environment it inherits. Empty by default. "
-            "kiro-cli sizes its thread pools by core count, so on a many-core host "
-            "running dozens of kiro-cli processes they can be capped, e.g. "
-            '{"TOKIO_WORKER_THREADS": "4", "RAYON_NUM_THREADS": "4"}. Only '
+            "is not already set in the environment it inherits. kiro-cli sizes its "
+            "thread pools by core count, and every thread counts against the agent "
+            "slice's task ceiling, so a name left out of this map defaults to "
+            "min(cpus, 4) for TOKIO_WORKER_THREADS and RAYON_NUM_THREADS; kirocrew "
+            "doctor shows the value in force. A value set here wins, e.g. "
+            '{"TOKIO_WORKER_THREADS": "8"}. Only '
             "TOKIO_WORKER_THREADS and RAYON_NUM_THREADS are accepted, each a "
             "decimal integer string from 1 to 1024; any other "
             "entry is ignored with a warning. Kiro Crew's own agent environment "

@@ -10,6 +10,12 @@ the agent-env scrub, so a default can never reintroduce a name the scrub denies.
 A default only fills a gap: a key already present in the environment the child
 inherits -- the gateway's own, or a per-session overlay -- is left as it is,
 including an explicitly empty value.
+
+Where config sets neither ``TOKIO_WORKER_THREADS`` nor ``RAYON_NUM_THREADS``,
+each gets the host-sized default from
+:func:`kiro_crew.host_task_sizing.thread_pool_env_defaults`. kiro-cli otherwise
+starts one worker per core in each pool, and every thread counts against the
+agents slice's ``TasksMax``. A configured value wins over the host default.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from collections.abc import MutableMapping
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["apply_child_env_defaults"]
+__all__ = ["apply_child_env_defaults", "effective_child_env_defaults"]
 
 
 def _configured_defaults() -> dict[str, str]:
@@ -41,11 +47,27 @@ def _configured_defaults() -> dict[str, str]:
         return {}
 
 
+def _host_defaults() -> dict[str, str]:
+    """The host-sized thread-pool defaults; empty when the host cannot be read."""
+    try:
+        from kiro_crew.host_task_sizing import thread_pool_env_defaults
+
+        return thread_pool_env_defaults()
+    except Exception:  # sizing must never break a spawn
+        logger.debug("child_env_defaults: host sizing unavailable", exc_info=True)
+        return {}
+
+
+def effective_child_env_defaults() -> dict[str, str]:
+    """Host-sized defaults overlaid by the configured map; config wins per key."""
+    return {**_host_defaults(), **_configured_defaults()}
+
+
 def apply_child_env_defaults(env: MutableMapping[str, str]) -> None:
-    """Set each configured default in *env* whose key is not already present.
+    """Set each effective default in *env* whose key is not already present.
 
     The mapping is read from config on every call. Mutates *env* in place.
     """
-    for key, value in _configured_defaults().items():
+    for key, value in effective_child_env_defaults().items():
         if key not in env:
             env[key] = value

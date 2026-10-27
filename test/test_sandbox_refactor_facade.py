@@ -289,7 +289,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
     "kiro_crew.sandbox_cgroup": tuple("""
         _CGROUP_DEFAULT_MAX_PROCESSES _CGROUP_DEFAULT_CPU_WEIGHT _CGROUP_MEMORY_FRACTION
         _CGROUP_FALLBACK_MAX_MEMORY_MB _instance_slice_token
-        _agents_slice_name _default_max_memory_mb _CGROUP_SCOPE_PROBE
+        _agents_slice_name _default_max_memory_mb _default_max_processes _CGROUP_SCOPE_PROBE
         _CGROUP_SCOPE_PROBE_SESSION _CGROUP_SCOPE_PROBE_AT _CGROUP_SCOPE_PROBE_TTL_SECONDS
         _CGROUP_SCOPE_PROBE_LOCK _CGROUP_WARNED _CGROUP_LINGER_REMEDY
         _warn_cgroup_unavailable _user_slice_controllers_path _user_bus_socket_paths
@@ -309,7 +309,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         _warn_windows_inert_resource_limits_once apply_windows_resource_ceiling
         _SCOPE_UNIT_PREFIX _SCOPE_UNIT_TOKEN_SAFE scope_unit_name cgroup_scope_argv
         name_scope_unit _CGROUP_TOTAL_MEMORY_FRACTION _CGROUP_FALLBACK_MAX_TOTAL_MEMORY_MB
-        _CGROUP_DEFAULT_MAX_TOTAL_TASKS _default_max_total_memory_mb
+        _CGROUP_DEFAULT_MAX_TOTAL_TASKS _default_max_total_tasks _default_max_total_memory_mb
         _slice_limits_from_config _SLICE_LIMITS_APPLIED ensure_agents_slice_limits
         _USER_MANAGER_CGROUP_BASE _agents_slice_cgroup_dir _read_cgroup_counters
         read_cgroup_int _SLICE_THROTTLE_PROBE_SEEN _SLICE_THROTTLE_EDGE_AT
