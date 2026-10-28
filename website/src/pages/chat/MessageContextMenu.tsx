@@ -4,6 +4,7 @@ import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, C
 import { isTouchDevice } from '../../utils/isTouchDevice'
 import { copyToClipboard } from '../../utils/clipboard'
 import { i18nT } from '../../i18n/t'
+import { useLanguageGeneration } from '../../i18n/useLanguageGeneration'
 import { safeHttpUrl } from '../../lib/safeUrl'
 
 export interface MessageMenuItem {
@@ -74,6 +75,10 @@ function selectionInside(root: HTMLElement): boolean {
  * a platform's right-click word selection can change it.
  */
 export default function MessageContextMenu({ items, children, onOpenChange, onCopyFailed, yieldToSelection = false }: { items: MessageMenuItem[]; children: ReactNode; onOpenChange?: (open: boolean) => void; onCopyFailed?: () => void; yieldToSelection?: boolean }) {
+  // Subscribes to language switches: a parent compiled by the React Compiler
+  // caches this element while its props are unchanged, so without its own
+  // subscription it would keep the previous language's text.
+  useLanguageGeneration()
   const [link, setLink] = useState<LinkTarget | null>(null)
   const [selectionHeld, setSelectionHeld] = useState(false)
   if (!items.length || isTouchDevice()) return <>{children}</>
